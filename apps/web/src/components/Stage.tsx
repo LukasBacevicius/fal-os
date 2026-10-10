@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { createCanvasApp } from '../wasm';
 import { getState, setState, useStore } from '../store';
 import { attach, CANVAS_ID, importFiles, loadSamples, restore } from '../controller';
-import { ME, simulateAgents } from '../agents';
+import { ME } from '../agents';
+import { connectHost, hostSync } from '../sync';
+import { NodeOverlays } from './NodeOverlays';
 import { Composer } from './Composer';
 import { PresenceLayer } from './PresenceLayer';
 import { Toolbar } from './Toolbar';
@@ -25,7 +27,6 @@ export function Stage() {
   const error = useStore((s) => s.error);
   const loading = useStore((s) => s.loading);
   const empty = useStore((s) => s.nodes.length === 0);
-  const simulate = useStore((s) => s.simulateAgents);
 
   // Create the app once.
   useEffect(() => {
@@ -42,7 +43,8 @@ export function Stage() {
         attach(a);
         a.resize(box.width, box.height, devicePixelRatio);
         setState({ app: a });
-        await restore(a);
+        const hosted = await connectHost(a, CANVAS_ID, { id: ME.id, name: ME.name });
+        await restore(a, hosted);
         a.start();
         setState({ loading: false });
         // `?samples`: seed an empty canvas with the generated sample media (demos, shell probes).
@@ -88,6 +90,12 @@ export function Stage() {
     const move = (e: PointerEvent) => {
       const [x, y] = pos(e);
       app.pointerMove(x, y, e.shiftKey, e.altKey, meta(e));
+      const sync = hostSync();
+      if (sync) {
+        const w = app.screenToWorld(x, y);
+        const c = app.camera() as { x: number; y: number; zoom: number; width: number; height: number };
+        sync.sendPresence({ cursor: [w[0], w[1]], viewport: [c.x, c.y, c.width / c.zoom, c.height / c.zoom] });
+      }
     };
     const up = (e: PointerEvent) => {
       const [x, y] = pos(e);
@@ -150,22 +158,6 @@ export function Stage() {
     };
   }, [app]);
 
-  // Demo agent presence.
-  useEffect(() => {
-    if (!app || !simulate) {
-      app?.setPresence([]);
-      setState({ presence: [] });
-      return;
-    }
-    return simulateAgents(
-      () => getState().nodes.filter((n) => n.kind !== 'frame' && n.w > 0),
-      (p) => {
-        app.setPresence(p);
-        setState({ presence: p });
-      },
-    );
-  }, [app, simulate]);
-
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
@@ -192,6 +184,7 @@ export function Stage() {
       onDrop={onDrop}
     >
       <canvas ref={canvas} className="stage-canvas" />
+      <NodeOverlays />
       <PresenceLayer />
       <Composer />
       {!loading && !error && empty && (

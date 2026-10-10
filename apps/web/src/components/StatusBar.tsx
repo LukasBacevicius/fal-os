@@ -7,6 +7,7 @@ export function StatusBar() {
   const frames = useStore((s) => s.stats?.frames ?? 0);
   const nodes = useStore((s) => s.nodes.length);
   const saved = useStore((s) => s.saved);
+  const conn = useStore((s) => s.conn);
   return (
     // id="stats": read by the desktop shell's FALOS_PROBE (apps/desktop).
     <div className="statusbar" id="stats">
@@ -20,7 +21,11 @@ export function StatusBar() {
       <span className="status-sep" />
       <span>{nodes} {nodes === 1 ? 'node' : 'nodes'}</span>
       <span className="status-sep" />
-      <span className={`status-save ${saved}`}>{saved === 'saving' ? 'Saving…' : saved === 'saved' ? 'Saved locally' : 'Local'}</span>
+      {conn === 'local' ? (
+        <span className={`status-save ${saved}`}>{saved === 'saving' ? 'Saving…' : saved === 'saved' ? 'Saved locally' : 'Local'}</span>
+      ) : (
+        <span className="status-save saved">{conn === 'connected' ? 'Synced with host' : 'Offline — changes sync on reconnect'}</span>
+      )}
     </div>
   );
 }

@@ -70,6 +70,8 @@ struct App {
     held_video: Option<Handle>,
     draft: Option<Draft>,
     presence: Vec<Presence>,
+    /// Soft claims from the host: node id → actor color (outlined in the overlay).
+    claims: Vec<(String, u32)>,
     transport: Box<dyn SyncTransport>,
     js_inbox: Rc<RefCell<Vec<Incoming>>>,
     sent_vv: VersionVector,
@@ -302,14 +304,31 @@ impl App {
         self.dirty = true;
     }
 
+    /// Sends local changes the host hasn't seen. While disconnected nothing is marked as sent,
+    /// so edits made offline go out after a reconnect.
     fn flush_transport(&mut self) {
-        if self.transport.connected()
-            && let Ok(bytes) = self.doc.export_updates(&self.sent_vv)
+        if !self.transport.connected() {
+            return;
+        }
+        if let Ok(bytes) = self.doc.export_updates(&self.sent_vv)
             && !bytes.is_empty()
         {
             self.transport.send(Outgoing::Update(bytes));
         }
         self.sent_vv = self.doc.vv();
+    }
+
+    /// Imports host bytes without echoing them back: ops that arrive from the host count as
+    /// sent, local pending ops stay pending.
+    fn import_remote(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let before = self.doc.vv();
+        self.doc.import(bytes).map_err(|e| e.to_string())?;
+        for (peer, counter) in self.doc.vv().iter() {
+            if before.get(peer).is_none_or(|c| c < counter) {
+                self.sent_vv.insert(*peer, *counter);
+            }
+        }
+        Ok(())
     }
 
     fn commit(&mut self, cmds: &[Command]) -> Result<TxResult, String> {
@@ -369,7 +388,20 @@ impl App {
             .filter_map(|p| Some(CursorView { world: p.cursor?, color: overlay::parse_color(&p.color, 255).unwrap_or(overlay::ACCENT) }))
             .collect();
         let dragging = self.ix.dragging();
-        overlay::build(&OverlayInput {
+        let mut prims: Vec<OverlayPrim> = self
+            .scene
+            .iter()
+            .filter(|n| n.kind == NodeKind::Frame && n.handle.is_some())
+            .map(|n| OverlayPrim::rect(n.rect, 0, rgba(255, 255, 255, 22), self.dpr))
+            .collect();
+        let pad = 4.0 * self.dpr / self.camera.zoom.max(1e-3);
+        for (node, color) in &self.claims {
+            if let Some(n) = self.scene.get(node) {
+                let r = n.rect;
+                prims.push(OverlayPrim::dashed([r[0] - pad, r[1] - pad, r[2] + 2.0 * pad, r[3] + 2.0 * pad], 0, *color, 2.0 * self.dpr));
+            }
+        }
+        prims.extend(overlay::build(&OverlayInput {
             scene: &self.scene,
             selection: &self.ix.selection,
             hover: if dragging || self.ix.tool != Tool::Select { None } else { self.ix.hover.as_deref() },
@@ -380,7 +412,8 @@ impl App {
             draft,
             cursors: &cursors,
             dpr: self.dpr,
-        })
+        }));
+        prims
     }
 
     fn with_ctx<R>(&mut self, f: impl FnOnce(&mut Interaction, &mut Ctx) -> R) -> R {
@@ -393,17 +426,24 @@ impl App {
         for e in fx {
             match e {
                 Effect::Preview(items) => {
+                    let ids: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
                     for (id, r) in items {
-                        if let Some(n) = self.scene.get_mut(&id) {
-                            n.rect = r;
-                            if let Some(h) = n.handle {
-                                self.gpu.renderer.set_rect(h, [r[0], r[1]], [r[2], r[3]]);
+                        let Some(old) = self.scene.get(&id).map(|n| n.rect) else { continue };
+                        self.preview_rect(&id, r);
+                        // Children follow a moved frame (doc positions are parent-relative).
+                        let d = [r[0] - old[0], r[1] - old[1]];
+                        if d != [0.0, 0.0] {
+                            for k in self.scene.descendants(&id).into_iter().filter(|k| !ids.contains(k)) {
+                                if let Some(kr) = self.scene.get(&k).map(|n| n.rect) {
+                                    self.preview_rect(&k, [kr[0] + d[0], kr[1] + d[1], kr[2], kr[3]]);
+                                }
                             }
                         }
                     }
                     self.dirty = true;
                 }
                 Effect::Commit(cmds) => {
+                    let cmds = self.to_parent_space(cmds);
                     let _ = self.commit(&cmds);
                 }
                 Effect::Select(ids) => {
@@ -440,6 +480,35 @@ impl App {
                 Effect::FitAll => self.fit_all(),
             }
         }
+    }
+
+    fn preview_rect(&mut self, id: &str, r: [f32; 4]) {
+        if let Some(n) = self.scene.get_mut(id) {
+            n.rect = r;
+            if let Some(h) = n.handle {
+                self.gpu.renderer.set_rect(h, [r[0], r[1]], [r[2], r[3]]);
+            }
+        }
+    }
+
+    /// Interaction works in world space; the doc stores positions relative to the parent.
+    fn to_parent_space(&self, cmds: Vec<Command>) -> Vec<Command> {
+        cmds.into_iter()
+            .map(|c| match c {
+                Command::UpdateNode { id, mut props } => {
+                    let o = self.scene.parent_origin(&id);
+                    for (k, off) in [("x", o[0]), ("y", o[1])] {
+                        if off != 0.0
+                            && let Some(v) = props.get(k).and_then(|v| v.as_f64())
+                        {
+                            props.insert(k.into(), json!((v - off as f64).round()));
+                        }
+                    }
+                    Command::UpdateNode { id, props }
+                }
+                c => c,
+            })
+            .collect()
     }
 
     fn start_draft(&mut self, node: String, region: DraftRegion) {
@@ -590,11 +659,10 @@ impl App {
         for msg in incoming {
             match msg {
                 Incoming::Update(bytes) => {
-                    if let Err(e) = self.doc.import(&bytes) {
+                    if let Err(e) = self.import_remote(&bytes) {
                         log::warn!("import failed: {e}");
                     }
                     self.sync_doc();
-                    self.sent_vv = self.doc.vv();
                 }
                 Incoming::Presence(p) => {
                     self.presence = p;
@@ -692,6 +760,18 @@ impl App {
             return;
         }
         // Nodes that were waiting for this asset get their pixels now.
+        self.refresh_asset_users(id);
+    }
+
+    fn register_remote(&mut self, id: &str, url: &str, mime: &str, name: &str, size: f64) {
+        if self.media.get(id).is_some() {
+            return;
+        }
+        self.media.insert_remote(id, url, mime, name, size);
+        self.refresh_asset_users(id);
+    }
+
+    fn refresh_asset_users(&mut self, id: &str) {
         let waiting: Vec<(Handle, SceneNode)> =
             self.scene.iter().filter(|n| n.asset.as_deref() == Some(id)).filter_map(|n| Some((n.handle?, n.clone()))).collect();
         for (h, n) in waiting {
@@ -704,6 +784,7 @@ impl App {
             };
             sink.update(h, &n, true);
         }
+        self.failed.retain(|k| k != &format!("a:{id}"));
         self.dirty = true;
     }
 
@@ -939,6 +1020,7 @@ impl CanvasApp {
                 held_video: None,
                 draft: None,
                 presence: Vec::new(),
+                claims: Vec::new(),
                 transport: Box::new(LocalOnly),
                 js_inbox: Rc::default(),
                 events: Vec::new(),
@@ -1212,7 +1294,7 @@ impl CanvasApp {
 
     #[wasm_bindgen(js_name = assetBlob)]
     pub fn asset_blob(&self, id: &str) -> Option<web_sys::Blob> {
-        self.app.borrow().media.get(id).map(|a| a.blob.clone())
+        self.app.borrow().media.get(id).and_then(|a| a.blob.clone())
     }
 
     /// Object URL of a local asset (for previews in the UI).
@@ -1224,7 +1306,7 @@ impl CanvasApp {
     /// Local assets: `[{id, mime, name, size}]`.
     pub fn assets(&self) -> JsValue {
         let a = self.app.borrow();
-        let list: Vec<Json> = a.media.assets.iter().map(|(id, e)| json!({"id": id, "mime": e.mime, "name": e.name, "size": e.blob.size()})).collect();
+        let list: Vec<Json> = a.media.assets.iter().map(|(id, e)| json!({"id": id, "mime": e.mime, "name": e.name, "size": e.size, "remote": e.blob.is_none()})).collect();
         to_js(&Json::Array(list))
     }
 
@@ -1445,8 +1527,9 @@ impl CanvasApp {
     }
 
     /// Replaces the canvas with a snapshot (local restore or a host bootstrap).
+    /// `fit` (default true) zooms to fit the loaded content.
     #[wasm_bindgen(js_name = loadSnapshot)]
-    pub fn load_snapshot(&self, bytes: &[u8]) -> Result<(), JsValue> {
+    pub fn load_snapshot(&self, bytes: &[u8], fit: Option<bool>) -> Result<(), JsValue> {
         let doc = Canvas::from_snapshot(bytes).map_err(err)?;
         let mut a = self.app.borrow_mut();
         a.cancel_draft();
@@ -1456,7 +1539,9 @@ impl CanvasApp {
         a.doc = doc;
         a.sent_vv = a.doc.vv();
         a.rebuild_scene();
-        a.fit_all();
+        if fit.unwrap_or(true) {
+            a.fit_all();
+        }
         let v = a.doc.version().to_string();
         a.emit("doc", json!({"version": v, "nodes": true, "annotations": true, "assets": true}));
         let sel = a.ix.selection.clone();
@@ -1478,9 +1563,10 @@ impl CanvasApp {
     #[wasm_bindgen(js_name = importUpdates)]
     pub fn import_updates(&self, bytes: &[u8]) -> Result<(), JsValue> {
         let mut a = self.app.borrow_mut();
-        a.doc.import(bytes).map_err(err)?;
+        a.import_remote(bytes).map_err(err)?;
         a.sync_doc();
-        a.sent_vv = a.doc.vv();
+        // A resync snapshot may add nothing, but edits made while offline must still go out.
+        a.flush_transport();
         drop(a);
         dispatch(&self.app);
         Ok(())
@@ -1515,6 +1601,33 @@ impl CanvasApp {
             let inbox = self.app.borrow().js_inbox.clone();
             inbox.borrow_mut().push(m);
         }
+    }
+
+    /// Claim outlines: `[{node, color}]` (replaces the previous list).
+    #[wasm_bindgen(js_name = setClaims)]
+    pub fn set_claims(&self, claims: JsValue) {
+        let v = from_js(&claims);
+        let mut a = self.app.borrow_mut();
+        a.claims = v
+            .as_array()
+            .map(|l| {
+                l.iter()
+                    .filter_map(|c| {
+                        let node = c["node"].as_str()?.to_string();
+                        let color = c["color"].as_str().and_then(|s| overlay::parse_color(s, 255)).unwrap_or(overlay::ACCENT);
+                        Some((node, color))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        a.dirty = true;
+    }
+
+    /// Makes an asset available by URL (served by the host) instead of a blob: images are
+    /// fetched when a tier is needed, videos stream through `<video src>` with byte ranges.
+    #[wasm_bindgen(js_name = registerRemoteAsset)]
+    pub fn register_remote_asset(&self, id: &str, url: &str, mime: &str, name: &str, size: f64) {
+        self.app.borrow_mut().register_remote(id, url, mime, name, size);
     }
 
     /// Replaces the presence list directly (local simulation, or a transport bridge).
