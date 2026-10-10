@@ -23,15 +23,14 @@ export interface State {
   /** Host connection (`local` = no host found). */
   conn: import('./sync').ConnState;
   hostAddr: string | null;
-  /** Project folder name on the host, if known. */
-  project: string | null;
-  /** Signed-in fal account, if the host reports one. */
-  account: string | null;
   /** Other sessions (agents, other humans) on the host. */
   sessions: import('./sync').SessionInfo[];
   claims: { node: string; actor: string }[];
   jobs: Record<string, import('./sync').JobInfo>;
   chat: ChatState;
+  chatOpen: boolean;
+  /** Modal overlay: command palette or the shortcut list. */
+  overlay: 'palette' | 'help' | null;
   toast: string | null;
   saved: 'idle' | 'saving' | 'saved';
 }
@@ -51,12 +50,18 @@ let state: State = {
   presence: [],
   conn: 'local',
   hostAddr: null,
-  project: null,
-  account: null,
   sessions: [],
   claims: [],
   jobs: {},
   chat: emptyChat(),
+  chatOpen: (() => {
+    try {
+      return localStorage.getItem('falos.chatClosed') !== '1';
+    } catch {
+      return true;
+    }
+  })(),
+  overlay: null,
   toast: null,
   saved: 'idle',
 };

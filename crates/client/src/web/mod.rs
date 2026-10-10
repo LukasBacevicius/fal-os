@@ -1169,6 +1169,19 @@ impl CanvasApp {
         self.app.borrow_mut().fit_all();
     }
 
+    /// Zooms to fit these nodes (with a margin), up to 200%; nothing if none exist.
+    #[wasm_bindgen(js_name = zoomToNodes)]
+    pub fn zoom_to_nodes(&self, ids: JsValue) {
+        let ids: Vec<String> = serde_json::from_value(from_js(&ids)).unwrap_or_default();
+        let mut a = self.app.borrow_mut();
+        if let Some(r) = a.scene.bounds_of(&ids) {
+            let (mx, my) = (r[2] * 0.1 + 20.0, r[3] * 0.1 + 20.0);
+            let max = 2.0 * a.dpr;
+            a.camera.fit_max([r[0] - mx, r[1] - my, r[2] + 2.0 * mx, r[3] + 2.0 * my], max);
+            a.dirty = true;
+        }
+    }
+
     /// Pans/zooms so the node is in view.
     #[wasm_bindgen(js_name = focusNode)]
     pub fn focus_node(&self, id: &str) {

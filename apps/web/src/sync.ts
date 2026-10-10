@@ -9,7 +9,7 @@ import { discoverHost, explicitHost, type HostInfo } from './host';
 import { getState, setState, toast } from './store';
 import type { CanvasApp } from './wasm';
 import type { NodeView, Presence } from './types';
-import { applyEvent, applyHistory, type Chip } from './chat';
+import { applyEvent, applyHistory, applyList, selectChat, type Chip } from './chat';
 
 /** A send that gets no chat event back within this time means no agent runtime is attached. */
 const RUNTIME_TIMEOUT_MS = 8_000;
@@ -149,13 +149,17 @@ export class HostSync {
         this.sessions = new Map((m.sessions as SessionInfo[]).map((s) => [s.id, s]));
         this.onClaims(m.claims ?? []);
         this.publishPresence();
-        // The signed-in fal account, when the host reports one.
-        const account = m.account?.email ?? m.account ?? m.user?.email ?? null;
-        if (typeof account === 'string') setState({ account });
         break;
       }
       case 'chat.history':
         setState((s) => ({ chat: applyHistory(s.chat, m.chats ?? []) }));
+        break;
+      case 'chat.list':
+        setState((s) => ({ chat: applyList(s.chat, m.chats ?? []) }));
+        break;
+      case 'chat.created':
+        if (typeof m.chat === 'string')
+          setState((s) => ({ chat: s.chat.creating ? { ...selectChat(s.chat, m.chat), creating: false, order: s.chat.order.includes(m.chat) ? s.chat.order : [...s.chat.order, m.chat] } : s.chat }));
         break;
       case 'chat.event':
         if (typeof m.chat === 'string' && m.event) setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event) }));
@@ -181,8 +185,8 @@ export class HostSync {
       case 'error': {
         const msg = String(m.message ?? '');
         // A host without chat routing rejects chat frames: no agent runtime to talk to.
-        if (/chat/i.test(msg) && getState().chat.pending) {
-          setState((s) => ({ chat: { ...s.chat, runtime: 'missing' } }));
+        if (/chat/i.test(msg)) {
+          setState((s) => ({ chat: { ...s.chat, creating: false, runtime: s.chat.pending ? 'missing' : s.chat.runtime } }));
         } else {
           toast(`host: ${msg}`);
         }
@@ -215,7 +219,26 @@ export class HostSync {
   }
 
   stopChat(chat: string) {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'chat.stop', chat }));
+    this.sendJson({ type: 'chat.stop', chat });
+  }
+
+  /** Asks the host for a new chat; `chat.created` makes it the active one. */
+  newChat() {
+    setState((s) => ({ chat: { ...selectChat(s.chat, null), creating: this.sendJson({ type: 'chat.new' }) } }));
+  }
+
+  renameChat(chat: string, title: string) {
+    this.sendJson({ type: 'chat.rename', chat, title });
+  }
+
+  archiveChat(chat: string) {
+    this.sendJson({ type: 'chat.archive', chat });
+  }
+
+  private sendJson(m: unknown): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(JSON.stringify(m));
+    return true;
   }
 
   // ---- presence ----------------------------------------------------------------------
@@ -381,7 +404,7 @@ export async function connectHost(app: CanvasApp, canvas: string, actor: { id: s
   }
   current?.stop();
   current = new HostSync(app, host, canvas, actor);
-  setState({ hostAddr: host.addr, project: host.project ? host.project.split('/').filter(Boolean).pop() ?? null : null });
+  setState({ hostAddr: host.addr });
   current.start();
   return true;
 }

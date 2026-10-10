@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useStore } from './store';
-import { TopBar } from './components/TopBar';
 import { Stage } from './components/Stage';
 import { ChatPanel } from './components/ChatPanel';
-
-const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
+import { Help, Palette } from './components/Palette';
 
 function stored(key: string, fallback: number) {
   try {
@@ -15,22 +13,12 @@ function stored(key: string, fallback: number) {
   }
 }
 
+/** Canvas + chat. Nothing else unless something needs attention. */
 export function App() {
   const toast = useStore((s) => s.toast);
+  const chatOpen = useStore((s) => s.chatOpen);
+  const overlay = useStore((s) => s.overlay);
   const [chatWidth, setChatWidth] = useState(() => stored('falos.chatWidth', 360));
-  const [chatOpen, setChatOpen] = useState(() => stored('falos.chatClosed', 0) !== 1);
-
-  // ⌘\ collapses / expands the chat panel (also while typing).
-  useEffect(() => {
-    const kd = (e: KeyboardEvent) => {
-      if ((isMac ? e.metaKey : e.ctrlKey) && e.key === '\\') {
-        e.preventDefault();
-        setChatOpen((o) => !o);
-      }
-    };
-    window.addEventListener('keydown', kd);
-    return () => window.removeEventListener('keydown', kd);
-  }, []);
 
   useEffect(() => {
     try {
@@ -43,11 +31,12 @@ export function App() {
 
   return (
     <div className="app">
-      <TopBar />
       <div className="main">
         <Stage />
         {chatOpen && <ChatPanel width={chatWidth} onResize={setChatWidth} />}
       </div>
+      {overlay === 'palette' && <Palette />}
+      {overlay === 'help' && <Help />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );

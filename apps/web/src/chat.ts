@@ -9,10 +9,13 @@ export type Chip =
   | { kind: 'spot'; node: string; x: number; y: number }
   | { kind: 'region'; node: string; box: Box }
   | { kind: 'frame'; node: string; t: number; box?: Box }
-  | { kind: 'range'; node: string; t0: number; t1: number };
+  | { kind: 'range'; node: string; t0: number; t1: number }
+  /** Another chat as context (`#title` in the input). */
+  | { kind: 'chat'; chat: string; node?: undefined };
 
 export type ChatEvent =
-  | { kind: 'user'; text: string; context?: Chip[]; author?: string }
+  | { kind: 'user'; text: string; context?: Chip[]; author?: string; from_title?: string }
+  | { kind: 'title'; text: string }
   | { kind: 'status'; state: 'running' | 'idle' | 'error'; error?: string }
   | { kind: 'text'; agent: string; delta: string }
   | { kind: 'thinking'; agent: string; delta: string }
@@ -31,6 +34,16 @@ export interface Thread {
   seq: number;
 }
 
+/** One row of the host's `chat.list`. */
+export interface ChatMeta {
+  chat: string;
+  title?: string;
+  state?: 'running' | 'idle' | 'error' | string;
+  updated?: number;
+  agents?: { agent: string; status?: string }[];
+  cost?: number;
+}
+
 /** A message sent but not yet echoed back by the host as a `user` event. */
 export interface Pending { text: string; context: Chip[]; at: number; chat: string | null }
 
@@ -44,9 +57,45 @@ export interface ChatState {
   pending: Pending | null;
   /** `missing`: a send got no answer (no agent runtime behind the host). */
   runtime: 'unknown' | 'connected' | 'missing';
+  /** The host's chat list (`chat.list`), by id. */
+  meta: Record<string, ChatMeta>;
+  /** Chats with events the user hasn't looked at. */
+  unread: Record<string, boolean>;
+  /** A `chat.new` is in flight: its `chat.created` becomes the active chat. */
+  creating: boolean;
 }
 
-export const emptyChat = (): ChatState => ({ threads: {}, order: [], active: null, chips: [], pending: null, runtime: 'unknown' });
+export const emptyChat = (): ChatState => ({
+  threads: {}, order: [], active: null, chips: [], pending: null, runtime: 'unknown', meta: {}, unread: {}, creating: false,
+});
+
+/** Host `chat.list`: replaces the metadata; unknown chats join the order (newest last). */
+export function applyList(s: ChatState, chats: ChatMeta[]): ChatState {
+  const meta: Record<string, ChatMeta> = {};
+  for (const c of chats ?? []) meta[c.chat] = c;
+  const listed = [...(chats ?? [])].sort((a, b) => (a.updated ?? 0) - (b.updated ?? 0)).map((c) => c.chat);
+  // Archived chats disappear from the list; keep only listed + locally known running ones.
+  const order = [...listed, ...s.order.filter((id) => !meta[id] && !listed.includes(id) && s.threads[id] && !chats?.length)];
+  const active = s.active && (meta[s.active] || s.threads[s.active]) ? s.active : s.active === null ? null : order[order.length - 1] ?? null;
+  return { ...s, meta, order, active, runtime: 'connected' };
+}
+
+/** Switches the shown chat (null = new chat) and clears its unread marker. */
+export function selectChat(s: ChatState, chat: string | null): ChatState {
+  const unread = { ...s.unread };
+  if (chat) delete unread[chat];
+  return { ...s, active: chat, unread };
+}
+
+/** Display title of a chat. */
+export function chatTitle(s: ChatState, chat: string): string {
+  return s.meta[chat]?.title || s.threads[chat]?.title || chat;
+}
+
+/** `headphones-ad` from a title, for `[#…]` chips and `#` completion. */
+export function slug(t: string): string {
+  return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'chat';
+}
 
 export function applyHistory(s: ChatState, chats: { chat: string; title?: string; events: (ChatEvent | { seq?: number; event: ChatEvent })[] }[]): ChatState {
   const threads: Record<string, Thread> = { ...s.threads };
@@ -66,7 +115,8 @@ export function applyEvent(s: ChatState, chat: string, seq: number | undefined, 
   const cur = s.threads[chat] ?? { chat, events: [], seq: 0 };
   if (typeof seq === 'number' && seq <= cur.seq && cur.events.length) return s;
   const t: Thread = { ...cur, events: [...cur.events, ev], seq: typeof seq === 'number' ? seq : cur.seq + 1 };
-  if (!t.title && ev.kind === 'user') t.title = String((ev as any).text ?? '').slice(0, 48);
+  if (ev.kind === 'title') t.title = String((ev as any).text ?? '');
+  else if (!t.title && ev.kind === 'user' && !String((ev as any).author ?? '').startsWith('chat:')) t.title = String((ev as any).text ?? '').slice(0, 48);
   const order = s.order.includes(chat) ? s.order : [...s.order, chat];
   let { pending, active } = s;
   // Our own message came back: the new chat (if any) becomes the active one.
@@ -76,14 +126,15 @@ export function applyEvent(s: ChatState, chat: string, seq: number | undefined, 
   } else if (pending && pending.chat === chat) {
     pending = null;
   }
-  if (active === null && !pending && !s.order.length) active = chat;
-  return { ...s, threads: { ...s.threads, [chat]: t }, order, pending, active, runtime: 'connected' };
+  if (active === null && !pending && !s.order.length && !s.creating) active = chat;
+  const unread = active === chat ? s.unread : { ...s.unread, [chat]: true };
+  return { ...s, threads: { ...s.threads, [chat]: t }, order, pending, active, unread, runtime: 'connected' };
 }
 
 // ---- transcript ------------------------------------------------------------------------
 
 export type Item =
-  | { type: 'user'; key: string; text: string; context: Chip[]; author?: string }
+  | { type: 'user'; key: string; text: string; context: Chip[]; author?: string; fromChat?: string; fromTitle?: string }
   | { type: 'text'; key: string; agent: string; text: string }
   | { type: 'thinking'; key: string; agent: string; text: string }
   | { type: 'tool'; key: string; agent: string; name: string; summary: string; state: string; nodes: string[] }
@@ -113,10 +164,13 @@ export function transcript(t: Thread | undefined): Transcript {
     const key = `${i}`;
     const last = items[items.length - 1];
     switch (e.kind) {
-      case 'user':
-        items.push({ type: 'user', key, text: String(e.text ?? ''), context: e.context ?? [], author: e.author });
+      case 'user': {
+        const author = String(e.author ?? '');
+        const fromChat = author.startsWith('chat:') ? author.slice(5) : undefined;
+        items.push({ type: 'user', key, text: String(e.text ?? ''), context: e.context ?? [], author: e.author, fromChat, fromTitle: e.from_title });
         running = true;
         break;
+      }
       case 'text':
       case 'thinking':
         if (last && (last.type === 'text' || last.type === 'thinking') && last.type === e.kind && last.agent === e.agent) last.text += e.delta ?? '';
@@ -186,7 +240,8 @@ const TAG: Record<string, string> = {
 const r2 = (v: number) => (Math.round(v * 100) / 100).toFixed(2);
 
 /** `[img hero-2]`, `[spot hero-2 0.42,0.31]`, `[frame clip-1 @3.24s box]`, … */
-export function chipLabel(c: Chip, node?: { name: string; kind: string } | null): string {
+export function chipLabel(c: Chip, node?: { name: string; kind: string } | null, chatName?: string): string {
+  if (c.kind === 'chat') return `#${slug(chatName ?? c.chat)}`;
   const name = shortName(node?.name || c.node);
   switch (c.kind) {
     case 'node':

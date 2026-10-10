@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { createCanvasApp } from '../wasm';
 import { getState, setState, useStore } from '../store';
-import { addSelectionToChat, attach, CANVAS_ID, importFiles, restore } from '../controller';
+import { attach, CANVAS_ID, importFiles, restore } from '../controller';
 import { connectHost, hostSync } from '../sync';
 import { NodeOverlays } from './NodeOverlays';
 import { PresenceLayer } from './PresenceLayer';
 import { StatusBar } from './StatusBar';
 import { TextLayer, createNote, editNode } from './TextLayer';
+import { installKeys, pointer } from '../keys';
 import { theme } from '../theme';
 
 /** The local user. The host suffixes the actor id if several browsers connect. */
@@ -30,13 +31,6 @@ function canvasSizes(wrap: HTMLElement, entry?: ResizeObserverEntry): [number, n
   return [vw, vh, Math.max(vw, Math.round(bw * dpr)), Math.max(vh, Math.round(bh * dpr)), dpr];
 }
 
-/** Last pointer position over the canvas (CSS px), for keyboard actions at the cursor. */
-let lastPointer: [number, number] | null = null;
-
-function editable(t: EventTarget | null) {
-  const el = t as HTMLElement | null;
-  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
-}
 
 /** The canvas surface: owns the wasm app, forwards input, hosts DOM overlays. */
 export function Stage() {
@@ -120,13 +114,17 @@ export function Stage() {
     };
     const meta = (e: MouseEvent | KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
     const down = (e: PointerEvent) => {
+      // The canvas isn't focusable: clicking it must still take focus away from the chat
+      // input (or a note editor) so canvas shortcuts work.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== document.body) active.blur();
       el.setPointerCapture(e.pointerId);
       const [x, y] = pos(e);
       app.pointerDown(x, y, e.button, e.shiftKey, e.altKey, meta(e));
     };
     const move = (e: PointerEvent) => {
       const [x, y] = pos(e);
-      lastPointer = [x, y];
+      pointer.at = [x, y];
       app.pointerMove(x, y, e.shiftKey, e.altKey, meta(e));
       const sync = hostSync();
       if (sync) {
@@ -188,44 +186,8 @@ export function Stage() {
     };
   }, [app]);
 
-  // Keyboard shortcuts (ignored while typing in inputs).
-  useEffect(() => {
-    if (!app) return;
-    const kd = (e: KeyboardEvent) => {
-      if (editable(e.target)) return;
-      if ((isMac ? e.metaKey : e.ctrlKey) && (e.key === 'l' || e.key === 'L')) {
-        e.preventDefault();
-        addSelectionToChat();
-        return;
-      }
-      const sel = getState().selection;
-      if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'n' || e.key === 'N')) {
-        e.preventDefault();
-        const c = getState().camera;
-        const p = lastPointer ?? [c.width / 2, c.height / 2];
-        createNote(p);
-        return;
-      }
-      if (e.key === 'Enter' && sel.length === 1 && !e.metaKey && !e.ctrlKey) {
-        const n = getState().nodes.find((x) => x.id === sel[0]);
-        if (n && (n.kind === 'note' || n.kind === 'text')) {
-          e.preventDefault();
-          editNode(n.id);
-          return;
-        }
-      }
-      if (app.keyDown(e.key, e.shiftKey, e.altKey, isMac ? e.metaKey : e.ctrlKey)) e.preventDefault();
-    };
-    const ku = (e: KeyboardEvent) => {
-      if (!editable(e.target)) app.keyUp(e.key);
-    };
-    window.addEventListener('keydown', kd);
-    window.addEventListener('keyup', ku);
-    return () => {
-      window.removeEventListener('keydown', kd);
-      window.removeEventListener('keyup', ku);
-    };
-  }, [app]);
+  // Keyboard: see keys.ts (one handler for the whole app).
+  useEffect(() => installKeys(), []);
 
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
@@ -256,7 +218,7 @@ export function Stage() {
       <TextLayer />
       <NodeOverlays />
       <PresenceLayer />
-      {!loading && !error && empty && <div className="empty faint">empty canvas · drop files to import</div>}
+      {!loading && !error && empty && <div className="empty faint">drop files or press N · ? for keys</div>}
       {error && <div className="empty">can't start the canvas: {error}</div>}
       {dragging && <div className="drop-hint">drop to import</div>}
       <StatusBar />
