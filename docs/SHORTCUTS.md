@@ -10,24 +10,41 @@ palette. The shortcuts marked "everywhere" work in those places too.
 ## App
 | Keys | Action |
 |---|---|
-| ⌘K | Command palette: actions, chats, nodes (everywhere) |
+| ⌘K | Command palette: actions, chats, nodes, "connect agent", "reduce motion" (everywhere) |
 | `?` | Shortcut list |
 | ⌘\\ | Show or hide the chat panel (everywhere) |
-| ⌘⇧\\ | Show or hide the outline of frames and groups (everywhere) |
+| ⌘⇧\\ | Show or hide layers and properties (everywhere) |
+
+## Start a chat from the canvas
+| Keys | Action |
+|---|---|
+| `/` or click `[✦]` | With a selection: open the inline prompt next to it, pre-filled with the selection as chips. Without one: focus the chat input |
+| ⏎ | In the ✦ prompt: start a **new chat** |
+| ⌘⏎ | In the ✦ prompt: send to the **current chat** |
+| ⇥ | In the ✦ prompt: move the draft and chips into the chat panel ("open in chat") |
+| Esc | Close the ✦ prompt (the draft is kept for that selection) |
+| ⌘L | Add the selection to the chat as context chips |
+| Drag a node onto the chat | Attach it as a chip (the node stays where it was) |
+| Drop or paste files on the chat | Import them as canvas nodes in empty space near the view and attach them |
+| ⌥-click / ⌥-drag | Add a spot or region on an image. On a video it adds a frame at the playhead |
 
 ## Chat
 | Keys | Action |
 |---|---|
-| ⌘L | Add the selection to the chat as context chips |
-| ⌘I or `/` | Focus the chat input (⌘I works everywhere) |
-| ⏎ or ⌘⏎ | Send. ⇧⏎ inserts a new line |
+| ⌘I | Focus the chat input (everywhere) |
+| ⏎ | Send; while the chat runs the message is queued. ⇧⏎ inserts a new line |
 | Esc | In the input: stop the run if one is running, otherwise leave the input |
-| `#` | In the input: complete a chat title and add that chat as context (`[#title]`) |
+| `@` / `#` | In the input: mention a node / another chat |
 | ⌫ | In an empty input: remove the last chip |
+| 1…9 | In an empty input: answer the agent's question with that option |
+| ⌘. | Agent for the next message: opus / fal / codex (everywhere) |
 | ⌘N or ⌃N | New chat (everywhere) |
-| ⌘⇧[ ⌘⇧] or ⌃⇧[ ⌃⇧] | Previous or next chat (everywhere) |
-| ⌘1…9 or ⌃1…9 | Switch to chat 1…9 (everywhere) |
-| ⌥-click / ⌥-drag | Add a spot or region on an image. On a video it adds a frame at the playhead |
+| ⌘Y or ⌃Y | All chats (history): search, ⏎ open as a tab, `d` delete, `a` archive, Esc back (everywhere) |
+| ⌘⇧[ ⌘⇧] or ⌃⇧[ ⌃⇧] | Previous or next tab (everywhere) |
+| ⌘1…9 or ⌃1…9 | Switch to tab 1…9; hold ⌘ to see the numbers (everywhere) |
+| ← → / ⏎ | On a focused tab: move between tabs / open |
+| ⌘⌫ | On a focused tab: delete the chat (asks `[y/n]`) |
+| Double-click a tab | Rename. Right-click: rename, close, archive, delete |
 
 ## Canvas
 | Keys | Action |
@@ -40,29 +57,38 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | ⌘A | Select all |
 | Esc | Deselect |
 | ⌘D | Duplicate |
-| ⌘G / ⌘⇧G | Group the selection / ungroup. Children keep their place, and a group always hugs its children |
+| ⌘G | Group the selection. A group always hugs its children |
+| ⌘⌥G | Frame the selection (a titled frame with padding) |
+| ⌘⇧G | Ungroup (children keep their place) |
 | Click / double-click / Esc | A click on something inside a group selects the group. Double-click enters the group, and Esc goes back up a level |
 | ⌘-click | Select inside groups directly |
 | ⌘C / ⌘V | Copy or paste nodes. Pasting images or files creates media nodes, uploaded to the host like a drop; pasting text creates a note |
 | ⌫ / Delete | Delete |
 | Arrows / ⇧Arrows | Nudge 1 px / 10 px |
-| ⌘Z / ⌘⇧Z | Undo / redo your own changes (agents' changes are theirs) |
+| ⌘Z / ⌘⇧Z | Undo / redo your own changes (agents' changes are theirs; revert an agent turn with `[revert]` in the chat) |
 | ⇧1 / ⇧2 | Fit all / zoom to the selection |
 | ⌘0 / ⌘+ / ⌘− | Zoom to 100% / zoom in / zoom out |
 | Drop files | Import |
 
+Agents never move your camera; only your own clicks (a node id, a chip, a batch line) pan.
+
+## Layers and properties (left panel)
+| Keys | Action |
+|---|---|
+| Click / ⇧-click / ⌘-click | Select / add to the selection (synced with the canvas both ways) |
+| Hover | Highlight the node on the canvas |
+| ↑ ↓ | Move the selection between rows |
+| → ← | Expand / collapse (← on a child selects its parent) |
+| ⏎ or double-click | Rename |
+| ⌫ / Delete | Delete the selection |
+| ⌘F | Filter layers by name |
+| Drag | Reorder, or drop onto a frame or group to move into it (world position is kept); drop on the chat to attach |
+| Properties fields | ⏎ applies, Esc reverts, ↑ ↓ step by 1 (⇧: 10) |
+
 ## Browser and desktop conflicts
-- Browsers keep ⌘N, ⌘1…9 and ⌘⇧[ ] for windows and tabs, so pages never receive them. Use
-  the ⌃ aliases, or the palette. In the desktop app (Tauri / WKWebView) the ⌘ forms work.
+- Browsers keep ⌘N, ⌘Y, ⌘1…9 and ⌘⇧[ ] for windows and tabs, so pages never receive them.
+  Use the ⌃ aliases, the `+` / `≡` buttons, or the palette. In the desktop app (Tauri /
+  WKWebView) the ⌘ forms work.
 - ⌘+, ⌘− and ⌘0 are taken over on the canvas, so they zoom the canvas rather than the page.
 - ⌘L, ⌘D and ⌘G are taken only while the canvas has focus (not while you type),
   so the browser's own address bar, bookmark and find shortcuts stay reachable from inputs.
-
-## Outline (left panel)
-| Keys | Action |
-|---|---|
-| Click | Select and zoom to the frame or group |
-| ⏎ or double-click | Rename |
-| ⌫ / Delete | Delete the frame or group with its contents. To keep the children, use ⌘⇧G on the canvas |
-| ↑ ↓ / → ← | Move between rows / expand or collapse |
-| Drag | Reorder, or drop onto a frame or group to move into it (world position is kept) |

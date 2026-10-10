@@ -6,6 +6,9 @@ import { connectHost, hostSync } from '../sync';
 import { NodeOverlays } from './NodeOverlays';
 import { PresenceLayer } from './PresenceLayer';
 import { StatusBar } from './StatusBar';
+import { ActivityBars } from './ActivityBars';
+import { SelectionPrompt } from './SelectionPrompt';
+import { addContext } from '../controller';
 import { TextLayer, createNote, editNode } from './TextLayer';
 import { installKeys, pointer } from '../keys';
 import { theme } from '../theme';
@@ -113,6 +116,14 @@ export function Stage() {
       return [e.clientX - r.left, e.clientY - r.top] as const;
     };
     const meta = (e: MouseEvent | KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
+    // Dragging a canvas node onto the chat panel attaches it (and puts it back).
+    let press: { x: number; y: number; node: string | null } | null = null;
+    const overChat = (e: PointerEvent) => {
+      const c = document.querySelector('.chat');
+      if (!c) return false;
+      const r = c.getBoundingClientRect();
+      return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    };
     const down = (e: PointerEvent) => {
       // The canvas isn't focusable: clicking it must still take focus away from the chat
       // input (or a note editor) so canvas shortcuts work.
@@ -121,11 +132,17 @@ export function Stage() {
       el.setPointerCapture(e.pointerId);
       const [x, y] = pos(e);
       app.pointerDown(x, y, e.button, e.shiftKey, e.altKey, meta(e));
+      const sel = getState().selection;
+      press = e.button === 0 && !e.altKey && getState().tool === 'select' && sel.length ? { x, y, node: app.hitTest(x, y) ?? null } : null;
     };
     const move = (e: PointerEvent) => {
       const [x, y] = pos(e);
       pointer.at = [x, y];
       app.pointerMove(x, y, e.shiftKey, e.altKey, meta(e));
+      if (press?.node) {
+        const over = overChat(e);
+        if (over !== getState().dragToChat) setState({ dragToChat: over });
+      }
       const sync = hostSync();
       if (sync) {
         const w = app.screenToWorld(x, y);
@@ -135,6 +152,17 @@ export function Stage() {
     };
     const up = (e: PointerEvent) => {
       const [x, y] = pos(e);
+      if (press?.node && getState().dragToChat) {
+        // Dropped on the chat: the move snaps back (zero delta) and the selection is attached.
+        app.pointerMove(press.x, press.y, false, false, false);
+        app.pointerUp(press.x, press.y, false, false, false);
+        setState({ dragToChat: false });
+        addContext(getState().selection.map((node) => ({ kind: 'node' as const, node })));
+        press = null;
+        return;
+      }
+      press = null;
+      if (getState().dragToChat) setState({ dragToChat: false });
       app.pointerUp(x, y, e.shiftKey, e.altKey, meta(e));
     };
     const leave = () => app.pointerLeave();
@@ -220,9 +248,19 @@ export function Stage() {
       <TextLayer />
       <NodeOverlays />
       <PresenceLayer />
-      {!loading && !error && empty && <div className="empty faint">drop files or press N · ? for keys</div>}
+      <SelectionPrompt />
+      {!loading && !error && empty && (
+        <div className="empty faint">
+          <div>
+            drop files or press N · ? for keys
+            <br />
+            <button className="link dim empty-connect" onClick={() => setState({ overlay: 'connect' })}>[connect your agent]</button>
+          </div>
+        </div>
+      )}
       {error && <div className="empty">can't start the canvas: {error}</div>}
       {dragging && <div className="drop-hint">drop to import</div>}
+      <ActivityBars />
       <StatusBar />
     </div>
   );

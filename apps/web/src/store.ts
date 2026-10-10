@@ -29,10 +29,36 @@ export interface State {
   jobs: Record<string, import('./sync').JobInfo>;
   chat: ChatState;
   chatOpen: boolean;
-  /** Left outline of frames/groups; null = automatic (shown when the canvas has any). */
+  /** Left layers panel; null = automatic (shown when the canvas has nodes). */
   outlineOpen: boolean | null;
-  /** Modal overlay: command palette or the shortcut list. */
-  overlay: 'palette' | 'help' | null;
+  /** Modal overlay: command palette, the shortcut list or "connect your agent". */
+  overlay: 'palette' | 'help' | 'connect' | null;
+  /** Agent activity from the host (`activity` events), newest last; expires after 30 s. */
+  activity: import('./activity').ActivityEntry[];
+  /** Static outlines instead of sweeps and pulses (persisted; defaults to the OS setting). */
+  reduceMotion: boolean;
+  /** ⌘ (Ctrl) held: tabs show their ⌘1…9 badges. */
+  modHeld: boolean;
+  /** The ✦ selection prompt is open. */
+  promptOpen: boolean;
+  /** Chat panel content: the active chat, or the full history list (⌘Y). */
+  chatView: 'chat' | 'history';
+  /** A subagent's own transcript shown in the panel (null = the main chat). */
+  subView: string | null;
+  /** Composer drafts per chat ('' key = a new chat). */
+  drafts: Record<string, string>;
+  /** Agent that drives new messages: the Opus director, the fal Agent or Codex (⌘.). */
+  driver: 'opus' | 'fal' | 'codex';
+  /** A chat waiting for the inline "delete …? [y/n]" answer. */
+  confirmDelete: string | null;
+  /** A canvas node is being dragged over the chat panel (drop attaches it). */
+  dragToChat: boolean;
+  /** "Connect your agent" progress, from real host events. */
+  connect: {
+    registered: Record<string, { ok: boolean; path?: string; error?: string }>;
+    connected: Record<string, { agentName: string; session: string }>;
+    firstWrite: Record<string, string[]>;
+  };
   toast: string | null;
   saved: 'idle' | 'saving' | 'saved';
 }
@@ -64,6 +90,32 @@ let state: State = {
     }
   })(),
   overlay: null,
+  activity: [],
+  reduceMotion: (() => {
+    try {
+      const v = localStorage.getItem('falos.reduceMotion');
+      if (v === '1' || v === '0') return v === '1';
+    } catch {
+      /* private mode */
+    }
+    return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  })(),
+  modHeld: false,
+  promptOpen: false,
+  chatView: 'chat',
+  subView: null,
+  drafts: {},
+  dragToChat: false,
+  confirmDelete: null,
+  driver: (() => {
+    try {
+      const v = localStorage.getItem('falos.driver');
+      return v === 'fal' || v === 'codex' ? v : 'opus';
+    } catch {
+      return 'opus';
+    }
+  })(),
+  connect: { registered: {}, connected: {}, firstWrite: {} },
   outlineOpen: (() => {
     try {
       const v = localStorage.getItem('falos.outline');

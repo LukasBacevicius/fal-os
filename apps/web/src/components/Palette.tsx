@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getState, setState, useStore } from '../store';
-import { chatTitle, selectChat } from '../chat';
+import { chatTitle } from '../chat';
+import { openChat, setDriver, toggleHistory } from '../chatActions';
+import { setReduceMotion } from '../activity';
+import { openPrompt } from './SelectionPrompt';
 import { focusNode, addSelectionToChat } from '../controller';
-import { cycleSelection, duplicate, groupIntoFrame, ungroup, zoomBy } from '../actions';
+import { cycleSelection, duplicate, frameSelection, groupIntoFrame, ungroup, zoomBy } from '../actions';
 import { createNote } from './TextLayer';
-import { focusChat, newChat, SHORTCUTS, toggleChat } from '../keys';
+import { focusChat, newChat, SHORTCUTS, toggleChat, toggleOutline } from '../keys';
 
 interface Entry { label: string; hint: string; run: () => void }
 
@@ -31,12 +34,19 @@ function actions(): Entry[] {
   };
   return [
     { label: 'new chat', hint: '⌘N', run: newChat },
+    { label: 'connect agent (Claude Code, Codex, Cursor, …)', hint: 'mcp', run: () => setState({ overlay: 'connect' }) },
+    { label: 'ask about the selection', hint: '/', run: openPrompt },
+    { label: 'all chats (history)', hint: '⌘Y', run: toggleHistory },
+    { label: `agent for next message: next (now ${getState().driver})`, hint: '⌘.', run: () => setDriver() },
+    { label: 'toggle layers panel', hint: '⌘⇧\\', run: toggleOutline },
+    { label: `reduce motion: ${getState().reduceMotion ? 'turn off' : 'turn on'}`, hint: 'setting', run: () => setReduceMotion(!getState().reduceMotion) },
+    { label: 'frame selection', hint: '⌘⌥G', run: frameSelection },
     { label: 'focus chat input', hint: '⌘I', run: focusChat },
     { label: 'toggle chat panel', hint: '⌘\\', run: toggleChat },
     { label: 'add selection to chat', hint: '⌘L', run: addSelectionToChat },
     { label: 'new note', hint: 'N', run: () => createNote(center()) },
     { label: 'duplicate', hint: '⌘D', run: duplicate },
-    { label: 'group into frame', hint: '⌘G', run: groupIntoFrame },
+    { label: 'group selection', hint: '⌘G', run: groupIntoFrame },
     { label: 'ungroup', hint: '⌘⇧G', run: ungroup },
     { label: 'select all', hint: '⌘A', run: () => app()?.setSelection(getState().nodes.map((n) => n.id)) },
     { label: 'select next node', hint: 'tab', run: () => cycleSelection(1) },
@@ -63,7 +73,7 @@ export function Palette() {
   const entries = useMemo(() => {
     const all: Entry[] = [
       ...actions(),
-      ...[...chat.order].reverse().map((id) => ({ label: `#${chatTitle(chat, id)}`, hint: 'chat', run: () => setState((s) => ({ chatOpen: true, chat: selectChat(s.chat, id) })) })),
+      ...[...chat.order].reverse().map((id) => ({ label: `#${chatTitle(chat, id)}`, hint: 'chat', run: () => openChat(id) })),
       ...nodes
         .filter((n) => n.kind !== 'connector')
         .map((n) => ({ label: n.name || (n.text ?? '').slice(0, 40) || n.id, hint: `${n.kind} ${n.id}`, run: () => focusNode(n.id) })),

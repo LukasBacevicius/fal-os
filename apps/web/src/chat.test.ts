@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { addChips, applyEvent, applyHistory, chipFromPick, chipLabel, emptyChat, transcript } from './chat';
+import {
+  actLabel, addChips, applyEvent, applyHistory, applyList, chipFromPick, chipLabel, cleanError, emptyChat, groupTurns, removeChat,
+  tabs, transcript, workSummary, type ChatEvent, type ChatState,
+} from './chat';
 import { timecode } from './format';
 
+const run = (events: ChatEvent[], chat = 'c1'): ChatState => {
+  let s = emptyChat();
+  events.forEach((e, i) => (s = applyEvent(s, chat, i + 1, e, 1000 * i)));
+  return s;
+};
+
 describe('chat', () => {
-  it('joins streamed text and updates tool rows in place', () => {
+  it('joins streamed text; subagent work goes to its own transcript with cards in the main one', () => {
     let s = emptyChat();
     s = { ...s, pending: { text: 'make an ad', context: [], at: 1, chat: null } };
     s = applyEvent(s, 'c1', 1, { kind: 'user', text: 'make an ad', context: [{ kind: 'node', node: 'a1' }] });
@@ -12,32 +21,111 @@ describe('chat', () => {
     s = applyEvent(s, 'c1', 2, { kind: 'status', state: 'running' });
     s = applyEvent(s, 'c1', 3, { kind: 'text', agent: 'director', delta: 'On ' });
     s = applyEvent(s, 'c1', 4, { kind: 'text', agent: 'director', delta: 'it.' });
-    s = applyEvent(s, 'c1', 5, { kind: 'agent', agent: 'generator-1', role: 'fal generator', state: 'started', status: 'hero shots' });
-    s = applyEvent(s, 'c1', 6, { kind: 'tool', agent: 'generator-1', id: 't1', name: 'generate', summary: 'flux', state: 'running' });
+    s = applyEvent(s, 'c1', 5, { kind: 'agent', agent: 'generator-1', role: 'fal generator', parent: 'director', state: 'started', status: 'hero shots' }, 10_000);
+    s = applyEvent(s, 'c1', 6, { kind: 'tool', agent: 'generator-1', parent: 'director', id: 't1', name: 'generate', summary: 'flux', state: 'running' });
     s = applyEvent(s, 'c1', 7, { kind: 'tool', agent: 'generator-1', id: 't1', name: 'generate', state: 'done', nodes: ['x1'] });
     // Duplicate seq is ignored.
     s = applyEvent(s, 'c1', 7, { kind: 'tool', agent: 'generator-1', id: 't1', name: 'generate', state: 'error' });
     const t = transcript(s.threads.c1);
-    expect(t.items.map((i) => i.type)).toEqual(['user', 'text', 'agent', 'tool']);
+    expect(t.items.map((i) => i.type)).toEqual(['user', 'text', 'sub']);
     expect((t.items[1] as any).text).toBe('On it.');
-    expect((t.items[3] as any).state).toBe('done');
-    expect((t.items[3] as any).nodes).toEqual(['x1']);
     expect(t.running).toBe(true);
-    expect(t.swarm).toEqual([{ agent: 'generator-1', role: 'fal generator', status: 'hero shots' }]);
-    s = applyEvent(s, 'c1', 8, { kind: 'agent', agent: 'generator-1', state: 'done' });
-    s = applyEvent(s, 'c1', 9, { kind: 'done', summary: 'ok', nodes: ['x1'] });
-    expect(transcript(s.threads.c1).swarm).toEqual([]);
-    expect(transcript(s.threads.c1).running).toBe(false);
+    expect(t.swarm).toEqual([{ agent: 'generator-1', role: 'fal generator', status: 'hero shots', tools: 1 }]);
+    const sub = transcript(s.threads.c1, 'generator-1');
+    expect(sub.items.map((i) => i.type)).toEqual(['act']);
+    expect((sub.items[0] as any).calls[0]).toMatchObject({ state: 'done', nodes: ['x1'] });
+    s = applyEvent(s, 'c1', 8, { kind: 'agent', agent: 'generator-1', state: 'done' }, 48_000);
+    s = applyEvent(s, 'c1', 9, { kind: 'done', summary: 'On it.', nodes: ['x1'] });
+    const end = transcript(s.threads.c1);
+    expect(end.swarm).toEqual([]);
+    expect(end.running).toBe(false);
+    const card = end.items.find((i) => i.type === 'sub' && i.phase === 'end') as any;
+    expect(card).toMatchObject({ tools: 1, ms: 38_000, nodes: ['x1'] });
+    // No duplicate final text: the done line drops the summary when the director spoke.
+    expect((end.items[end.items.length - 1] as any).summary).toBe('');
+  });
+
+  it('merges consecutive calls into one past-tense line and hides housekeeping', () => {
+    const s = run([
+      { kind: 'user', text: 'go' },
+      { kind: 'tool', agent: 'director', id: 's', name: 'session', state: 'done' },
+      { kind: 'tool', agent: 'director', id: 'r1', name: 'read', state: 'done', nodes: ['a', 'b'] },
+      { kind: 'tool', agent: 'director', id: 'r2', name: 'read', state: 'done', nodes: ['c'] },
+      { kind: 'tool', agent: 'director', id: 'g1', name: 'fal_model', summary: 'fal-ai/flux/schnell · cat · ~$0.01', state: 'done', nodes: ['i1'] },
+      { kind: 'tool', agent: 'director', id: 'g2', name: 'fal_model', summary: 'fal-ai/flux/schnell · dog · ~$0.01', state: 'done', nodes: ['i2'] },
+      { kind: 'thinking_done', agent: 'director', seconds: 12 },
+    ]);
+    const t = transcript(s.threads.c1);
+    const acts = t.items.filter((i) => i.type === 'act') as any[];
+    expect(acts).toHaveLength(2);
+    expect(actLabel(acts[0], () => undefined)).toBe('looked at 3 nodes');
+    expect(actLabel(acts[1], () => 'image')).toBe('generated 2 images (fal-ai/flux/schnell)');
+    const turns = groupTurns(t.items);
+    expect(turns).toHaveLength(1);
+    expect(workSummary(turns[0].work)).toBe('thought 12s · 2 reads · 2 generations');
+  });
+
+  it('groups by turn: work, final text, done; queue, revert and errors', () => {
+    const s = run([
+      { kind: 'user', text: 'one' },
+      { kind: 'turn', turn: 'T1', state: 'start' },
+      { kind: 'text', agent: 'director', delta: 'let me look' },
+      { kind: 'tool', agent: 'director', id: 'e1', name: 'edit', state: 'done', nodes: ['n1'] },
+      { kind: 'queued', id: 'q1', text: 'two' },
+      { kind: 'queued', id: 'q2', text: 'three' },
+      { kind: 'dequeued', id: 'q2' },
+      { kind: 'text', agent: 'director', delta: 'done it' },
+      { kind: 'done', summary: 'done it', nodes: ['n1'] },
+      { kind: 'turn', turn: 'T1', state: 'end', nodes: ['n1'] },
+      { kind: 'reverted', turn: 'T1' },
+      { kind: 'status', state: 'error', error: '[ede_diagnostic] {"x":1}', actions: ['continue'] },
+    ]);
+    const t = transcript(s.threads.c1);
+    expect(t.queued).toEqual([{ id: 'q1', text: 'two' }]);
+    const [turn] = groupTurns(t.items);
+    expect(turn.work.map((w) => w.type)).toEqual(['text', 'act']);
+    expect(turn.final.map((w) => (w as any).text)).toEqual(['done it']);
+    expect(turn.done).toMatchObject({ turn: 'T1', reverted: true, nodes: ['n1'] });
+    expect(turn.errors[0].actions).toEqual(['continue']);
+    expect(cleanError(turn.errors[0].text)).toBe('the director stopped mid-step');
+  });
+
+  it('batch progress updates in place', () => {
+    const s = run([
+      { kind: 'user', text: 'pizza x200' },
+      { kind: 'batch', id: 'b1', model: 'fal-ai/flux/schnell', total: 200, done: 0, failed: 0, running: 200 },
+      { kind: 'batch', id: 'b1', model: 'fal-ai/flux/schnell', total: 200, done: 37, failed: 1, running: 162 },
+    ]);
+    const t = transcript(s.threads.c1);
+    expect(t.items.filter((i) => i.type === 'batch')).toHaveLength(1);
+    expect(t.batches[0]).toMatchObject({ done: 37, failed: 1, total: 200 });
+  });
+
+  it('tabs: open chats, running always, closed ones only in history; delete picks a neighbour', () => {
+    let s = run([{ kind: 'user', text: 'a' }], 'a');
+    s = applyEvent(s, 'b', 1, { kind: 'user', text: 'b' });
+    s = applyEvent(s, 'c', 1, { kind: 'user', text: 'c' });
+    s = applyList(s, [
+      { chat: 'a', state: 'idle', updated: 1, open: true },
+      { chat: 'b', state: 'running', updated: 2, open: false },
+      { chat: 'c', state: 'idle', updated: 3, open: false },
+    ]);
+    s = { ...s, active: 'a' };
+    expect(tabs(s)).toEqual(['a', 'b']);
+    s = removeChat(s, 'a');
+    expect(s.active).toBe('b');
+    expect(s.order).toEqual(['b', 'c']);
   });
 
   it('history accepts bare events and envelopes', () => {
     const s = applyHistory(emptyChat(), [
       { chat: 'a', title: 'A', events: [{ kind: 'user', text: 'hi' }] },
-      { chat: 'b', events: [{ seq: 4, event: { kind: 'user', text: 'yo' } }] },
+      { chat: 'b', events: [{ seq: 4, ts: 5, event: { kind: 'user', text: 'yo' } }] },
     ]);
     expect(s.order).toEqual(['a', 'b']);
     expect(s.active).toBe('b');
     expect(s.threads.b.seq).toBe(4);
+    expect(s.threads.b.events[0]._ts).toBe(5);
     expect(s.runtime).toBe('connected');
   });
 

@@ -9,6 +9,8 @@ export interface NodeView {
   kind: NodeKind;
   name: string;
   x: number; y: number; w: number; h: number;
+  rot?: number;
+  locked?: boolean;
   parent: string | null;
   depth: number;
   children: string[];
@@ -41,4 +43,10 @@ export interface Presence {
   selection?: string[];
   /** 0..1; idle cursors fade out. */
   opacity?: number;
+  session?: string;
+  /** UX-V1: the agent's chat (cursor color, click opens it), task label and state. */
+  chat?: string | null;
+  color?: string;
+  label?: string;
+  state?: string;
 }

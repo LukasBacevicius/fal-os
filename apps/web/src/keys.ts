@@ -6,8 +6,10 @@
 import { getState, setState } from './store';
 import { addSelectionToChat } from './controller';
 import { hostSync } from './sync';
-import { selectChat } from './chat';
-import { copy, cycleSelection, duplicate, groupIntoFrame, paste, ungroup, zoomBy } from './actions';
+import { selectChat, tabs } from './chat';
+import { copy, cycleSelection, duplicate, frameSelection, groupIntoFrame, paste, ungroup, zoomBy } from './actions';
+import { setDriver, toggleHistory } from './chatActions';
+import { openPrompt } from './components/SelectionPrompt';
 import { createNote, editNode } from './components/TextLayer';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
@@ -20,14 +22,22 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'app', keys: '⌘K', desc: 'command palette: actions, chats, nodes' },
   { group: 'app', keys: '?', desc: 'this list' },
   { group: 'app', keys: '⌘\\', desc: 'show / hide the chat panel' },
+  { group: 'app', keys: '⌘⇧\\', desc: 'show / hide layers and properties' },
+  { group: 'chat', keys: '/  or  click [✦]', desc: 'with a selection: ask about it (inline prompt)' },
+  { group: 'chat', keys: '⏎  ⌘⏎  ⇥', desc: 'in the ✦ prompt: new chat / current chat / open in chat' },
   { group: 'chat', keys: '⌘L', desc: 'add the selection to the chat' },
-  { group: 'chat', keys: '⌘I  or  /', desc: 'focus the chat input' },
-  { group: 'chat', keys: '⏎  /  ⌘⏎', desc: 'send (⇧⏎ new line)' },
+  { group: 'chat', keys: '⌘I  or  /', desc: 'focus the chat input (no selection)' },
+  { group: 'chat', keys: '⏎', desc: 'send (⇧⏎ new line); while running it queues' },
   { group: 'chat', keys: 'esc', desc: 'in the input: stop the run, else leave the input' },
-  { group: 'chat', keys: '#', desc: 'in the input: add another chat as context' },
+  { group: 'chat', keys: '@  #', desc: 'in the input: mention a node / another chat' },
+  { group: 'chat', keys: 'drop or paste', desc: 'images and files on the chat: import + attach' },
+  { group: 'chat', keys: '1…9', desc: 'answer an agent question (empty input)' },
+  { group: 'chat', keys: '⌘.', desc: 'agent for the next message: opus / fal / codex' },
   { group: 'chat', keys: '⌘N  or  ⌃N', desc: 'new chat' },
-  { group: 'chat', keys: '⌘⇧[ ⌘⇧]  or  ⌃⇧[ ⌃⇧]', desc: 'previous / next chat' },
-  { group: 'chat', keys: '⌘1…9  or  ⌃1…9', desc: 'switch to chat 1…9' },
+  { group: 'chat', keys: '⌘Y', desc: 'all chats (history): ⏎ open, d delete, a archive' },
+  { group: 'chat', keys: '⌘⇧[ ⌘⇧]  or  ⌃⇧[ ⌃⇧]', desc: 'previous / next tab' },
+  { group: 'chat', keys: '⌘1…9  or  ⌃1…9', desc: 'switch to tab 1…9 (hold ⌘ to see numbers)' },
+  { group: 'chat', keys: '⌘⌫', desc: 'on a focused tab: delete the chat (asks y/n)' },
   { group: 'chat', keys: '⌥ click / ⌥ drag', desc: 'add a spot / region (video: frame) on media' },
   { group: 'canvas', keys: 'V', desc: 'select tool' },
   { group: 'canvas', keys: 'H  or  hold space', desc: 'pan' },
@@ -37,10 +47,10 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: '⌘A', desc: 'select all' },
   { group: 'canvas', keys: 'esc', desc: 'deselect' },
   { group: 'canvas', keys: '⌘D', desc: 'duplicate' },
-  { group: 'canvas', keys: '⌘G  ⌘⇧G', desc: 'group / ungroup (children keep their place)' },
+  { group: 'canvas', keys: '⌘G  ⌘⌥G  ⌘⇧G', desc: 'group / frame the selection / ungroup' },
   { group: 'canvas', keys: 'double-click  esc', desc: 'enter a group / back up a level' },
   { group: 'canvas', keys: '⌘ click', desc: 'select inside groups directly' },
-  { group: 'app', keys: '⌘⇧\\', desc: 'show / hide the outline (frames and groups)' },
+  { group: 'canvas', keys: 'drag onto the chat', desc: 'attach the dragged node as a chip' },
   { group: 'canvas', keys: '⌘C  ⌘V', desc: 'copy / paste nodes; paste images and files as media' },
   { group: 'canvas', keys: '⌫', desc: 'delete' },
   { group: 'canvas', keys: 'arrows  ⇧arrows', desc: 'nudge 1 px / 10 px' },
@@ -48,6 +58,7 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: '⇧1  ⇧2', desc: 'fit all / zoom to selection' },
   { group: 'canvas', keys: '⌘0  ⌘+  ⌘−', desc: '100% / zoom in / zoom out' },
   { group: 'canvas', keys: 'drop files', desc: 'import (uploaded to the host)' },
+  { group: 'canvas', keys: '⌘F', desc: 'in layers: filter' },
 ];
 
 export function editable(t: EventTarget | null) {
@@ -63,7 +74,7 @@ export function focusChat() {
 }
 
 export function newChat() {
-  setState({ chatOpen: true });
+  setState({ chatOpen: true, chatView: 'chat', subView: null });
   const sync = hostSync();
   if (sync) sync.newChat();
   else setState((s) => ({ chat: selectChat(s.chat, null) }));
@@ -72,17 +83,17 @@ export function newChat() {
 
 export function switchChat(i: number | 'prev' | 'next') {
   const { chat } = getState();
-  const list = chat.order;
+  const list = tabs(chat);
   if (!list.length) return;
   const cur = chat.active ? list.indexOf(chat.active) : list.length;
   const idx = i === 'prev' ? Math.max(0, cur - 1) : i === 'next' ? Math.min(list.length - 1, cur + 1) : i;
   const id = list[idx];
-  if (id) setState((s) => ({ chatOpen: true, chat: selectChat(s.chat, id) }));
+  if (id) setState((s) => ({ chatOpen: true, chatView: 'chat', subView: null, chat: selectChat(s.chat, id) }));
 }
 
 export function toggleOutline() {
   setState((s) => {
-    const open = !(s.outlineOpen ?? s.nodes.some((n) => n.kind === 'frame' || n.kind === 'group'));
+    const open = !(s.outlineOpen ?? s.nodes.length > 0);
     try {
       localStorage.setItem('falos.outline', open ? '1' : '0');
     } catch {
@@ -129,6 +140,7 @@ export function installKeys(): () => void {
       e.stopPropagation();
     };
 
+    if (k === (isMac ? 'Meta' : 'Control') && !getState().modHeld) setState({ modHeld: true });
     // Global (also while typing).
     if (mod && !e.shiftKey && (k === 'k' || k === 'K')) return done(), setState({ overlay: overlay === 'palette' ? null : 'palette' });
     if (mod && e.shiftKey && (k === '\\' || k === '|')) return done(), toggleOutline();
@@ -138,16 +150,18 @@ export function installKeys(): () => void {
     if ((mod || ctrl) && e.shiftKey && (k === ']' || k === '}')) return done(), switchChat('next');
     if ((mod || ctrl) && !e.shiftKey && !e.altKey && /^[1-9]$/.test(k)) return done(), switchChat(Number(k) - 1);
     if (mod && !e.shiftKey && (k === 'i' || k === 'I')) return done(), focusChat();
+    if ((mod || ctrl) && !e.shiftKey && (k === 'y' || k === 'Y')) return done(), toggleHistory();
+    if (mod && k === '.') return done(), setDriver();
     if (overlay) return; // the palette / help own the keyboard
     if (editable(e.target) || getState().editing) return;
 
     // Canvas.
     if (!app) return;
     if (k === '?' || (k === '/' && e.shiftKey)) return done(), setState({ overlay: 'help' });
-    if (k === '/' && !mod) return done(), focusChat();
+    if (k === '/' && !mod) return done(), getState().selection.length ? openPrompt() : focusChat();
     if (mod && (k === 'l' || k === 'L')) return done(), addSelectionToChat();
     if (mod && (k === 'd' || k === 'D')) return done(), duplicate();
-    if (mod && (k === 'g' || k === 'G')) return done(), e.shiftKey ? ungroup() : groupIntoFrame();
+    if (mod && e.code === 'KeyG') return done(), e.shiftKey ? ungroup() : e.altKey ? frameSelection() : groupIntoFrame();
     if (mod && k === '0') return done(), app.zoomTo(1);
     if (mod && (k === '=' || k === '+')) return done(), zoomBy(1.25);
     if (mod && (k === '-' || k === '_')) return done(), zoomBy(0.8);
@@ -161,7 +175,9 @@ export function installKeys(): () => void {
     if (k === 'Enter' && !mod && enter()) return done();
     if (app.keyDown(k, e.shiftKey, e.altKey, mod)) done();
   };
+  const blur = () => getState().modHeld && setState({ modHeld: false });
   const ku = (e: KeyboardEvent) => {
+    if (e.key === (isMac ? 'Meta' : 'Control')) blur();
     if (!editable(e.target)) getState().app?.keyUp(e.key);
   };
   const onCopy = (e: ClipboardEvent) => {
@@ -172,11 +188,13 @@ export function installKeys(): () => void {
   };
   window.addEventListener('keydown', kd, true);
   window.addEventListener('keyup', ku);
+  window.addEventListener('blur', blur);
   document.addEventListener('copy', onCopy);
   document.addEventListener('paste', onPaste);
   return () => {
     window.removeEventListener('keydown', kd, true);
     window.removeEventListener('keyup', ku);
+    window.removeEventListener('blur', blur);
     document.removeEventListener('copy', onCopy);
     document.removeEventListener('paste', onPaste);
   };

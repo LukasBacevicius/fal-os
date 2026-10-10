@@ -1,241 +1,41 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { getState, setState, toast, useStore } from '../store';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { getState, setState, useStore } from '../store';
 import { hostSync } from '../sync';
-import { focusNode } from '../controller';
-import { chatTitle, chipLabel, selectChat, slug, transcript, type Chip, type ChatState, type Item } from '../chat';
-import { usd } from '../format';
-import { newChat } from '../keys';
+import { attachFiles } from '../controller';
+import { addChips, chatColor, chatTitle, groupTurns, isExternal, slug, transcript, type Chip } from '../chat';
+import { DRIVERS, sendChatMessage, setDriver } from '../chatActions';
+import { Chips } from './Chips';
+import { ChatHistory, ChatTabs, DeleteConfirm } from './ChatTabs';
+import { bar, Row, selectBatch, TurnView } from './Transcript';
+import { fuzzy } from './Palette';
 
-/** Sends a message on the active chat with the pending chips (plus `extra`). */
-export function sendChatMessage(text: string, extra: Chip[] = []): boolean {
-  const s = getState();
-  const sync = hostSync();
-  const context = [...s.chat.chips, ...extra];
-  if (!sync || s.conn !== 'connected') {
-    toast('chat needs a fal-os host');
-    return false;
-  }
-  if (!sync.sendChat(text, context, s.chat.active)) {
-    toast('not connected to the host');
-    return false;
-  }
-  setState((st) => ({ chat: { ...st.chat, chips: [] } }));
-  return true;
+export { sendChatMessage } from '../chatActions';
+
+/** `@query` / `#query` right before the caret, for node / chat completion. */
+function mention(text: string, caret: number): { start: number; q: string; kind: '@' | '#' } | null {
+  const m = /(^|\s)([@#])([\w.-]*)$/.exec(text.slice(0, caret));
+  return m ? { start: caret - m[3].length - 1, q: m[3].toLowerCase(), kind: m[2] as '@' | '#' } : null;
 }
 
-const openChat = (id: string) => setState((s) => ({ chat: selectChat(s.chat, id) }));
+const NODE_MIME = 'application/x-falos-node';
 
-function NodeRef({ id }: { id: string }) {
-  const exists = useStore((s) => s.nodes.some((n) => n.id === id));
-  return (
-    <button className={`link node-ref ${exists ? '' : 'gone'}`} onClick={() => exists && focusNode(id)} title={exists ? 'pan to node' : 'node not on the canvas'}>
-      {id}
-    </button>
-  );
-}
-
-function Refs({ ids }: { ids: string[] }) {
-  return <>{ids.map((n) => <Fragment key={n}> <NodeRef id={n} /></Fragment>)}</>;
-}
-
-/** Text with known node ids made clickable; light markdown (`**`, backticks) is stripped. */
-function Linked({ text, ids }: { text: string; ids: Set<string> }) {
-  const parts = text.replace(/\*\*|`/g, '').split(/([a-z0-9]{6})/i);
-  return (
-    <>
-      {parts.map((p, i) => (i % 2 === 1 && ids.has(p) ? <NodeRef key={i} id={p} /> : <Fragment key={i}>{p}</Fragment>))}
-    </>
-  );
-}
-
-function Chips({ chips, onRemove }: { chips: Chip[]; onRemove?: (i: number) => void }) {
+/** The composer: chips above a `>` textarea. Enter sends (queued by the host while the chat
+ *  runs), ⇧Enter newline, Esc stops / leaves, ⌫ on empty removes the last chip, `@` completes
+ *  nodes and `#` chats; drop or paste images and files (imported to the canvas, attached). */
+function Composer({ running, readOnly, question }: { running: boolean; readOnly: boolean; question: string[] | null }) {
+  const chat = useStore((s) => s.chat);
+  const driver = useStore((s) => s.driver);
+  const chatDriver = chat.active ? chat.meta[chat.active]?.driver : undefined;
+  useEffect(() => {
+    if (chatDriver === 'opus' || chatDriver === 'fal' || chatDriver === 'codex') setDriver(chatDriver);
+  }, [chat.active, chatDriver]);
   const nodes = useStore((s) => s.nodes);
-  const chat = useStore((s) => s.chat);
-  if (!chips.length) return null;
-  return (
-    <div className="chips">
-      {chips.map((c, i) => {
-        const n = c.kind === 'chat' ? null : nodes.find((x) => x.id === c.node);
-        const go = () => (c.kind === 'chat' ? openChat(c.chat) : n && focusNode(n.id));
-        return (
-          <span key={i} className="chip">
-            <button className="link" onClick={go}>[{chipLabel(c, n, c.kind === 'chat' ? chatTitle(chat, c.chat) : undefined)}</button>
-            {onRemove && <button className="link chip-x" onClick={() => onRemove(i)} title="remove">×</button>}
-            ]
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
-/** Housekeeping tool calls that add noise to the transcript. */
-const QUIET_TOOLS = new Set(['session', 'set_status', 'chat_title', 'get_knowledge', 'Read', 'read']);
-
-const MARK: Record<string, string> = { running: '…', started: '…', working: '…', done: '', error: ' !', failed: ' !' };
-
-function Row({ item, ids }: { item: Item; ids: Set<string> }) {
-  const [open, setOpen] = useState(false);
-  const chat = useStore((s) => s.chat);
-  switch (item.type) {
-    case 'user':
-      return (
-        <div className="msg user">
-          {item.fromChat ? (
-            <div>
-              <button className="link dim" onClick={() => openChat(item.fromChat!)}>from #{slug(item.fromTitle || chatTitle(chat, item.fromChat))}:</button> {item.text}
-            </div>
-          ) : (
-            <div><span className="dim">&gt; </span>{item.text}</div>
-          )}
-          <Chips chips={item.context} />
-        </div>
-      );
-    case 'text':
-      return (
-        <div className="msg">
-          <span className="dim">{item.agent}: </span>
-          <Linked text={item.text} ids={ids} />
-        </div>
-      );
-    case 'thinking':
-      return (
-        <div className="row" onClick={() => setOpen(!open)}>
-          <div className="row-line">· {item.agent}  thinking</div>
-          {open && <div className="row-body">{item.text}</div>}
-        </div>
-      );
-    case 'tool': {
-      if (QUIET_TOOLS.has(item.name)) return null;
-      const label = item.summary.toLowerCase().startsWith(item.name.toLowerCase()) ? item.summary : `${item.name} ${item.summary}`;
-      return (
-        <div className="row">
-          <div className="row-line" onClick={() => setOpen(!open)}>
-            · {item.agent.padEnd(10)} {label}
-            {item.nodes.length > 0 && <> →<Refs ids={item.nodes} /></>}
-            {MARK[item.state] ?? ` ${item.state}`}
-          </div>
-          {open && <div className="row-body">state: {item.state}{item.nodes.length ? `\nnodes: ${item.nodes.join(' ')}` : ''}</div>}
-        </div>
-      );
-    }
-    case 'agent':
-      return (
-        <div className="row">
-          <div className="row-line" onClick={() => setOpen(!open)}>
-            · {item.agent.padEnd(10)} {item.state}{item.status ? `  ${item.status}` : ''}
-          </div>
-          {open && <div className="row-body">{item.role || 'agent'}</div>}
-        </div>
-      );
-    case 'plan':
-      return (
-        <div className="msg plan">
-          <div className="dim">{item.agent}: plan</div>
-          {item.steps.map((s, i) => (
-            <div key={i} className={s.state === 'done' ? 'dim' : ''}>
-              {s.state === 'done' ? '[x]' : s.state === 'running' ? '[>]' : '[ ]'} {s.title}
-            </div>
-          ))}
-        </div>
-      );
-    case 'error':
-      return <div className="msg">error: {item.text}</div>;
-    case 'done':
-      return (
-        <div className="row">
-          <div className="row-line">
-            · done
-            {item.nodes.length > 0 && <> →<Refs ids={item.nodes} /></>}
-          </div>
-        </div>
-      );
-  }
-}
-
-function ago(ms?: number): string {
-  if (!ms) return '';
-  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  if (s < 86400) return `${Math.round(s / 3600)}h`;
-  return `${Math.round(s / 86400)}d`;
-}
-
-/** State of a chat: the host's list when it has one, else the local transcript. */
-function chatState(chat: ChatState, id: string): string {
-  return chat.meta[id]?.state ?? (transcript(chat.threads[id]).running ? 'running' : 'idle');
-}
-
-const GLYPH: Record<string, string> = { running: '*', idle: '·', error: '!' };
-
-/** One mono line per chat: state glyph, title, active agents, cost, last update. */
-function ChatList({ onPick }: { onPick: () => void }) {
-  const chat = useStore((s) => s.chat);
-  const ids = [...chat.order].reverse();
-  return (
-    <div className="chat-list">
-      {ids.map((id, i) => {
-        const m = chat.meta[id];
-        const agents = m?.agents?.length ?? 0;
-        return (
-          <div key={id} className={`chat-list-row ${id === chat.active ? 'active' : ''}`} onClick={() => { openChat(id); onPick(); }}>
-            <span className="glyph">{GLYPH[chatState(chat, id)] ?? '·'}</span>
-            <span className="chat-list-title">{chatTitle(chat, id)}{chat.unread[id] ? ' •' : ''}</span>
-            <span className="dim">
-              {agents ? `${agents}a ` : ''}
-              {m?.cost != null ? `${usd(m.cost)} ` : ''}
-              {ago(m?.updated)}
-            </span>
-            <span className="faint">{chat.order.length - i <= 9 ? `⌘${chat.order.length - i}` : ''}</span>
-            <button
-              className="link faint"
-              title="archive"
-              onClick={(e) => {
-                e.stopPropagation();
-                hostSync()?.archiveChat(id);
-              }}
-            >
-              ×
-            </button>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/** `#query` right before the caret, for chat completion. */
-function hashQuery(text: string, caret: number): { start: number; q: string } | null {
-  const m = /(^|\s)#([\w-]*)$/.exec(text.slice(0, caret));
-  return m ? { start: caret - m[2].length - 1, q: m[2].toLowerCase() } : null;
-}
-
-/** The right-hand chat panel (UI-SPEC.md, CHAT-PROTOCOL.md): several chats, each streaming
- *  in the background; switching is instant. */
-export function ChatPanel({ width, onResize }: { width: number; onResize: (w: number) => void }) {
-  const chat = useStore((s) => s.chat);
-  const conn = useStore((s) => s.conn);
-  const nodes = useStore((s) => s.nodes);
-  const [text, setText] = useState('');
+  const draftKey = chat.active ?? '';
+  const text = useStore((s) => s.drafts[draftKey] ?? '');
   const [caret, setCaret] = useState(0);
   const [pick, setPick] = useState(0);
-  const [listOpen, setListOpen] = useState(false);
-  const [renaming, setRenaming] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
-  const log = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
-  const thread = chat.active ? chat.threads[chat.active] : undefined;
-  const t = useMemo(() => transcript(thread), [thread]);
-  const ids = useMemo(() => new Set(nodes.map((n) => n.id)), [nodes]);
-  const title = chat.active ? chatTitle(chat, chat.active) : 'new chat';
-  const unreadElsewhere = Object.keys(chat.unread).some((id) => id !== chat.active && chat.unread[id]);
-  const running = chat.order.filter((id) => chatState(chat, id) === 'running').length;
-
-  const hq = hashQuery(text, caret);
-  const matches = hq
-    ? chat.order.filter((id) => id !== chat.active && slug(chatTitle(chat, id)).includes(hq.q)).slice(-6).reverse()
-    : [];
+  const setText = (v: string) => setState((s) => ({ drafts: { ...s.drafts, [draftKey]: v } }));
 
   useEffect(() => {
     const focus = () => input.current?.focus();
@@ -243,18 +43,7 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
     return () => window.removeEventListener('falos:focus-chat', focus);
   }, []);
 
-  // Switching chats: show the end of the log.
-  useEffect(() => {
-    stick.current = true;
-  }, [chat.active]);
-
-  // Follow the end of the log unless the user scrolled up.
-  useLayoutEffect(() => {
-    const el = log.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  });
-
-  // Auto-grow the textarea up to ~8 lines.
+  // Auto-grow up to ~8 lines.
   useLayoutEffect(() => {
     const el = input.current;
     if (!el) return;
@@ -262,22 +51,40 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
     el.style.height = `${Math.min(el.scrollHeight, 8 * 18 + 8)}px`;
   }, [text]);
 
+  const mq = mention(text, caret);
+  const matches = useMemo(() => {
+    if (!mq) return [] as { id: string; label: string; hint: string; chip: Chip }[];
+    if (mq.kind === '#') {
+      return chat.order
+        .filter((id) => id !== chat.active && (!mq.q || slug(chatTitle(chat, id)).includes(mq.q)))
+        .slice(-6)
+        .reverse()
+        .map((id) => ({ id, label: `#${slug(chatTitle(chat, id))}`, hint: 'chat', chip: { kind: 'chat', chat: id } as Chip }));
+    }
+    return nodes
+      .filter((n) => n.kind !== 'connector')
+      .map((n) => ({ n, s: mq.q ? Math.max(fuzzy(mq.q, n.name || ''), fuzzy(mq.q, n.id) - 1) : 0 }))
+      .filter((x) => x.s >= 0)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, 6)
+      .map(({ n }) => ({ id: n.id, label: `@${n.name || n.text?.slice(0, 24) || n.id}`, hint: `${n.kind} ${n.id}`, chip: { kind: 'node', node: n.id } as Chip }));
+  }, [mq?.kind, mq?.q, chat, nodes]);
+
+  const complete = (chip: Chip) => {
+    if (!mq) return;
+    const next = text.slice(0, mq.start) + text.slice(caret);
+    setText(next);
+    setState((s) => ({ chat: { ...s.chat, chips: addChips(s.chat.chips, [chip]) } }));
+    requestAnimationFrame(() => {
+      input.current?.setSelectionRange(mq.start, mq.start);
+      setCaret(mq.start);
+    });
+  };
+
   const send = () => {
     const v = text.trim();
-    if (!v) return;
+    if (!v || readOnly) return;
     if (sendChatMessage(v)) setText('');
-  };
-
-  const stop = () => {
-    if (chat.active) hostSync()?.stopChat(chat.active);
-  };
-
-  const complete = (id: string) => {
-    if (!hq) return;
-    const next = text.slice(0, hq.start) + text.slice(caret);
-    setText(next);
-    setState((s) => ({ chat: { ...s.chat, chips: [...s.chat.chips.filter((c) => !(c.kind === 'chat' && c.chat === id)), { kind: 'chat', chat: id }] } }));
-    requestAnimationFrame(() => input.current?.setSelectionRange(hq.start, hq.start));
   };
 
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -288,7 +95,12 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
     }
     if (matches.length && (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey))) {
       e.preventDefault();
-      complete(matches[Math.min(pick, matches.length - 1)]);
+      complete(matches[Math.min(pick, matches.length - 1)].chip);
+      return;
+    }
+    if (question && !text && /^[1-9]$/.test(e.key) && Number(e.key) <= question.length) {
+      e.preventDefault();
+      sendChatMessage(question[Number(e.key) - 1]);
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -296,18 +108,110 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
       send();
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      if (t.running) stop();
+      if (running && chat.active) hostSync()?.stopChat(chat.active);
       else input.current?.blur();
     } else if (e.key === 'Backspace' && !text && chat.chips.length) {
       setState((s) => ({ chat: { ...s.chat, chips: s.chat.chips.slice(0, -1) } }));
     }
   };
 
+  const removeChip = (i: number) => setState((s) => ({ chat: { ...s.chat, chips: s.chat.chips.filter((_, j) => j !== i) } }));
+  const placeholder = readOnly
+    ? 'external agent · read-only'
+    : chat.active
+      ? running ? 'queue a message…' : `message ${chatTitle(chat, chat.active)}…`
+      : 'start a chat…';
+
+  return (
+    <div className="chat-input">
+      {matches.length > 0 && (
+        <div className="complete">
+          {matches.map((m, i) => (
+            <div key={m.id} className={i === Math.min(pick, matches.length - 1) ? 'on' : 'dim'} onMouseDown={(e) => { e.preventDefault(); complete(m.chip); }}>
+              {m.label} <span className="faint">{m.hint}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <Chips chips={chat.chips} onRemove={removeChip} />
+      <div className="prompt">
+        {!readOnly && (
+          <span className="driver" title="agent for the next message (⌘.)">
+            {DRIVERS.map((d) => (
+              <button key={d} className={`link ${d === driver ? 'on' : 'faint'}`} onClick={() => setDriver(d)}>{d}</button>
+            ))}
+          </span>
+        )}
+        <span className="dim">&gt;</span>
+        <textarea
+          ref={input}
+          rows={1}
+          value={text}
+          disabled={readOnly}
+          placeholder={placeholder}
+          onChange={(e) => {
+            setText(e.target.value);
+            setCaret(e.target.selectionStart);
+            setPick(0);
+          }}
+          onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+          onKeyDown={onKey}
+          onPaste={(e) => {
+            const files = Array.from(e.clipboardData.files);
+            if (files.length) {
+              e.preventDefault();
+              void attachFiles(files);
+            }
+          }}
+          spellCheck={false}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** The right-hand chat panel (docs/UX-V1.md §2–3): tabs, the transcript (or a subagent's
+ *  own transcript, or the full history), the swarm strip, queued messages and the composer.
+ *  Images, files and canvas nodes dropped anywhere on it are attached. */
+export function ChatPanel({ width, onResize }: { width: number; onResize: (w: number) => void }) {
+  const chat = useStore((s) => s.chat);
+  const conn = useStore((s) => s.conn);
+  const nodes = useStore((s) => s.nodes);
+  const view = useStore((s) => s.chatView);
+  const subView = useStore((s) => s.subView);
+  const dragToChat = useStore((s) => s.dragToChat);
+  const [dropping, setDropping] = useState(false);
+  const [atBottom, setAtBottom] = useState(true);
+  const log = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  const thread = chat.active ? chat.threads[chat.active] : undefined;
+  const main = useMemo(() => transcript(thread), [thread]);
+  const t = useMemo(() => (subView ? transcript(thread, subView) : main), [thread, subView, main]);
+  const turns = useMemo(() => groupTurns(t.items), [t]);
+  const ids = useMemo(() => new Set(nodes.map((n) => n.id)), [nodes]);
+  const kinds = useMemo(() => new Map(nodes.map((n) => [n.id, n.kind])), [nodes]);
+  const kindOf = (id: string) => kinds.get(id);
+  const color = chatColor(chat, chat.active);
+  const readOnly = !!chat.active && isExternal(chat.active);
+  const empty = !chat.order.length && !chat.pending;
+
+  // Switching chats or views: show the end of the log.
+  useEffect(() => {
+    stick.current = true;
+    setAtBottom(true);
+  }, [chat.active, subView, view]);
+
+  // Follow output only while scrolled to the bottom.
+  useLayoutEffect(() => {
+    const el = log.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  });
+
   const startResize = (e: React.PointerEvent) => {
     e.preventDefault();
     const x0 = e.clientX;
     const w0 = width;
-    const move = (ev: PointerEvent) => onResize(Math.max(260, Math.min(720, w0 - (ev.clientX - x0))));
+    const move = (ev: PointerEvent) => onResize(Math.max(280, Math.min(760, w0 - (ev.clientX - x0))));
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
@@ -316,102 +220,137 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
     window.addEventListener('pointerup', up);
   };
 
-  const removeChip = (i: number) => setState((s) => ({ chat: { ...s.chat, chips: s.chat.chips.filter((_, j) => j !== i) } }));
   const pending = chat.pending && (chat.pending.chat === chat.active || chat.pending.chat === null) ? chat.pending : null;
+  const accepts = (dt: DataTransfer) => dt.types.includes('Files') || dt.types.includes(NODE_MIME);
 
   return (
-    <aside className="chat" style={{ width }}>
+    <aside
+      className={`chat ${dropping || dragToChat ? 'dropping' : ''}`}
+      style={{ width }}
+      onDragOver={(e) => {
+        if (!accepts(e.dataTransfer)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        setDropping(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropping(false);
+      }}
+      onDrop={(e) => {
+        if (!accepts(e.dataTransfer)) return;
+        e.preventDefault();
+        setDropping(false);
+        const node = e.dataTransfer.getData(NODE_MIME);
+        if (node) {
+          setState((s) => ({ chat: { ...s.chat, chips: addChips(s.chat.chips, [{ kind: 'node', node }]) } }));
+          window.dispatchEvent(new Event('falos:focus-chat'));
+        } else void attachFiles(Array.from(e.dataTransfer.files));
+      }}
+    >
       <div className="chat-resize" onPointerDown={startResize} />
-      <div className="chat-head">
-        {renaming && chat.active ? (
-          <input
-            className="chat-rename"
-            autoFocus
-            defaultValue={title}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                const v = e.currentTarget.value.trim();
-                if (v && chat.active) hostSync()?.renameChat(chat.active, v);
-                setRenaming(false);
-              } else if (e.key === 'Escape') setRenaming(false);
-            }}
-            onBlur={() => setRenaming(false)}
-          />
-        ) : (
-          <button
-            className="link chat-title"
-            onClick={() => setListOpen(!listOpen)}
-            onDoubleClick={() => chat.active && setRenaming(true)}
-            title="chats (double-click to rename)"
-          >
-            {chat.active ? `${GLYPH[chatState(chat, chat.active)] ?? '·'} ` : ''}{title}
-          </button>
-        )}
-        {(chat.order.length > 1 || listOpen) && (
-          <button className="link dim" onClick={() => setListOpen(!listOpen)}>
-            {listOpen ? '[-]' : `[${chat.order.length}${running ? ` *${running}` : ''}${unreadElsewhere ? ' •' : ''}]`}
-          </button>
-        )}
-        <span className="spacer" />
-        <button className="link" onClick={newChat} title="new chat (⌘N)">[new]</button>
-      </div>
-      {listOpen && <ChatList onPick={() => setListOpen(false)} />}
-      <div
-        className="chat-log"
-        ref={log}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-        }}
-      >
-        {t.items.map((it) => <Row key={it.key} item={it} ids={ids} />)}
-        {pending && (
-          <div className="msg user faint">
-            <div>&gt; {pending.text}</div>
-            <Chips chips={pending.context} />
-          </div>
-        )}
-        {conn === 'connected' && chat.runtime === 'missing' && <div className="dim">agent runtime not connected</div>}
-        {conn === 'local' && <div className="dim">no fal-os host: chat is unavailable</div>}
-        {t.running && <div className="faint">running · esc to stop</div>}
-      </div>
-      {t.swarm.length > 0 && (
-        <div className="swarm">
-          {t.swarm.map((a) => (
-            <div key={a.agent} className="swarm-line">
-              <span>{a.agent.padEnd(10)}</span> <span className="dim">{a.status || a.role}</span>
+      <ChatTabs />
+      <DeleteConfirm />
+      {view === 'history' ? (
+        <ChatHistory />
+      ) : (
+        <>
+          {subView && (
+            <div className="sub-head">
+              <button className="link dim" onClick={() => setState({ subView: null })}>← main chat</button>
+              <span><span style={{ color }}>●</span> {subView}</span>
             </div>
-          ))}
-        </div>
-      )}
-      <div className="chat-input">
-        {matches.length > 0 && (
-          <div className="complete">
-            {matches.map((id, i) => (
-              <div key={id} className={i === Math.min(pick, matches.length - 1) ? 'on' : 'dim'} onMouseDown={(e) => { e.preventDefault(); complete(id); }}>
-                #{slug(chatTitle(chat, id))}
-              </div>
-            ))}
-          </div>
-        )}
-        <Chips chips={chat.chips} onRemove={removeChip} />
-        <div className="prompt">
-          <span className="dim">&gt;</span>
-          <textarea
-            ref={input}
-            rows={1}
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              setCaret(e.target.selectionStart);
-              setPick(0);
+          )}
+          <div
+            className="chat-log"
+            ref={log}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+              stick.current = bottom;
+              if (bottom !== atBottom) setAtBottom(bottom);
             }}
-            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-            onKeyDown={onKey}
-            spellCheck={false}
-          />
-        </div>
-      </div>
+          >
+            {empty && conn === 'connected' && (
+              <div className="faint empty-chat">
+                select images or notes and press <span className="dim">/</span> (or click <span className="dim">✦</span>) to start from them
+                <br />
+                or type below · drop images here to attach
+              </div>
+            )}
+            {subView
+              ? <div className="sub-log">{t.items.map((it) => <Row key={it.key} item={it} ids={ids} chat={chat.active!} kindOf={kindOf} />)}</div>
+              : turns.map((tn, i) => (
+                  <TurnView key={tn.key} turn={tn} live={t.running && i === turns.length - 1} ids={ids} chat={chat.active!} kindOf={kindOf} />
+                ))}
+            {pending && (
+              <div className="turn">
+                <div className="msg user faint">
+                  <div>&gt; {pending.text}</div>
+                  <Chips chips={pending.context} />
+                </div>
+              </div>
+            )}
+            {conn === 'connected' && chat.runtime === 'missing' && <div className="dim">agent runtime not connected</div>}
+            {conn === 'local' && <div className="dim">no fal-os host: chat is unavailable</div>}
+            {t.running && !subView && <div className="faint">running · esc to stop</div>}
+          </div>
+          {!atBottom && (
+            <button
+              className="link latest"
+              onClick={() => {
+                stick.current = true;
+                setAtBottom(true);
+                if (log.current) log.current.scrollTop = log.current.scrollHeight;
+              }}
+            >
+              ↓ latest{t.running ? ' …' : ''}
+            </button>
+          )}
+          {!subView && (main.swarm.length > 0 || main.batches.length > 0) && (
+            <div className="swarm">
+              {main.batches.map((b) => (
+                <div key={b.id} className="swarm-line" onClick={() => selectBatch(b)} title="select the batch on the canvas">
+                  <span style={{ color }}>●</span> <span>{`${b.done}/${b.total}`.padEnd(12)}</span>{' '}
+                  <span className="dim">{b.model.replace(/^fal-ai\//, '')}</span> <span className="faint">{bar(b.total ? b.done / b.total : 0, 10)}</span>
+                </div>
+              ))}
+              {main.swarm.map((a) => (
+                <div key={a.agent} className="swarm-line" onClick={() => setState({ subView: a.agent })} title="open this agent's transcript">
+                  <span style={{ color }}>●</span> <span>{a.agent.padEnd(12)}</span> <span className="dim">{a.status || a.role}</span>
+                  {a.tools > 0 && <span className="faint">  {a.tools}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {main.queued.length > 0 && chat.active && (
+            <div className="queued">
+              {main.queued.map((q) => (
+                <div key={q.id} className="queued-line">
+                  <span className="faint">queued:</span> <span className="queued-text">{q.text}</span>
+                  <button
+                    className="link faint"
+                    title="edit (moves it back into the input)"
+                    onClick={() => {
+                      hostSync()?.unqueue(chat.active!, q.id);
+                      const key = chat.active!;
+                      setState((s) => ({ drafts: { ...s.drafts, [key]: q.text } }));
+                      window.dispatchEvent(new Event('falos:focus-chat'));
+                    }}
+                  >
+                    [edit]
+                  </button>
+                  <button className="link faint" title="remove" onClick={() => hostSync()?.unqueue(chat.active!, q.id)}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <Composer running={main.running} readOnly={readOnly} question={main.question?.options.length ? main.question.options : null} />
+        </>
+      )}
+      {(dropping || dragToChat) && <div className="chat-drop faint">drop to attach</div>}
     </aside>
   );
 }
+
+/** For other modules that want the current state without subscribing. */
+export const activeChat = () => getState().chat.active;

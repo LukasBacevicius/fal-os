@@ -125,6 +125,8 @@ pub fn node_json(n: &Node, depth: usize) -> Json {
         "kind": n.kind.to_string(),
         "name": n.name,
         "x": n.x, "y": n.y, "w": n.w, "h": n.h,
+        "rot": n.rot,
+        "locked": n.locked,
         "parent": n.parent,
         "depth": depth,
         "children": n.children,

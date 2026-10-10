@@ -1,8 +1,8 @@
 import { useMemo } from 'react';
 import { useStore } from '../store';
 import type { NodeView } from '../types';
-import { addSelectionToChat } from '../controller';
-import { sendChatMessage } from './ChatPanel';
+import { sendChatMessage } from '../chatActions';
+import { openPrompt } from './SelectionPrompt';
 
 type Rect = [number, number, number, number];
 
@@ -31,6 +31,8 @@ export function NodeOverlays() {
   const hover = useStore((s) => s.hoverNode);
   const selection = useStore((s) => s.selection);
   const jobs = useStore((s) => s.jobs);
+  const promptOpen = useStore((s) => s.promptOpen);
+  const editing = useStore((s) => s.editing);
   const camera = useStore((s) => s.camera); // re-position on camera changes
   const rects = useMemo(() => worldRects(nodes), [nodes]);
   if (!app) return null;
@@ -110,14 +112,15 @@ export function NodeOverlays() {
           </div>
         );
       })}
-      {selBox && visible(selBox) && (
+      {selBox && visible(selBox) && !promptOpen && !editing && (
         <button
-          className="link add-to-chat"
-          style={{ transform: `translate(${selBox.left + selBox.width}px, ${selBox.top + selBox.height + 6}px) translateX(-100%)` }}
-          onClick={addSelectionToChat}
+          className="link sparkle"
+          title="ask about the selection ( / )"
+          style={{ transform: `translate(${Math.min(selBox.left + selBox.width + 4, camera.width - 22)}px, ${Math.max(2, selBox.top - 18)}px)` }}
+          onClick={openPrompt}
           onPointerDown={(e) => e.stopPropagation()}
         >
-          [+ chat ⌘L]
+          [✦]
         </button>
       )}
     </div>

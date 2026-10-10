@@ -9,7 +9,8 @@ import { discoverHost, explicitHost, type HostInfo } from './host';
 import { getState, setState, toast } from './store';
 import type { CanvasApp } from './wasm';
 import type { NodeView, Presence } from './types';
-import { applyEvent, applyHistory, applyList, selectChat, type Chip } from './chat';
+import { applyEvent, applyHistory, applyList, removeChat, selectChat, type Chip } from './chat';
+import { onActivity, onActivityClear } from './activity';
 
 /** A send that gets no chat event back within this time means no agent runtime is attached. */
 const RUNTIME_TIMEOUT_MS = 8_000;
@@ -22,7 +23,36 @@ export interface SessionInfo {
   actor: string;
   kind: 'human' | 'agent';
   color?: string;
-  presence: { status: string; canvas?: string; cursor?: [number, number]; viewport?: [number, number, number, number]; last_activity: number };
+  /** UX-V1: the chat this agent works for, its task label and state (also accepted inside
+   *  `presence`). */
+  chat?: string | null;
+  label?: string;
+  state?: 'thinking' | 'writing' | 'idle' | string;
+  /** Agent label within its chat (`generator-2`), and its parent agent. */
+  agent?: string;
+  parent?: string;
+  /** Normalized MCP client of external agents (`claude`, `codex`, …). */
+  client?: string;
+  presence: {
+    status: string; canvas?: string; cursor?: [number, number]; viewport?: [number, number, number, number]; last_activity: number;
+    chat?: string | null; color?: string; label?: string; state?: string;
+  };
+}
+
+/** Chat/label/state/color of a session, wherever the host put them. */
+export function sessionMeta(s: SessionInfo) {
+  return {
+    chat: s.chat ?? s.presence?.chat ?? null,
+    color: s.presence?.color ?? s.color ?? '',
+    label: s.label ?? s.presence?.label ?? '',
+    state: s.state ?? s.presence?.state ?? '',
+  };
+}
+
+/** `#rrggbb` + alpha byte. */
+function dimmed(color: string, alpha: number): string {
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return color;
+  return color + Math.round(alpha * 255).toString(16).padStart(2, '0');
 }
 
 export interface JobInfo { node: string; model: string; status: string; queue_position?: number; error?: string }
@@ -162,7 +192,26 @@ export class HostSync {
           setState((s) => ({ chat: s.chat.creating ? { ...selectChat(s.chat, m.chat), creating: false, order: s.chat.order.includes(m.chat) ? s.chat.order : [...s.chat.order, m.chat] } : s.chat }));
         break;
       case 'chat.event':
-        if (typeof m.chat === 'string' && m.event) setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event) }));
+        if (typeof m.chat === 'string' && m.event) setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event, typeof m.ts === 'number' ? m.ts : Date.now()) }));
+        break;
+      case 'chat.deleted':
+        if (typeof m.chat === 'string') setState((s) => ({ chat: removeChat(s.chat, m.chat), subView: s.chat.active === m.chat ? null : s.subView }));
+        break;
+      case 'activity':
+        onActivity(m);
+        break;
+      case 'activity.clear':
+        onActivityClear(m);
+        break;
+      case 'agent.registered':
+        setState((s) => ({ connect: { ...s.connect, registered: { ...s.connect.registered, [m.client]: { ok: !!m.ok, path: m.path, error: m.error } } } }));
+        break;
+      case 'agent.connected':
+        setState((s) => ({ connect: { ...s.connect, connected: { ...s.connect.connected, [m.client]: { agentName: String(m.agentName ?? m.client), session: String(m.session ?? '') } } } }));
+        break;
+      case 'agent.first_write':
+        setState((s) => ({ connect: { ...s.connect, firstWrite: { ...s.connect.firstWrite, [m.client]: Array.isArray(m.nodes) ? m.nodes : [] } } }));
+        window.dispatchEvent(new CustomEvent('falos:first-write', { detail: m }));
         break;
       case 'presence':
         this.sessions.set(m.session.id, m.session);
@@ -206,7 +255,7 @@ export class HostSync {
   /** Sends a chat message (`chat` omitted starts a new chat). Returns false when offline. */
   sendChat(text: string, context: Chip[], chat: string | null): boolean {
     if (this.ws?.readyState !== WebSocket.OPEN) return false;
-    const msg: Record<string, unknown> = { type: 'chat.send', text, context };
+    const msg: Record<string, unknown> = { type: 'chat.send', text, context, driver: getState().driver };
     if (chat) msg.chat = chat;
     this.ws.send(JSON.stringify(msg));
     const at = Date.now();
@@ -233,6 +282,53 @@ export class HostSync {
 
   archiveChat(chat: string) {
     this.sendJson({ type: 'chat.archive', chat });
+  }
+
+  deleteChat(chat: string) {
+    this.sendJson({ type: 'chat.delete', chat });
+  }
+
+  /** Tabs: open / close (a closed chat stays in the history). */
+  openChat(chat: string) {
+    this.sendJson({ type: 'chat.open', chat });
+  }
+
+  closeChat(chat: string) {
+    this.sendJson({ type: 'chat.close', chat });
+  }
+
+  /** Resumes a chat whose director stopped mid-step (error with `actions: ["continue"]`). */
+  continueChat(chat: string) {
+    this.sendJson({ type: 'chat.continue', chat });
+  }
+
+  unqueue(chat: string, id: string) {
+    this.sendJson({ type: 'chat.unqueue', chat, id });
+  }
+
+  revertTurn(chat: string, turn: string) {
+    this.sendJson({ type: 'chat.revert', chat, turn });
+  }
+
+  redoTurn(chat: string, turn: string) {
+    this.sendJson({ type: 'chat.redo', chat, turn });
+  }
+
+  /** "Connect your agent": the host writes the client's MCP config (`agent.registered`). */
+  registerAgent(client: string): boolean {
+    return this.sendJson({ type: 'agent.register', client });
+  }
+
+  private selTimer = 0;
+  private selLast = '';
+  /** The user's selection, so agents can see what you're looking at (throttled). */
+  sendSelection(nodes: string[]) {
+    window.clearTimeout(this.selTimer);
+    this.selTimer = window.setTimeout(() => {
+      const key = nodes.join(',');
+      if (key === this.selLast) return;
+      if (this.sendJson({ type: 'selection', nodes })) this.selLast = key;
+    }, 150);
   }
 
   private sendJson(m: unknown): boolean {
@@ -285,13 +381,17 @@ export class HostSync {
       if (Math.abs(c.tx - c.x) + Math.abs(c.ty - c.y) > 0.5) moving = true;
       else { c.x = c.tx; c.y = c.ty; }
       const opacity = idle < IDLE_MS ? 1 : Math.max(0, 1 - (idle - IDLE_MS) / 600);
+      const meta = sessionMeta(s);
       list.push({
-        actor: s.actor, name: s.agentName, kind: s.kind,
+        actor: s.actor, name: s.agent || s.agentName, kind: s.kind, session: s.id,
         cursor: [c.x, c.y], status: s.presence.status || null, opacity,
+        chat: meta.chat, color: meta.color || undefined, label: meta.label || undefined, state: meta.state || undefined,
       });
     }
-    // The engine draws cursors (full opacity); labels fade in the DOM layer.
-    this.app.setPresence(list.filter((p) => (p.opacity ?? 1) > 0.5));
+    // The engine draws cursors (full opacity, dimmed while thinking); labels fade in the DOM.
+    this.app.setPresence(
+      list.filter((p) => (p.opacity ?? 1) > 0.5).map((p) => ({ ...p, color: p.color ? dimmed(p.color, p.state === 'thinking' ? 0.5 : 1) : '' })),
+    );
     setState({ presence: list });
     const fading = list.some((p) => (p.opacity ?? 1) < 1);
     const pendingFade = [...this.cursors.values()].some((c) => now - c.seen <= IDLE_MS + 600);
@@ -404,6 +504,7 @@ export async function connectHost(app: CanvasApp, canvas: string, actor: { id: s
   }
   current?.stop();
   current = new HostSync(app, host, canvas, actor);
+  if (import.meta.env.DEV) (window as any).falosSync = current; // debugging
   setState({ hostAddr: host.addr });
   current.start();
   return true;

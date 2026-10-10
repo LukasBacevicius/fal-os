@@ -60,6 +60,43 @@ const BLACK: u32 = gray(0, 255);
 
 pub struct CursorView {
     pub world: [f32; 2],
+    /// Chat color (RGBA8, alpha = dimming); white when the agent has no chat.
+    pub color: Option<u32>,
+}
+
+/// One agent-activity effect in world space (UX-V1 §4), drawn in its chat color.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivityFx {
+    pub rect: [f32; 4],
+    /// An [`OverlayPrim`] activity shape, or `RECT` for a static outline (reduce motion).
+    pub shape: u32,
+    /// Chat color, opaque.
+    pub color: u32,
+    pub t0: f32,
+    pub dur: f32,
+    pub seed: f32,
+    /// Rain only: width of the frame's title label (CSS px), skipped by the dots.
+    pub label_px: f32,
+}
+
+/// `#rgb`, `#rrggbb` or `#rrggbbaa` → RGBA8 (red in the low byte).
+pub fn parse_color(s: &str) -> Option<u32> {
+    let h = s.trim().strip_prefix('#')?;
+    let n = |i: usize, len: usize| u8::from_str_radix(h.get(i..i + len)?, 16).ok();
+    match h.len() {
+        3 => {
+            let c = |i| n(i, 1).map(|v| v * 17);
+            Some(rgba(c(0)?, c(1)?, c(2)?, 255))
+        }
+        6 => Some(rgba(n(0, 2)?, n(2, 2)?, n(4, 2)?, 255)),
+        8 => Some(rgba(n(0, 2)?, n(2, 2)?, n(4, 2)?, n(6, 2)?)),
+        _ => None,
+    }
+}
+
+/// `c` with its alpha replaced.
+pub const fn with_alpha(c: u32, a: u8) -> u32 {
+    (c & 0x00ff_ffff) | (a as u32) << 24
 }
 
 pub struct OverlayInput<'a> {
@@ -76,6 +113,10 @@ pub struct OverlayInput<'a> {
     /// World rects claimed by other sessions.
     pub claims: &'a [[f32; 4]],
     pub cursors: &'a [CursorView],
+    /// Agent activity effects (drawn under the selection).
+    pub activity: &'a [ActivityFx],
+    /// Rects highlighted from outside the canvas (layers row hover).
+    pub highlight: &'a [[f32; 4]],
     pub dpr: f32,
     /// World units per physical pixel (1 / zoom).
     pub px_world: f32,
@@ -92,6 +133,37 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
     let pad = 3.0 * d * i.px_world;
     for r in i.claims {
         out.push(OverlayPrim::dashed([r[0] - pad, r[1] - pad, r[2] + 2.0 * pad, r[3] + 2.0 * pad], 0, p.dim, d));
+    }
+    for f in i.activity {
+        let stroke = with_alpha(f.color, 220);
+        let prim = match f.shape {
+            // The strip starts after the frame's title (`label_px`, CSS px) so dots never cross the text.
+            OverlayPrim::RAIN => OverlayPrim {
+                world: [f.rect[0], f.rect[1]],
+                world_size: [f.rect[2], 0.0],
+                px_offset: [f.label_px * d, -12.0 * d],
+                px_size: [-f.label_px * d, 9.0 * d],
+                fill: with_alpha(f.color, 200),
+                shape: OverlayPrim::RAIN,
+                t0: f.t0,
+                dur: f.dur,
+                seed: f.seed,
+                ..OverlayPrim::rect([0.0; 4], 0, 0, 0.0)
+            },
+            OverlayPrim::RECT => OverlayPrim::rect(f.rect, 0, with_alpha(f.color, 150), d),
+            shape => {
+                let fill = match shape {
+                    OverlayPrim::GHOST => with_alpha(f.color, 56),
+                    OverlayPrim::FLASH => with_alpha(f.color, 60),
+                    _ => with_alpha(f.color, 96),
+                };
+                OverlayPrim { seed: f.seed, ..OverlayPrim::activity(f.rect, shape, fill, stroke, d, f.t0, f.dur) }
+            }
+        };
+        out.push(prim);
+    }
+    for r in i.highlight {
+        out.push(OverlayPrim::rect(*r, 0, (p.ink & 0x00ff_ffff) | (140 << 24), d));
     }
     if let Some(h) = i.hover.and_then(|h| i.scene.get(h))
         && !i.selection.iter().any(|s| s == &h.id)
@@ -124,7 +196,8 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
         out.push(OverlayPrim::dashed(r, (p.ink & 0x00ff_ffff) | (20 << 24), p.ink, d));
     }
     for c in i.cursors {
-        out.push(OverlayPrim::cursor(c.world, 13.0 * d, WHITE, BLACK));
+        let stroke = c.color.map_or(BLACK, |col| with_alpha(BLACK, ((col >> 24) as f32 * 0.8) as u8));
+        out.push(OverlayPrim::cursor(c.world, 13.0 * d, c.color.unwrap_or(WHITE), stroke));
     }
     out
 }
@@ -132,6 +205,15 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_css_colors() {
+        assert_eq!(parse_color("#fff"), Some(rgba(255, 255, 255, 255)));
+        assert_eq!(parse_color("#7b93c4"), Some(rgba(0x7b, 0x93, 0xc4, 255)));
+        assert_eq!(parse_color("#7b93c480"), Some(rgba(0x7b, 0x93, 0xc4, 0x80)));
+        assert_eq!(parse_color("blue"), None);
+        assert_eq!(parse_color("#12"), None);
+    }
 
     #[test]
     fn palette_is_monochrome() {
