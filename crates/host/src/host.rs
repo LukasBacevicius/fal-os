@@ -21,6 +21,17 @@ const COLORS: [&str; 8] = [
     "#e5484d", "#f76b15", "#ffc53d", "#46a758", "#12a594", "#0090ff", "#8e4ec6", "#d6409f",
 ];
 
+/// `FAL_KEY=…` from `$FALOS_HOME/fal.env` (the same file the agent runtime reads).
+fn fal_env_key() -> Option<String> {
+    let text = std::fs::read_to_string(crate::server::home_dir().join("fal.env")).ok()?;
+    text.lines().find_map(|l| {
+        let l = l.trim().trim_start_matches("export ").trim();
+        let v = l.strip_prefix("FAL_KEY")?.trim_start().strip_prefix('=')?;
+        let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
+        (!v.is_empty()).then(|| v.to_string())
+    })
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -93,6 +104,50 @@ pub enum Event {
         canvas: String,
         chats: serde_json::Value,
     },
+    /// Batch generation progress (see `batch.rs`); same payload as the `batch` chat event.
+    #[serde(rename = "batch")]
+    Batch { canvas: String, batch: serde_json::Value },
+    /// A chat was deleted (see `chat.rs`).
+    #[serde(rename = "chat.deleted")]
+    ChatDeleted { canvas: String, chat: String },
+    /// An agent session read or changed nodes (see `activity.rs`).
+    #[serde(rename = "activity")]
+    Activity {
+        canvas: String,
+        session: String,
+        agent: String,
+        chat: Option<String>,
+        color: String,
+        op: String,
+        nodes: Vec<String>,
+        at: i64,
+    },
+    /// Nodes left a session's working set (`finish_working`, expiry, session end). `nodes: null` = all.
+    #[serde(rename = "activity.clear")]
+    ActivityClear {
+        session: String,
+        nodes: Option<Vec<String>>,
+    },
+    /// An MCP session from an external agent client started (connect flow).
+    #[serde(rename = "agent.connected")]
+    AgentConnected {
+        client: String,
+        #[serde(rename = "clientName")]
+        client_name: String,
+        #[serde(rename = "agentName")]
+        agent_name: String,
+        session: String,
+        chat: Option<String>,
+        transport: String,
+    },
+    /// An external agent session's first mutation (connect flow).
+    #[serde(rename = "agent.first_write")]
+    AgentFirstWrite {
+        client: String,
+        session: String,
+        canvas: String,
+        nodes: Vec<String>,
+    },
 }
 
 impl Event {
@@ -104,8 +159,15 @@ impl Event {
             | Event::AnnotationAssigned { canvas, .. }
             | Event::Job { canvas, .. }
             | Event::ChatEvent { canvas, .. }
-            | Event::ChatList { canvas, .. } => Some(canvas),
-            Event::Presence { .. } | Event::SessionClosed { .. } => None,
+            | Event::ChatList { canvas, .. }
+            | Event::ChatDeleted { canvas, .. }
+            | Event::Batch { canvas, .. }
+            | Event::Activity { canvas, .. } => Some(canvas),
+            Event::Presence { .. }
+            | Event::SessionClosed { .. }
+            | Event::ActivityClear { .. }
+            | Event::AgentConnected { .. }
+            | Event::AgentFirstWrite { .. } => None,
         }
     }
 }
@@ -129,8 +191,22 @@ pub struct SessionInfo {
     pub agent_name: String,
     pub actor: String,
     pub kind: ActorKind,
+    /// The chat's color when the session belongs to a chat, else the session's own.
     pub color: String,
     pub presence: Presence,
+    /// Chat this session works for (a runtime chat `c_…` or an external pseudo-chat `ext:…`).
+    pub chat: Option<String>,
+    /// Agent label: the runtime's subagent label (`generator-2`) or the actor id.
+    pub agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// What the cursor shows: the `set_status` text, else the agent name.
+    pub label: String,
+    /// `thinking` | `writing` | `idle` (idle after 10 s without activity).
+    pub state: String,
+    /// Normalized MCP client (`claude`, `codex`, `cursor`, `gemini`, `opencode`, …) of external agents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 pub struct Session {
@@ -143,17 +219,51 @@ pub struct Session {
     /// Things that happened to this session (claim revoked, annotation assigned), drained
     /// into its next tool result.
     pub notices: Vec<String>,
+    /// See [`SessionInfo`].
+    pub chat: Option<String>,
+    pub chat_color: Option<String>,
+    pub agent: Option<String>,
+    pub parent: Option<String>,
+    pub client: Option<String>,
+    /// `stdio` when connected through `falos-host mcp`.
+    pub via: Option<String>,
+    pub state: String,
+    /// Human sessions: the user's current selection (`selection` frames).
+    pub selection: Vec<String>,
+    /// (canvas, node) → last activity (ms): the working set behind `activity` events.
+    pub working: HashMap<(String, String), i64>,
+    /// Has mutated anything yet (for `agent.first_write`).
+    pub wrote: bool,
 }
 
 impl Session {
-    fn info(&self) -> SessionInfo {
+    pub fn agent_label(&self) -> String {
+        self.agent.clone().unwrap_or_else(|| self.actor.id.clone())
+    }
+
+    pub fn display_color(&self) -> String {
+        self.chat_color.clone().unwrap_or_else(|| self.color.clone())
+    }
+
+    pub fn info(&self) -> SessionInfo {
+        let label = if self.presence.status.trim().is_empty() {
+            self.agent.clone().unwrap_or_else(|| self.actor.name.clone())
+        } else {
+            self.presence.status.clone()
+        };
         SessionInfo {
             id: self.id.clone(),
             agent_name: self.actor.name.clone(),
             actor: self.actor.id.clone(),
             kind: self.actor.kind,
-            color: self.color.clone(),
+            color: self.display_color(),
             presence: self.presence.clone(),
+            chat: self.chat.clone(),
+            agent: self.agent_label(),
+            parent: self.parent.clone(),
+            label,
+            state: self.state.clone(),
+            client: self.client.clone(),
         }
     }
 }
@@ -185,6 +295,8 @@ pub struct HostOptions {
     /// Use the signed-in fal session (via the fal MCP relay) when there is no `fal_key`.
     pub fal_session: bool,
     pub renderer: Box<dyn ContextRenderer>,
+    /// Home directory whose agent configs `agent.register` edits (default `$HOME`).
+    pub home: Option<PathBuf>,
 }
 
 impl Default for HostOptions {
@@ -192,9 +304,13 @@ impl Default for HostOptions {
         Self {
             fal_queue_url: std::env::var("FALOS_FAL_QUEUE_URL")
                 .unwrap_or_else(|_| "https://queue.fal.run".into()),
-            fal_key: std::env::var("FAL_KEY").ok().filter(|k| !k.is_empty()),
+            fal_key: std::env::var("FAL_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .or_else(fal_env_key),
             fal_session: true,
             renderer: Box::new(NoRenderer),
+            home: std::env::var_os("HOME").map(PathBuf::from),
         }
     }
 }
@@ -212,6 +328,11 @@ pub struct Host {
     pub http: reqwest::Client,
     /// Chat routing between canvas clients and the agent runtime.
     pub chat: crate::chat::ChatHub,
+    /// `(mcp url, token)` of the running server, for `agent.register`.
+    pub endpoint: Mutex<Option<(String, String)>>,
+    /// Running and finished batch generations (`generate_batch`).
+    pub batches: crate::batch::Batches,
+    sweeper: std::sync::Once,
 }
 
 fn slug(s: &str) -> String {
@@ -265,6 +386,9 @@ impl Host {
             opts,
             http: reqwest::Client::new(),
             chat: Default::default(),
+            endpoint: Mutex::default(),
+            batches: Default::default(),
+            sweeper: std::sync::Once::new(),
         }))
     }
 
@@ -350,7 +474,7 @@ impl Host {
     ) -> Result<T> {
         let id = self.resolve_canvas(canvas)?;
         let o = self.open_canvas(&id)?;
-        let (out, event, assigned) = {
+        let (out, event, assigned, created_ids, touched_ids) = {
             let mut o = o.lock().unwrap();
             let before_vv = o.canvas.vv();
             let before_version = o.canvas.version();
@@ -380,18 +504,20 @@ impl Host {
                 .cloned()
                 .collect();
             let assigned = new_assignments(&before_anns, &o.canvas.annotations());
+            let (c2, t2): (Vec<String>, Vec<String>) = (created, touched.clone());
             let event = Event::Doc {
                 canvas: id.clone(),
                 actor: actor.to_string(),
                 version: o.canvas.version().to_string(),
-                created,
+                created: c2.clone(),
                 touched,
                 bytes: Arc::new(bytes),
                 origin,
             };
-            (out, event, assigned)
+            (out, event, assigned, c2, t2)
         };
         self.emit(event);
+        self.after_mutation(&id, actor, &created_ids, &touched_ids);
         for a in assigned {
             let assignee = a.assignee.clone().unwrap_or_default();
             self.notify_actor(
@@ -485,6 +611,16 @@ impl Host {
             },
             read_versions: HashMap::new(),
             notices: vec![],
+            chat: None,
+            chat_color: None,
+            agent: None,
+            parent: None,
+            client: None,
+            via: None,
+            state: "idle".into(),
+            selection: vec![],
+            working: HashMap::new(),
+            wrote: false,
         };
         let info = s.info();
         sessions.insert(s.id.clone(), s);
@@ -496,10 +632,39 @@ impl Host {
     }
 
     pub fn close_session(&self, id: &str) {
-        if self.sessions.lock().unwrap().remove(id).is_some() {
+        let removed = self.sessions.lock().unwrap().remove(id);
+        if let Some(s) = removed {
             self.claims.lock().unwrap().retain(|_, c| c.session != id);
+            if !s.working.is_empty() {
+                self.emit(Event::ActivityClear {
+                    session: id.into(),
+                    nodes: None,
+                });
+            }
             self.emit(Event::SessionClosed { session: id.into() });
+            if let Some(chat) = s.chat.as_deref().filter(|c| c.starts_with("ext:")) {
+                self.chat.ext_session_closed(self, chat);
+            }
         }
+    }
+
+    /// Run `f` on the session table.
+    pub fn with_sessions<T>(&self, f: impl FnOnce(&mut HashMap<String, Session>) -> T) -> T {
+        f(&mut self.sessions.lock().unwrap())
+    }
+
+    /// Start the once-per-host background sweeper (activity expiry, idle presence, ext chats).
+    pub fn start_sweeper(self: &Arc<Self>) {
+        self.sweeper.call_once(|| {
+            let weak = Arc::downgrade(self);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let Some(host) = weak.upgrade() else { return };
+                    host.sweep();
+                }
+            });
+        });
     }
 
     /// Look up a session, mark activity, and run `f` on it.

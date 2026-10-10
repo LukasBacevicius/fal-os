@@ -35,6 +35,36 @@ enum ClientMsg {
     RevokeClaim {
         node: String,
     },
+    /// The user's selection (for `get_selection` and placement next to it).
+    Selection {
+        nodes: Vec<String>,
+    },
+}
+
+/// `{"type":"agent.register","client":"claude"|"codex"|"cursor"|"gemini"|"opencode"}`:
+/// write the fal-os MCP server into that client's config. Reply: `agent.registered`.
+pub fn agent_register(host: &Host, msg: &serde_json::Value) -> serde_json::Value {
+    use clap::ValueEnum;
+    let name = msg["client"].as_str().unwrap_or_default().to_string();
+    let r = (|| -> anyhow::Result<(String, bool)> {
+        let client = crate::register::Client::from_str(&name, true)
+            .map_err(|_| anyhow::anyhow!("unknown client `{name}` (claude, codex, cursor, gemini, opencode)"))?;
+        let home = host.opts.home.clone().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+        let (url, token) = host
+            .endpoint
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("the host is not serving yet"))?;
+        let o = crate::register::register(client, &home, &url, &token, false)?;
+        Ok((o.path.display().to_string(), o.changed()))
+    })();
+    match r {
+        Ok((path, changed)) => {
+            json!({"type": "agent.registered", "client": name, "ok": true, "path": path, "changed": changed})
+        }
+        Err(e) => json!({"type": "agent.registered", "client": name, "ok": false, "path": null, "error": format!("{e:#}")}),
+    }
 }
 
 pub async fn handler(
@@ -126,6 +156,11 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                         let _ = send_json(&mut socket, json!({"type": "error", "message": format!("{e:#}")})).await;
                     }
                 }
+                Some(Ok(Message::Text(t))) if t.contains("agent.register") && serde_json::from_str::<serde_json::Value>(&t).is_ok_and(|m| m["type"] == "agent.register") => {
+                    let m: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+                    let reply = agent_register(&host, &m);
+                    let _ = send_json(&mut socket, reply).await;
+                }
                 Some(Ok(Message::Text(t))) if let Some(m) = crate::chat::chat_frame(&t) => {
                     // chat.send / chat.stop: see chat.rs.
                     match crate::chat::handle_client(&host, &canvas, &name, &m).await {
@@ -147,6 +182,7 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                     Ok(ClientMsg::RevokeClaim { node }) => {
                         let _ = host.revoke_claim(&canvas, &node, &actor);
                     }
+                    Ok(ClientMsg::Selection { nodes }) => host.set_selection(&info.id, nodes),
                     Err(e) => {
                         let _ = send_json(&mut socket, json!({"type": "error", "message": e.to_string()})).await;
                     }

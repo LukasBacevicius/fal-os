@@ -34,6 +34,7 @@ async fn start(fal_queue_url: &str, fal_key: Option<&str>) -> Env {
             fal_key: fal_key.map(String::from),
             fal_session: false,
             renderer: Box::new(NoRenderer),
+            home: Some(dir.path().join("home")),
         },
     )
     .unwrap();

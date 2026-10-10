@@ -37,15 +37,15 @@ export const config = {
   runtimeToken: env.FALOS_RUNTIME_TOKEN || "",
   projectDir: env.FALOS_PROJECT_DIR || "",
   directorModel: env.FALOS_DIRECTOR_MODEL || "claude-opus-5-5",
-  workerModel: env.FALOS_WORKER_MODEL || "claude-sonnet-5-5",
+  workerModel: env.FALOS_WORKER_MODEL || "claude-opus-5-5",
   /** The locally installed Claude Code CLI (uses its login); the SDK's bundled one otherwise. */
   claudePath: env.FALOS_CLAUDE_PATH || which("claude"),
   /** Circuit breaker: stop generating after this many fal Agent tasks fail in a row. */
   maxConsecutiveFailures: Number(env.FALOS_MAX_CONSECUTIVE_FAILURES || 3),
   /** Runaway guard: fal Agent tasks per chat run. */
-  maxFalTasks: Number(env.FALOS_MAX_FAL_TASKS || 40),
+  maxFalTasks: Number(env.FALOS_MAX_FAL_TASKS || 100),
   /** Director turn cap (API round trips) per run. */
-  maxTurns: Number(env.FALOS_MAX_TURNS || 300),
+  maxTurns: Number(env.FALOS_MAX_TURNS || 500),
   motionTemplate: new URL("../motion-template/", import.meta.url).pathname,
   codexHome: env.CODEX_HOME || join(homedir(), ".codex"),
 };

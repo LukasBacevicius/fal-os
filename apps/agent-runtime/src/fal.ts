@@ -62,6 +62,8 @@ export type AgentSnapshot = {
   activities: { id: string; label: string; status: string; kind: string; name?: string; args?: unknown }[];
   artifacts: { id: string; media_type?: string; url: string; mime: string; metadata?: unknown }[];
   costUsd: number;
+  /** The agent's plan, when it shares one. */
+  plan?: { title: string; state: string }[];
 };
 
 export function snapshotOf(r: any): AgentSnapshot {
@@ -80,7 +82,15 @@ export function snapshotOf(r: any): AgentSnapshot {
     activities: (r.fal?.activities ?? []).map((a: any) => ({ id: a.id, label: a.label, status: a.status, kind: a.kind, name: a.name, args: a.arguments })),
     artifacts,
     costUsd: Number(c?.settled ?? c?.estimated ?? c?.reserved ?? 0) || 0,
+    plan: planOf(r.fal?.plan ?? r.plan),
   };
+}
+
+function planOf(p: any): { title: string; state: string }[] | undefined {
+  const steps = Array.isArray(p) ? p : Array.isArray(p?.steps) ? p.steps : null;
+  if (!steps?.length) return undefined;
+  const state = (s: string) => (/complete|done/.test(s ?? "") ? "done" : /progress|running|active/.test(s ?? "") ? "running" : "pending");
+  return steps.map((s: any) => ({ title: String(s.title ?? s.label ?? s.description ?? s.text ?? ""), state: state(String(s.status ?? s.state ?? "")) }));
 }
 
 export type InputDecision = { summary: string; answer: any };
@@ -93,9 +103,11 @@ export async function runAgentTask(opts: {
   task: string;
   attachments?: { url: string; mime?: string }[];
   onSnapshot: (s: AgentSnapshot) => void;
-  decide: (pending: any) => InputDecision;
+  decide: (pending: any) => InputDecision | Promise<InputDecision>;
   onDecision?: (d: InputDecision, pending: any) => void;
   signal?: AbortSignal;
+  /** Continue a conversation (multi-turn chats on the fal driver). */
+  previousResponseId?: string;
 }): Promise<AgentSnapshot> {
   const agent = fal().agent;
   const content: any[] = [{ type: "input_text", text: opts.task }];
@@ -104,6 +116,7 @@ export async function runAgentTask(opts: {
     else content.push({ type: "input_file", file_url: a.url, mime_type: a.mime });
   }
   const request: any = { input: content.length > 1 ? [{ role: "user", content }] : opts.task };
+  if (opts.previousResponseId) request.previous_response_id = opts.previousResponseId;
   let responseId: string | undefined;
   const onAbort = () => {
     if (responseId) agent.responses.cancel(responseId).catch(() => {});
@@ -126,7 +139,7 @@ export async function runAgentTask(opts: {
       const pending = (last.pending_inputs ?? []).filter((p: any) => p.status === "pending");
       if (last.fal?.phase !== "waiting_for_input" || pending.length === 0) break;
       for (const p of pending) {
-        const d = opts.decide(p);
+        const d = await opts.decide(p);
         opts.onDecision?.(d, p);
         await agent.responses.answer(last.id, { input_request_id: p.id, answer: d.answer }, { idempotencyKey: `${last.id}:${p.id}` });
       }

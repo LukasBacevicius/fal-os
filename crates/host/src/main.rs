@@ -38,6 +38,9 @@ enum Cmd {
     Logout,
     /// Show the signed-in fal account and check the token against fal's API.
     Whoami,
+    /// Stdio MCP server: relays stdin/stdout to the running host's /mcp (for clients that
+    /// prefer stdio). Reads ~/.fal-os/host.json.
+    Mcp,
     /// Add/update the fal-os MCP server in an agent client's config.
     Register {
         #[arg(long, value_enum)]
@@ -55,6 +58,8 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,loro=warn,loro_internal=warn".into()),
         )
+        // stdout belongs to the MCP relay (`falos-host mcp`).
+        .with_writer(std::io::stderr)
         .init();
     match Cli::parse().cmd {
         Cmd::Serve { project, port, runtime, no_runtime } => {
@@ -94,6 +99,7 @@ async fn main() -> Result<()> {
             running.cancel.cancel();
             running.task.await?;
         }
+        Cmd::Mcp => falos_host::relay::run().await?,
         Cmd::Login => {
             let t = falos_host::auth::login(|url| {
                 println!("Opening your browser to sign in to fal…\nIf it doesn't open, visit:\n{url}\n");

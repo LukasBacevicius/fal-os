@@ -99,11 +99,34 @@ fn handle(host: &Arc<Host>, text: &str) {
                 tracing::warn!("runtime event without kind");
                 return;
             }
-            if let Err(e) = host
-                .chat
-                .append(host, chat, msg["canvas"].as_str(), event.clone())
-            {
+            let mut event = event.clone();
+            // Every runtime event is attributed (the director unless it says otherwise).
+            if event.get("agent").is_none_or(|a| !a.is_string()) {
+                event["agent"] = Json::from("director");
+            }
+            let ends = event["kind"] == "status" && event["state"] != "running";
+            if let Err(e) = host.chat.append(host, chat, msg["canvas"].as_str(), event) {
                 tracing::warn!("chat event dropped: {e:#}");
+            }
+            if ends {
+                let (host, chat) = (host.clone(), chat.to_string());
+                tokio::spawn(async move {
+                    if let Err(e) = crate::chat::ChatHub::flush_queue(&host, &chat).await {
+                        tracing::warn!("queued messages of {chat}: {e:#}");
+                    }
+                });
+            }
+        }
+        // The runtime mapped an agent's fal-os session to its subagent label.
+        Some("session.agent") => {
+            if let (Some(s), Some(a)) = (msg["session"].as_str(), msg["agent"].as_str()) {
+                host.set_session_agent(s, a, msg["parent"].as_str());
+            }
+        }
+        // A queued message went into the running turn.
+        Some("injected") => {
+            if let (Some(chat), Some(id)) = (msg["chat"].as_str(), msg["id"].as_str()) {
+                host.chat.injected(host, chat, id, msg["text"].as_str());
             }
         }
         // Cross-chat requests (chat.list / chat.read / chat.send): answered with a `reply`.

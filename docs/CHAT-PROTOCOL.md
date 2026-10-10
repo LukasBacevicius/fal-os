@@ -89,6 +89,114 @@ Host → client, sent after `hello` (after `chat.history`) and again whenever an
 
 **Chat chips.** `{ "kind": "chat", "chat": "c_…" }` references another chat; in the input it is written `#title`. It resolves to `{chip, chat, title, digest}`, where the digest covers the last ~20 events (user messages, Director text, agents, tools with node ids, results), truncated and wrapped as untrusted data.
 
+## UX v1 additions
+Implements [UX-V1.md](UX-V1.md). Everything below is additive to the frames above.
+
+### Chat list rows
+```jsonc
+{ "chat": "c_…", "canvas": "main", "title": "…", "state": "running" | "idle" | "error", "updated": 1760000000000,
+  "agents": [{ "agent": "generator-2", "status": "…" }], "cost": 0.42,
+  "color": "#7393c2",          // one of 8 muted hues, least-used first, stable per chat (chats/index.json)
+  "driver": "opus" | "fal" | "codex",
+  "open": true,                 // shown as a tab (chat.close hides it, history keeps it; distinct from archive)
+  "external": false, "client": null,   // true / "claude" for an external agent's pseudo-chat
+  "turn": "t_…" | null,         // the running turn
+  "queued": [{ "id": "q_…", "text": "…" }] }
+```
+`chat.history` entries also carry `color`. New chats, chats that start a run and chats that
+receive a cross-chat message are opened automatically.
+
+### Client → host
+```jsonc
+{ "type": "chat.send", "chat": "c_…", "text": "…", "context": [], "driver": "opus" | "fal" | "codex" }  // driver optional: switches the chat's driver
+{ "type": "chat.unqueue", "chat": "c_…", "id": "q_…" }      // drop a queued message → dequeued (reason "cancelled")
+{ "type": "chat.revert", "chat": "c_…", "turn": "t_…" }     // undo everything that turn's agents changed → reverted
+{ "type": "chat.redo", "chat": "c_…", "turn": "t_…" }       // re-apply a reverted turn → redone
+{ "type": "chat.continue", "chat": "c_…" }                  // resume a run that stopped with an error (actions: ["continue"])
+{ "type": "chat.open", "chat": "c_…" } / { "type": "chat.close", "chat": "c_…" }   // tabs
+{ "type": "chat.delete", "chat": "c_…" }                    // stop it, delete chats/<id>.jsonl + its index entry; the last chat can be deleted too
+```
+Host → client: `{"type":"chat.deleted","canvas":"main","chat":"c_…"}` (then `chat.list` without it).
+Errors (unknown turn, reverting a running turn, sending to an `ext:` chat, unknown driver) come back as `{"type":"error"}`.
+
+### New chat events
+Runtime events always carry `agent` (`director` unless another agent; subagents also carry
+`parent`), so the UI can split per-subagent transcripts: a subagent's `text`, `tool`, `agent`
+and `thinking_done` events go to its own transcript.
+```jsonc
+{ "kind": "turn", "turn": "t_…", "state": "start" }                       // host: a run starts (after its user event)
+{ "kind": "turn", "turn": "t_…", "state": "end", "nodes": ["…"] }          // host: the run ended (status idle/error); nodes its agents touched
+{ "kind": "queued", "id": "q_…", "text": "…", "context": [], "author": "lukas" }   // chat.send while running
+{ "kind": "dequeued", "id": "q_…", "reason": "injected" | "cancelled" | "started" | "requeued" }
+{ "kind": "user", "text": "…", "author": "lukas", "queued": "q_…" }          // follows dequeued/injected: the message joined the running turn
+{ "kind": "reverted", "turn": "t_…", "count": 7, "nodes": ["…"] }
+{ "kind": "redone", "turn": "t_…", "count": 7, "nodes": ["…"] }
+{ "kind": "thinking_done", "agent": "director", "seconds": 12 }             // "thought for 12s"
+{ "kind": "batch", "agent": "generator", "id": "batch_…", "model": "fal-ai/flux/schnell", "total": 200, "done": 37,
+  "failed": 0, "running": 120, "finished": false, "frame": "b…", "nodes": null /* all ids once finished */ }   // throttled (≤4/s)
+{ "kind": "question", "agent": "fal", "id": "…", "prompt": "…", "approval": false,
+  "questions": [{ "id": "q1", "text": "Which model?", "options": [{ "id": "o1", "label": "Kling" }] }] }   // fal driver: answer in the composer
+{ "kind": "status", "state": "running", "error": "the director stopped mid-step — continuing…", "recovering": true }  // auto-resume
+{ "kind": "status", "state": "error", "error": "the director stopped mid-step.", "actions": ["continue"] }
+```
+- `tool` events have past-tense `summary` strings once done (`generated 4 images (flux/schnell)`,
+  `looked at 3 nodes`, `wrote 8 notes`), present tense while running, and optionally `usd`.
+- Raw SDK diagnostics are never shown: they go to the runtime log.
+
+### Turns, revert, redo
+- The host starts a turn when it sends a `run` (or when the runtime reports `running` for a
+  chat without one) and records every canvas's version. Mutations by the chat's agent sessions
+  (connections with `X-Falos-Chat`) are tracked per (canvas, actor).
+- `chat.revert` runs falos-doc's per-actor `revert_since(turn start)` for each of them, as one
+  step; `chat.redo` re-applies those undo steps. Turns live in memory: after a host restart
+  older turns can't be reverted. Reverting an earlier turn also undoes later turns of the same
+  actors (actors are per agent name, e.g. `director`).
+
+### Queue
+- `chat.send` while a turn runs → `queued` event and `{"type":"queue","chat","id","text","author","from","context":[resolved]}`
+  to the runtime. The runtime injects it into the running Claude Agent SDK query at the next
+  tool call (streaming input, `priority: "next"`; if no tool call comes, it starts the next
+  SDK turn when the current one ends) and replies `{"type":"injected","chat","id","text"}`;
+  the host then emits `dequeued` (reason `injected`) and the `user` event.
+- The fal driver uses queued messages as answers to its questions; the Codex driver runs them
+  as the next turn (it can't take input mid-turn).
+- `chat.unqueue` → host drops it (`dequeued`, reason `cancelled`) and sends `{"type":"unqueue","chat","id"}`.
+- Messages still queued when a turn ends (the runtime never took them) start the next run
+  (`dequeued` reason `started`); the rest queue behind it again (`requeued` + a new `queued`).
+- Cross-chat `chat_send` to a busy chat uses the same queue.
+
+### Drivers
+`driver` per chat (default `opus`): `opus` = Claude Agent SDK director + swarm (Opus 5.5 for
+the director and every subagent); `fal` = the fal Agent directly (its plan → `plan`, activities
+→ `tool`/`agent` events, its own fal-os session/cursor, artifacts → canvas nodes with lineage,
+pending inputs → `question` events, stop → `responses.cancel`, chips → attachments via fal
+storage URLs, multi-turn via `previous_response_id`); `codex` = a Codex thread with the fal-os
+MCP configured (its own session/cursor via `X-Falos-Chat`). Switching drivers starts the next
+run fresh with the transcript as context; the `run` frame says `previous_driver`.
+
+### External agents
+- **Pseudo-chats.** An MCP session without `X-Falos-Chat` (Claude Code, Codex, Cursor, … connected
+  directly) gets a read-only chat `ext:<client>-<n>` (title = agentName, a color, `external: true`,
+  `client`). Its tool calls appear there as `tool` events (`running`, then `done`/`error` with a
+  summary and `nodes`). `state` is `running` while it works and `idle` after 30 s quiet or when
+  the session ends. Chat ids may be `ext:` + `[A-Za-z0-9_-]`; logs are `chats/ext_<…>.jsonl`.
+- **External control.** The fal-os MCP server also has `chat_list(sessionId)`,
+  `chat_new(sessionId, text, context?, driver?, canvas?)` → `{chat}`, `chat_send(sessionId, chat, text, context?)`
+  → `{delivered, queued}`, `chat_read(sessionId, chat, last_n?)` → compact transcript, and
+  `chat_stop(sessionId, chat)`. Their messages show as `{"kind":"user","author":"ext:<client>"}`.
+
+### Host ↔ runtime additions
+- Host → runtime `run` gains `turn`, `driver`, `previous_driver`, `continue` (chat.continue: resume,
+  no new user message) and `outline` (a short canvas outline, first turn only). New frames:
+  `queue`, `unqueue` (above).
+- Runtime → host: `{"type":"injected","chat","id","text"}`, and
+  `{"type":"session.agent","chat","session":"s_…","agent":"generator-2","parent":"director"}`
+  once the runtime knows which subagent a fal-os session belongs to (cursor labels, activity).
+- The runtime's MCP connections send `X-Falos-Chat: <chat>`.
+- Errors: an SDK result error (e.g. `error_during_execution`) is logged, shown as a short
+  message, and the run auto-resumes once in the same SDK session; if that fails too it ends
+  with `status: error` + `actions: ["continue"]`.
+
 ## Runtime events (`event` payload)
 ```jsonc
 { "kind": "user", "text": "…", "context": [/* chips */], "author": "lukas" }
