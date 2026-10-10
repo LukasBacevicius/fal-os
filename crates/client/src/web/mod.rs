@@ -648,26 +648,39 @@ impl App {
                "width": c.viewport[0] / self.dpr, "height": c.viewport[1] / self.dpr})
     }
 
-    fn resize(&mut self, w: f32, h: f32, dpr: f32) {
+    /// `view`: visible size in device pixels (what the camera sees). `back`: the canvas backing
+    /// store in device pixels, at least `view`; the platform over-allocates it (e.g. to the
+    /// window size in 64 px steps) so live resizes of the visible area only move the GPU
+    /// viewport and never reconfigure the swapchain. The canvas element's CSS size follows the
+    /// backing store (it is clipped by its container), so pixels map 1:1.
+    fn resize_px(&mut self, view: [u32; 2], back: [u32; 2], dpr: f32) {
         let max = self.gpu.renderer.device().limits().max_texture_dimension_2d;
-        let pw = ((w * dpr).round() as u32).clamp(1, max);
-        let ph = ((h * dpr).round() as u32).clamp(1, max);
+        let back = [back[0].max(view[0]).clamp(1, max), back[1].max(view[1]).clamp(1, max)];
+        let view = [view[0].clamp(1, back[0]), view[1].clamp(1, back[1])];
         if dpr != self.dpr && self.dpr > 0.0 {
             // Keep the same CSS zoom across DPR changes (moving between displays).
             self.camera.zoom *= dpr / self.dpr;
         }
         self.dpr = dpr;
-        self.canvas_el.set_width(pw);
-        self.canvas_el.set_height(ph);
-        self.gpu.config.width = pw;
-        self.gpu.config.height = ph;
-        self.gpu.surface.configure(self.gpu.renderer.device(), &self.gpu.config);
+        if self.gpu.config.width != back[0] || self.gpu.config.height != back[1] || self.canvas_el.width() != back[0] {
+            self.canvas_el.set_width(back[0]);
+            self.canvas_el.set_height(back[1]);
+            let style = self.canvas_el.style();
+            let _ = style.set_property("width", &format!("{}px", back[0] as f32 / dpr));
+            let _ = style.set_property("height", &format!("{}px", back[1] as f32 / dpr));
+            self.gpu.config.width = back[0];
+            self.gpu.config.height = back[1];
+            self.gpu.surface.configure(self.gpu.renderer.device(), &self.gpu.config);
+        }
         let old = self.camera.viewport;
-        self.camera.viewport = [pw as f32, ph as f32];
-        if old[0] > 0.0 {
-            // Keep the view centered while the window resizes.
-            self.camera.offset[0] -= (pw as f32 - old[0]) * 0.5 / self.camera.zoom;
-            self.camera.offset[1] -= (ph as f32 - old[1]) * 0.5 / self.camera.zoom;
+        let new = [view[0] as f32, view[1] as f32];
+        if old != new {
+            self.camera.viewport = new;
+            if old[0] > 0.0 {
+                // Keep the visual center stable (window resize, chat panel collapse).
+                self.camera.offset[0] -= (new[0] - old[0]) * 0.5 / self.camera.zoom;
+                self.camera.offset[1] -= (new[1] - old[1]) * 0.5 / self.camera.zoom;
+            }
         }
         self.dirty = true;
     }
@@ -1003,7 +1016,21 @@ impl CanvasApp {
 
     /// CSS size of the canvas and the device pixel ratio.
     pub fn resize(&self, width: f32, height: f32, dpr: f32) {
-        self.app.borrow_mut().resize(width, height, dpr);
+        let px = |v: f32| (v * dpr).round().max(1.0) as u32;
+        self.resize_px(px(width), px(height), px(width), px(height), dpr);
+    }
+
+    /// Resizes in device pixels (see `App::resize_px`) and draws a frame right away, in the
+    /// same task: the browser never composites a cleared or stretched canvas. Call it from a
+    /// ResizeObserver callback (`devicePixelContentBoxSize` gives exact device pixels).
+    #[wasm_bindgen(js_name = resizePx)]
+    pub fn resize_px(&self, view_w: u32, view_h: u32, back_w: u32, back_h: u32, dpr: f32) {
+        {
+            let mut a = self.app.borrow_mut();
+            a.resize_px([view_w, view_h], [back_w, back_h], dpr);
+            a.sync_doc();
+            a.render(now_ms());
+        }
         dispatch(&self.app);
     }
 
@@ -1356,7 +1383,6 @@ impl CanvasApp {
         let doc = Canvas::from_snapshot(bytes).map_err(err)?;
         let mut a = self.app.borrow_mut();
         a.feed = ChangeFeed::new(&doc);
-        a.sink_apply(|scene, _, sink| scene.clear(sink));
         a.doc = doc;
         a.sent_vv = a.doc.vv();
         a.rebuild_scene();

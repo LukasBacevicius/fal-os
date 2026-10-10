@@ -1113,6 +1113,11 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The target may be larger than the visible viewport (the platform over-allocates
+            // its backing store so live resizes don't reconfigure the swapchain every frame):
+            // draw into the top-left `camera.viewport` region. The target must be at least
+            // that big.
+            pass.set_viewport(0.0, 0.0, camera.viewport[0].max(1.0), camera.viewport[1].max(1.0), 0.0, 1.0);
             if !self.instances.is_empty() {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);

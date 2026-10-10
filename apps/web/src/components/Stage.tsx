@@ -13,6 +13,22 @@ const ME = { id: 'you', name: 'you' };
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 
+/** Backing-store step (CSS px): the canvas is allocated at the window size rounded up to
+ *  this, so resizing the visible area (window drag, chat panel) only moves the GPU viewport. */
+const BUCKET = 64;
+
+/** Visible size in device pixels + over-allocated backing store size, for `resizePx`. */
+function canvasSizes(wrap: HTMLElement, entry?: ResizeObserverEntry): [number, number, number, number, number] {
+  const dpr = devicePixelRatio || 1;
+  const r = wrap.getBoundingClientRect();
+  const dp = entry?.devicePixelContentBoxSize?.[0];
+  const vw = Math.max(1, dp ? dp.inlineSize : Math.round(r.width * dpr));
+  const vh = Math.max(1, dp ? dp.blockSize : Math.round(r.height * dpr));
+  const bw = Math.ceil(Math.max(r.width, innerWidth) / BUCKET) * BUCKET;
+  const bh = Math.ceil(Math.max(r.height, innerHeight) / BUCKET) * BUCKET;
+  return [vw, vh, Math.max(vw, Math.round(bw * dpr)), Math.max(vh, Math.round(bh * dpr)), dpr];
+}
+
 function editable(t: EventTarget | null) {
   const el = t as HTMLElement | null;
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
@@ -33,16 +49,18 @@ export function Stage() {
     let disposed = false;
     let created: { stop(): void } | null = null;
     const el = canvas.current!;
-    const box = wrap.current!.getBoundingClientRect();
-    el.width = Math.max(1, Math.round(box.width * devicePixelRatio));
-    el.height = Math.max(1, Math.round(box.height * devicePixelRatio));
+    const initial = canvasSizes(wrap.current!);
+    el.width = initial[2];
+    el.height = initial[3];
+    el.style.width = `${initial[2] / initial[4]}px`;
+    el.style.height = `${initial[3] / initial[4]}px`;
     createCanvasApp(el, { actor: ME, canvas: { id: CANVAS_ID, name: CANVAS_ID } })
       .then(async (a) => {
         if (disposed) return;
         created = a;
         attach(a);
         a.setTheme(theme());
-        a.resize(box.width, box.height, devicePixelRatio);
+        a.resizePx(...canvasSizes(wrap.current!));
         setState({ app: a });
         const hosted = await connectHost(a, CANVAS_ID, ME);
         await restore(a, hosted);
@@ -59,15 +77,33 @@ export function Stage() {
     };
   }, []);
 
-  // Size + DPR tracking.
+  // Size + DPR tracking. The ResizeObserver callback runs after layout and before paint;
+  // `resizePx` reconfigures (only when the backing bucket changes) and draws a frame in the
+  // same task, so the browser never shows a cleared or stretched canvas.
   useEffect(() => {
     if (!app) return;
-    const ro = new ResizeObserver(() => {
-      const r = wrap.current!.getBoundingClientRect();
-      app.resize(r.width, r.height, devicePixelRatio);
-    });
-    ro.observe(wrap.current!);
-    return () => ro.disconnect();
+    let last = '';
+    const apply = (entry?: ResizeObserverEntry) => {
+      const s = canvasSizes(wrap.current!, entry);
+      const key = s.join(',');
+      if (key === last) return;
+      last = key;
+      app.resizePx(...s);
+    };
+    const ro = new ResizeObserver((entries) => apply(entries[entries.length - 1]));
+    try {
+      ro.observe(wrap.current!, { box: 'device-pixel-content-box' });
+    } catch {
+      ro.observe(wrap.current!); // WebKit: no device-pixel-content-box
+    }
+    // Window growth past the backing bucket without a stage size change (rare) and DPR
+    // changes in browsers without device-pixel boxes.
+    const onWin = () => apply();
+    window.addEventListener('resize', onWin);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', onWin);
+    };
   }, [app]);
 
   // Pointer, wheel and gesture input.
