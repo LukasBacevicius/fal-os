@@ -93,46 +93,11 @@ function cardCanvas(spec, minH) {
   return { c, g, W, H, k };
 }
 
-function wrap(g, text, maxW, maxLines) {
-  const out = [];
-  for (const para of String(text).split('\n')) {
-    let line = '';
-    for (const word of para.split(/(\s+)/)) {
-      const t = line + word;
-      if (g.measureText(t).width > maxW && line.trim()) { out.push(line.trimEnd()); line = word.trimStart(); } else line = t;
-      if (out.length >= maxLines) return out;
-    }
-    out.push(line.trimEnd());
-    if (out.length >= maxLines) return out;
-  }
-  return out;
-}
-
 function clip(g, text, maxW) {
   let t = String(text);
   if (g.measureText(t).width <= maxW) return t;
   while (t.length > 1 && g.measureText(t + '…').width > maxW) t = t.slice(0, -1);
   return t + '…';
-}
-
-// note / text: a plain mono text block on the panel color (the overlay draws the 1 px border).
-async function textSource(spec) {
-  const th = theme(spec);
-  const { c, g, W, H, k } = cardCanvas(spec, 64);
-  g.fillStyle = th.panel; g.fillRect(0, 0, W, H);
-  const pad = 10 * k, fs = 12.5 * k, lh = Math.round(fs * 1.45);
-  g.textBaseline = 'alphabetic';
-  let top = pad;
-  const body = spec.body || '';
-  if (spec.kind === 'text' && spec.title && spec.title !== body.split('\n')[0]) {
-    g.fillStyle = th.dim; g.font = `400 ${fs * 0.9}px ${MONO}`;
-    g.fillText(clip(g, spec.title, W - pad * 2), pad, top + fs);
-    top += lh;
-  }
-  g.fillStyle = th.text; g.font = `400 ${fs}px ${MONO}`;
-  const lines = wrap(g, body || spec.title || '', W - pad * 2, Math.max(1, Math.floor((H - top - pad * 0.5) / lh)));
-  lines.forEach((l, i) => g.fillText(l, pad, top + fs + i * lh));
-  return { bitmap: await createImageBitmap(c), width: W, height: H, duration: 0 };
 }
 
 // Failed generation: the tile with `failed` in dim mono (the error goes to the chat).
@@ -221,7 +186,6 @@ function makeSource(spec) {
   if (spec.type === 'blob') return imageSource(spec.blob);
   if (spec.type === 'url') return urlSource(spec.url);
   if (spec.kind === 'generation') return generationSource(spec);
-  if (spec.kind === 'text' || spec.kind === 'note') return textSource(spec);
   if (spec.type === 'video') return probe_video(spec.url);
   return cardSource(spec);
 }
@@ -356,6 +320,9 @@ pub enum Content {
     Card,
     /// A generation in flight: the engine's generating tile (no pixels).
     Generating,
+    /// note / text: the engine draws the box; the page lays out the text as crisp, editable
+    /// DOM over it.
+    TextBox,
     None,
 }
 
@@ -369,6 +336,7 @@ pub fn content_of(n: &SceneNode) -> Content {
         NodeKind::Image if n.asset.is_some() => Content::Image,
         NodeKind::Video if n.asset.is_some() => Content::Video,
         NodeKind::Frame | NodeKind::Group | NodeKind::Connector => Content::None,
+        NodeKind::Note | NodeKind::Text => Content::TextBox,
         NodeKind::Generation if !matches!(gen_status(n), "failed" | "canceled" | "cancelled") => Content::Generating,
         _ => Content::Card,
     }
@@ -431,7 +399,7 @@ pub fn source_spec(n: &SceneNode, media: &MediaStore, light: bool) -> Option<(St
             let h = fnv(&format!("{title}\u{1}{body}\u{1}{:.2}\u{1}{:.0}\u{1}{theme}\u{1}{}\u{1}{}", aspect, n.rect[2], n.card, asset.is_some()));
             format!("c:{}:{h:x}", n.id)
         }
-        Content::Generating | Content::None => return None,
+        Content::Generating | Content::TextBox | Content::None => return None,
     };
     Some((key, o.into()))
 }

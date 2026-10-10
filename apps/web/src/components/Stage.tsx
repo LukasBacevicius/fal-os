@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { createCanvasApp } from '../wasm';
-import { setState, useStore } from '../store';
+import { getState, setState, useStore } from '../store';
 import { addSelectionToChat, attach, CANVAS_ID, importFiles, restore } from '../controller';
 import { connectHost, hostSync } from '../sync';
 import { NodeOverlays } from './NodeOverlays';
 import { PresenceLayer } from './PresenceLayer';
 import { StatusBar } from './StatusBar';
+import { TextLayer, createNote, editNode } from './TextLayer';
 import { theme } from '../theme';
 
 /** The local user. The host suffixes the actor id if several browsers connect. */
@@ -28,6 +29,9 @@ function canvasSizes(wrap: HTMLElement, entry?: ResizeObserverEntry): [number, n
   const bh = Math.ceil(Math.max(r.height, innerHeight) / BUCKET) * BUCKET;
   return [vw, vh, Math.max(vw, Math.round(bw * dpr)), Math.max(vh, Math.round(bh * dpr)), dpr];
 }
+
+/** Last pointer position over the canvas (CSS px), for keyboard actions at the cursor. */
+let lastPointer: [number, number] | null = null;
 
 function editable(t: EventTarget | null) {
   const el = t as HTMLElement | null;
@@ -122,6 +126,7 @@ export function Stage() {
     };
     const move = (e: PointerEvent) => {
       const [x, y] = pos(e);
+      lastPointer = [x, y];
       app.pointerMove(x, y, e.shiftKey, e.altKey, meta(e));
       const sync = hostSync();
       if (sync) {
@@ -151,6 +156,15 @@ export function Stage() {
       lastScale = e.scale;
     };
     const ctx = (e: Event) => e.preventDefault();
+    // Double-click: edit a note/text in place, or create a note on empty canvas.
+    const dbl = (e: MouseEvent) => {
+      const [x, y] = pos(e);
+      const hit = app.hitTest(x, y);
+      const n = hit ? getState().nodes.find((m) => m.id === hit) : null;
+      if (n && (n.kind === 'note' || n.kind === 'text')) editNode(n.id);
+      else if (!n || n.kind === 'frame') createNote([x, y]);
+    };
+    el.addEventListener('dblclick', dbl);
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
@@ -170,6 +184,7 @@ export function Stage() {
       el.removeEventListener('gesturestart', gstart as any);
       el.removeEventListener('gesturechange', gchange as any);
       el.removeEventListener('contextmenu', ctx);
+      el.removeEventListener('dblclick', dbl);
     };
   }, [app]);
 
@@ -182,6 +197,22 @@ export function Stage() {
         e.preventDefault();
         addSelectionToChat();
         return;
+      }
+      const sel = getState().selection;
+      if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'n' || e.key === 'N')) {
+        e.preventDefault();
+        const c = getState().camera;
+        const p = lastPointer ?? [c.width / 2, c.height / 2];
+        createNote(p);
+        return;
+      }
+      if (e.key === 'Enter' && sel.length === 1 && !e.metaKey && !e.ctrlKey) {
+        const n = getState().nodes.find((x) => x.id === sel[0]);
+        if (n && (n.kind === 'note' || n.kind === 'text')) {
+          e.preventDefault();
+          editNode(n.id);
+          return;
+        }
       }
       if (app.keyDown(e.key, e.shiftKey, e.altKey, isMac ? e.metaKey : e.ctrlKey)) e.preventDefault();
     };
@@ -222,6 +253,7 @@ export function Stage() {
       onDrop={onDrop}
     >
       <canvas ref={canvas} className="stage-canvas" />
+      <TextLayer />
       <NodeOverlays />
       <PresenceLayer />
       {!loading && !error && empty && <div className="empty faint">empty canvas · drop files to import</div>}

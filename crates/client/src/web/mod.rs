@@ -161,6 +161,11 @@ fn desc_for(n: &SceneNode, media: &MediaStore, pal: &Palette, reveal: bool) -> N
             d.kind = Kind::Image;
             d.content = EngineContent::External;
         }
+        Content::TextBox => {
+            d.kind = Kind::Flat;
+            d.content = EngineContent::None;
+            d.color = pal.panel;
+        }
         Content::Generating => {
             d.kind = Kind::Flat;
             d.content = EngineContent::None;
@@ -202,7 +207,7 @@ impl RenderSink for EngineSink<'_> {
         let h = self.r.add(self.desc(n));
         self.handles.insert(h, n.id.clone());
         self.attach_video(h, n);
-        if !matches!(content_of(n), Content::None | Content::Generating) {
+        if !matches!(content_of(n), Content::None | Content::Generating | Content::TextBox) {
             self.todo.push_front((h, Tier::Low));
         }
         h
@@ -339,7 +344,7 @@ impl App {
         let outlines: Vec<[f32; 4]> = self
             .scene
             .iter()
-            .filter(|n| n.handle.is_some() && n.kind != NodeKind::Generation && matches!(content_of(n), Content::None | Content::Card))
+            .filter(|n| n.handle.is_some() && n.kind != NodeKind::Generation && matches!(content_of(n), Content::None | Content::Card | Content::TextBox))
             .map(|n| n.rect)
             .collect();
         let claims: Vec<[f32; 4]> = self.claims.iter().filter_map(|id| self.scene.get(id)).map(|n| n.rect).collect();
@@ -1177,6 +1182,14 @@ impl CanvasApp {
     #[wasm_bindgen(js_name = worldToScreen)]
     pub fn world_to_screen(&self, x: f32, y: f32) -> Vec<f32> {
         self.app.borrow().css_point([x, y]).to_vec()
+    }
+
+    /// Topmost drawn node under a CSS point, if any.
+    #[wasm_bindgen(js_name = hitTest)]
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<String> {
+        let a = self.app.borrow();
+        let w = a.camera.screen_to_world([x * a.dpr, y * a.dpr]);
+        a.scene.hit_test(w).map(|n| n.id.clone())
     }
 
     #[wasm_bindgen(js_name = screenToWorld)]

@@ -14,6 +14,8 @@ export interface State {
   nodes: NodeView[];
   selection: string[];
   hoverNode: string | null;
+  /** Note/text node being edited in place. */
+  editing: string | null;
   camera: CameraView;
   stats: Stats | null;
   tool: Tool;
@@ -42,6 +44,7 @@ let state: State = {
   nodes: [],
   selection: [],
   hoverNode: null,
+  editing: null,
   camera: { x: 0, y: 0, zoom: 1, width: 0, height: 0 },
   stats: null,
   tool: 'select',
