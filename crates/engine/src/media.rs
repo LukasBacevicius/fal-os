@@ -1,11 +1,17 @@
-//! Pixel sources. The spike synthesizes images and video frames procedurally so we can
-//! measure the pipeline (decode → upload → mips → draw) without codec dependencies.
-//! Real decoders (ImageIO/AVFoundation natively, WebCodecs on web) plug in here.
+//! Pixel sources and helpers.
+//!
+//! - Synthetic pixels ([`synth`]) for benchmarks and the spike: the pipeline (decode → upload →
+//!   mips → draw) can be measured without codecs.
+//! - Real images arrive through [`crate::Pixels`]: CPU RGBA (any size, resampled here) or, on the
+//!   web, a browser image source copied on the GPU (`copyExternalImageToTexture`).
+//! - Real video decode plugs in through [`VideoSource`].
 
 pub const LOW_TILE: u32 = 32;
 pub const LOW_MIPS: u32 = 6; // 32 → 1 px per tile
 pub const DETAIL_TILE: u32 = 256;
 pub const DETAIL_MIPS: u32 = 3; // 256, 128, 64
+pub const HIRES_TILE: u32 = 1024;
+pub const HIRES_MIPS: u32 = 6; // 1024 → 32
 
 fn hash(mut x: u32) -> u32 {
     x ^= x >> 16;
@@ -89,6 +95,42 @@ pub fn downsample(src: &[u8], w: u32, h: u32) -> Vec<u8> {
     dst
 }
 
+/// Area-averages straight-alpha RGBA (`w`×`h`) into a premultiplied `size`×`size` tile. Content is
+/// squeezed to the square (no letterbox): every texel is used, and the renderer undoes the squeeze
+/// with the node's content aspect.
+pub fn resample_square(src: &[u8], w: u32, h: u32, size: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (size * size * 4) as usize];
+    if w == 0 || h == 0 || src.len() < (w * h * 4) as usize {
+        return out;
+    }
+    let (sx, sy) = (w as f32 / size as f32, h as f32 / size as f32);
+    for y in 0..size {
+        let y0 = ((y as f32 * sy) as u32).min(h - 1);
+        let y1 = (((y + 1) as f32 * sy).ceil() as u32).clamp(y0 + 1, h);
+        for x in 0..size {
+            let x0 = ((x as f32 * sx) as u32).min(w - 1);
+            let x1 = (((x + 1) as f32 * sx).ceil() as u32).clamp(x0 + 1, w);
+            let mut acc = [0u32; 4];
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    let i = ((yy * w + xx) * 4) as usize;
+                    let a = src[i + 3] as u32;
+                    acc[0] += src[i] as u32 * a / 255;
+                    acc[1] += src[i + 1] as u32 * a / 255;
+                    acc[2] += src[i + 2] as u32 * a / 255;
+                    acc[3] += a;
+                }
+            }
+            let n = (x1 - x0) * (y1 - y0);
+            let o = ((y * size + x) * 4) as usize;
+            for c in 0..4 {
+                out[o + c] = (acc[c] / n) as u8;
+            }
+        }
+    }
+    out
+}
+
 /// The detail-tier slot a video frame lands in: a square region of one array layer, with
 /// `mips` levels (each level's region is the mip-0 region shifted right by the level).
 pub struct SlotTarget<'a> {
@@ -122,15 +164,15 @@ pub enum FrameUpdate<'a> {
 ///
 /// Without a source the engine falls back to synthesized frames.
 pub trait VideoSource {
-    /// Starts (`true`) or pauses decoding of video `id`, the index of the node among the
-    /// scene's video nodes in node order. Paused videos keep their last frame on screen.
-    fn set_active(&mut self, id: usize, active: bool);
+    /// Starts (`true`) or pauses decoding of video `id` (the node's [`crate::Handle`]).
+    /// Paused videos keep their last frame on screen.
+    fn set_active(&mut self, id: crate::Handle, active: bool);
 
     /// Delivers the latest decoded frame of video `id` if it is newer than the last one
     /// delivered, or whenever `force` is set (its slot was just assigned).
     fn update(
         &mut self,
-        id: usize,
+        id: crate::Handle,
         force: bool,
         target: &SlotTarget,
         device: &wgpu::Device,

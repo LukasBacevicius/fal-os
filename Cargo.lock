@@ -707,6 +707,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "web-time",
 ]
 
 [[package]]
@@ -714,7 +715,10 @@ name = "falos-engine"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "js-sys",
  "log",
+ "wasm-bindgen",
+ "web-sys",
  "web-time",
  "wgpu",
 ]

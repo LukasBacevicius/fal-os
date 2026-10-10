@@ -227,8 +227,9 @@ fn push(host: &LoroDoc, s: &Session) -> Result<()> {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    // web-time: std::time::SystemTime panics on wasm32-unknown-unknown.
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
@@ -540,7 +541,8 @@ impl Canvas {
 
     // ---- reads -----------------------------------------------------------------------
 
-    pub(crate) fn tree(&self) -> LoroTree {
+    /// The node tree (z-order = sibling order). Read-only use: mutate through [`Canvas::apply`].
+    pub fn tree(&self) -> LoroTree {
         self.doc.get_tree(NODES)
     }
 
@@ -613,6 +615,11 @@ impl Canvas {
             text,
             props: m.into_iter().collect(),
         })
+    }
+
+    /// Node snapshot by tree id (e.g. from a `TreeDiff` in a doc subscription).
+    pub fn node_by_tree(&self, t: TreeID) -> Option<Node> {
+        self.read_node(t)
     }
 
     pub fn node(&self, id: &str) -> Option<Node> {
