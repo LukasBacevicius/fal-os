@@ -213,6 +213,7 @@ pub fn router(host: Arc<Host>, token: &str, ct: CancellationToken) -> Router {
     );
     Router::new()
         .route("/sync/{canvas}", get(crate::sync::handler))
+        .merge(crate::runtime::routes())
         .with_state(host)
         .nest_service("/mcp", mcp)
         .layer(middleware::from_fn_with_state(

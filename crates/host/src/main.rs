@@ -25,6 +25,12 @@ enum Cmd {
         /// Preferred port; the next free one is used if busy.
         #[arg(long, default_value_t = server::DEFAULT_PORT)]
         port: u16,
+        /// Agent runtime (apps/agent-runtime) to spawn and supervise; auto-detected when omitted.
+        #[arg(long)]
+        runtime: Option<PathBuf>,
+        /// Don't start the agent runtime (chat messages queue until one connects).
+        #[arg(long)]
+        no_runtime: bool,
     },
     /// Sign in with your fal account (browser, OAuth via fal AuthKit).
     Login,
@@ -51,7 +57,7 @@ async fn main() -> Result<()> {
         )
         .init();
     match Cli::parse().cmd {
-        Cmd::Serve { project, port } => {
+        Cmd::Serve { project, port, runtime, no_runtime } => {
             let token = server::load_or_create_token()?;
             let host = Host::open(&project, HostOptions::default())?;
             let running = server::serve(host.clone(), port, &token).await?;
@@ -59,7 +65,7 @@ async fn main() -> Result<()> {
             HostFile {
                 port,
                 url: server::mcp_url(port),
-                token,
+                token: token.clone(),
                 pid: std::process::id(),
                 project: host.dir().display().to_string(),
             }
@@ -72,6 +78,13 @@ async fn main() -> Result<()> {
             );
             if host.opts.fal_key.is_none() && !falos_host::fal_relay::Relay::available() {
                 tracing::warn!("not signed in to fal: run `falos-host login` so agents can `generate`");
+            }
+            match (no_runtime, runtime.or_else(falos_host::runtime::detect)) {
+                (false, Some(dir)) => {
+                    falos_host::runtime::supervise(host.clone(), dir, port, token, running.cancel.clone())
+                }
+                (false, None) => tracing::warn!("no agent runtime found (pass --runtime <apps/agent-runtime>): chat is disabled"),
+                _ => {}
             }
             tokio::signal::ctrl_c().await?;
             running.cancel.cancel();

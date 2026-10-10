@@ -79,6 +79,14 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// A chat event (see `chat.rs`, `docs/CHAT-PROTOCOL.md`).
+    #[serde(rename = "chat.event")]
+    ChatEvent {
+        canvas: String,
+        chat: String,
+        seq: u64,
+        event: serde_json::Value,
+    },
 }
 
 impl Event {
@@ -88,7 +96,8 @@ impl Event {
             | Event::Claims { canvas, .. }
             | Event::ClaimRevoked { canvas, .. }
             | Event::AnnotationAssigned { canvas, .. }
-            | Event::Job { canvas, .. } => Some(canvas),
+            | Event::Job { canvas, .. }
+            | Event::ChatEvent { canvas, .. } => Some(canvas),
             Event::Presence { .. } | Event::SessionClosed { .. } => None,
         }
     }
@@ -194,6 +203,8 @@ pub struct Host {
     save_needed: Notify,
     pub opts: HostOptions,
     pub http: reqwest::Client,
+    /// Chat routing between canvas clients and the agent runtime.
+    pub chat: crate::chat::ChatHub,
 }
 
 fn slug(s: &str) -> String {
@@ -246,6 +257,7 @@ impl Host {
             save_needed: Notify::new(),
             opts,
             http: reqwest::Client::new(),
+            chat: Default::default(),
         }))
     }
 

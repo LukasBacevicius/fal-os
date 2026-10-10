@@ -262,13 +262,17 @@ impl CanvasMcp {
     pub fn new(host: Arc<Host>) -> Self {
         Self {
             host,
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router() + Self::chat_tools(),
         }
     }
 
     /// Run a tool body; errors become tool errors, and the session's pending notices are
     /// appended so agents hear about revoked claims and new assignments.
-    fn finish(&self, session: Option<&str>, r: Result<String>) -> CallToolResult {
+    pub(crate) fn host(&self) -> &Arc<Host> {
+        &self.host
+    }
+
+    pub(crate) fn finish(&self, session: Option<&str>, r: Result<String>) -> CallToolResult {
         let notices = session
             .map(|s| self.host.take_notices(s))
             .unwrap_or_default();

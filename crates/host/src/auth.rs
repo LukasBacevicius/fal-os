@@ -82,12 +82,12 @@ async fn metadata(http: &reqwest::Client) -> Result<Metadata> {
 
 async fn client(http: &reqwest::Client, md: &Metadata) -> Result<ClientReg> {
     let redirect_uri = format!("http://127.0.0.1:{CALLBACK_PORT}/callback");
-    if let Ok(bytes) = std::fs::read(client_path()) {
-        if let Ok(c) = serde_json::from_slice::<ClientReg>(&bytes) {
-            if c.issuer == ISSUER && c.redirect_uri == redirect_uri {
-                return Ok(c);
-            }
-        }
+    if let Ok(bytes) = std::fs::read(client_path())
+        && let Ok(c) = serde_json::from_slice::<ClientReg>(&bytes)
+        && c.issuer == ISSUER
+        && c.redirect_uri == redirect_uri
+    {
+        return Ok(c);
     }
     let res: Json = http
         .post(&md.registration_endpoint)

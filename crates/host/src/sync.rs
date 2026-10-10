@@ -87,7 +87,10 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
         "sessions": host.sessions(),
         "claims": host.claims(&canvas),
     });
-    if !send_json(&mut socket, hello).await || !send_snapshot(&host, &canvas, &mut socket).await {
+    if !send_json(&mut socket, hello).await
+        || !send_snapshot(&host, &canvas, &mut socket).await
+        || !send_json(&mut socket, crate::chat::history(&host, &canvas)).await
+    {
         host.close_session(&info.id);
         return;
     }
@@ -119,6 +122,12 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(b))) => {
                     if let Err(e) = host.mutate(&canvas, &actor, Some(conn), |c| c.import(&b)) {
+                        let _ = send_json(&mut socket, json!({"type": "error", "message": format!("{e:#}")})).await;
+                    }
+                }
+                Some(Ok(Message::Text(t))) if let Some(m) = crate::chat::chat_frame(&t) => {
+                    // chat.send / chat.stop: see chat.rs.
+                    if let Err(e) = crate::chat::handle_client(&host, &canvas, &name, &m).await {
                         let _ = send_json(&mut socket, json!({"type": "error", "message": format!("{e:#}")})).await;
                     }
                 }
