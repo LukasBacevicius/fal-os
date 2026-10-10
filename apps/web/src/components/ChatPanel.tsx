@@ -38,9 +38,9 @@ function Refs({ ids }: { ids: string[] }) {
   return <>{ids.map((n) => <Fragment key={n}> <NodeRef id={n} /></Fragment>)}</>;
 }
 
-/** Text with known node ids made clickable. */
+/** Text with known node ids made clickable; light markdown (`**`, backticks) is stripped. */
 function Linked({ text, ids }: { text: string; ids: Set<string> }) {
-  const parts = text.split(/([a-z0-9]{6})/i);
+  const parts = text.replace(/\*\*|`/g, '').split(/([a-z0-9]{6})/i);
   return (
     <>
       {parts.map((p, i) => (i % 2 === 1 && ids.has(p) ? <NodeRef key={i} id={p} /> : <Fragment key={i}>{p}</Fragment>))}
@@ -68,6 +68,9 @@ function Chips({ chips, onRemove }: { chips: Chip[]; onRemove?: (i: number) => v
     </div>
   );
 }
+
+/** Housekeeping tool calls that add noise to the transcript. */
+const QUIET_TOOLS = new Set(['session', 'set_status', 'chat_title', 'get_knowledge', 'Read', 'read']);
 
 const MARK: Record<string, string> = { running: '…', started: '…', working: '…', done: '', error: ' !', failed: ' !' };
 
@@ -102,17 +105,20 @@ function Row({ item, ids }: { item: Item; ids: Set<string> }) {
           {open && <div className="row-body">{item.text}</div>}
         </div>
       );
-    case 'tool':
+    case 'tool': {
+      if (QUIET_TOOLS.has(item.name)) return null;
+      const label = item.summary.toLowerCase().startsWith(item.name.toLowerCase()) ? item.summary : `${item.name} ${item.summary}`;
       return (
         <div className="row">
           <div className="row-line" onClick={() => setOpen(!open)}>
-            · {item.agent.padEnd(10)} {item.name} {item.summary}
+            · {item.agent.padEnd(10)} {label}
             {item.nodes.length > 0 && <> →<Refs ids={item.nodes} /></>}
             {MARK[item.state] ?? ` ${item.state}`}
           </div>
           {open && <div className="row-body">state: {item.state}{item.nodes.length ? `\nnodes: ${item.nodes.join(' ')}` : ''}</div>}
         </div>
       );
+    }
     case 'agent':
       return (
         <div className="row">
@@ -139,7 +145,7 @@ function Row({ item, ids }: { item: Item; ids: Set<string> }) {
       return (
         <div className="row">
           <div className="row-line">
-            · done  <Linked text={item.summary} ids={ids} />
+            · done
             {item.nodes.length > 0 && <> →<Refs ids={item.nodes} /></>}
           </div>
         </div>
