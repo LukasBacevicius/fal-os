@@ -74,18 +74,41 @@ enum Drag {
 /// Handle size, in CSS pixels.
 const HANDLE_PX: f32 = 8.0;
 const DRAG_SLOP_PX: f32 = 3.0;
+/// Hover intent: switching the hover to a container (frame/group) or to nothing waits this
+/// long, so crossing a parent's empty area between two children never flashes the parent.
+pub const HOVER_GRACE_MS: f64 = 140.0;
+/// Pointer speed (CSS px/ms) above which hover changes wait for the pointer to slow down.
+const HOVER_FAST: f32 = 2.0;
+/// No hover changes this long after a wheel/pinch event.
+const HOVER_WHEEL_MS: f64 = 160.0;
 
 pub struct Interaction {
     pub tool: Tool,
     pub selection: Vec<String>,
     pub hover: Option<String>,
     pub space: bool,
+    /// The group the user double-clicked into: clicks select inside it instead of the group.
+    pub entered: Option<String>,
     drag: Option<Drag>,
+    /// A hover change waiting for its grace period: target and since when (ms).
+    pending_hover: Option<(Option<String>, f64)>,
+    last_move: Option<([f32; 2], f64)>,
+    last_wheel: f64,
 }
 
 impl Default for Interaction {
     fn default() -> Self {
-        Self { tool: Tool::Select, selection: Vec::new(), hover: None, space: false, drag: None }
+        Self {
+            tool: Tool::Select,
+            selection: Vec::new(),
+            hover: None,
+            space: false,
+            entered: None,
+            drag: None,
+            pending_hover: None,
+            last_move: None,
+            last_wheel: f64::NEG_INFINITY,
+        }
     }
 }
 
@@ -94,6 +117,12 @@ pub struct Ctx<'a> {
     pub camera: &'a mut Camera,
     /// Device pixel ratio (screen points are physical pixels).
     pub dpr: f32,
+    /// Monotonic time in ms (hover intent).
+    pub now: f64,
+}
+
+fn is_container(n: &SceneNode) -> bool {
+    matches!(n.kind, NodeKind::Frame | NodeKind::Group)
 }
 
 /// Handle positions (0 TL, 1 T, 2 TR, 3 R, 4 BR, 5 B, 6 BL, 7 L) of a world rect.
@@ -145,6 +174,72 @@ fn pickable(n: &SceneNode) -> bool {
 }
 
 impl Interaction {
+    /// What a click on `hit` selects (Figma rules): the outermost group around it that the
+    /// user hasn't entered (double-click enters a group); `deep` (⌘-click) selects `hit`.
+    pub fn select_target(&self, scene: &Scene, hit: &SceneNode, deep: bool) -> String {
+        if deep {
+            return hit.id.clone();
+        }
+        let mut chain = Vec::new(); // group ancestors, innermost first
+        let mut cur = hit.parent.as_deref();
+        while let Some(p) = cur.and_then(|id| scene.get(id)) {
+            if p.kind == NodeKind::Group {
+                chain.push(p.id.clone());
+            }
+            cur = p.parent.as_deref();
+        }
+        // The entered group and its ancestors are "open".
+        let mut open = Vec::new();
+        let mut e = self.entered.as_deref();
+        while let Some(n) = e.and_then(|id| scene.get(id)) {
+            open.push(n.id.clone());
+            e = n.parent.as_deref();
+        }
+        chain.into_iter().rev().find(|g| !open.contains(g)).unwrap_or_else(|| hit.id.clone())
+    }
+
+    fn inside(scene: &Scene, id: &str, ancestor: &str) -> bool {
+        let mut cur = Some(id);
+        while let Some(n) = cur.and_then(|i| scene.get(i)) {
+            if n.id == ancestor {
+                return true;
+            }
+            cur = n.parent.as_deref();
+        }
+        false
+    }
+
+    /// Double-click: enters the group around the node under the pointer (selecting one level
+    /// deeper). Returns `(entered group, node under the pointer as now selected)`.
+    pub fn double_click(&mut self, ctx: &mut Ctx, p: [f32; 2]) -> (Option<String>, Option<String>, Vec<Effect>) {
+        let w = ctx.camera.screen_to_world(p);
+        let Some(hit) = ctx.scene.hit_test(w) else { return (None, None, Vec::new()) };
+        let target = self.select_target(ctx.scene, hit, false);
+        if target != hit.id {
+            self.entered = Some(target.clone());
+            let next = self.select_target(ctx.scene, hit, false);
+            self.selection = vec![next.clone()];
+            return (Some(target), Some(next.clone()), vec![Effect::Select(vec![next]), Effect::Overlay]);
+        }
+        (None, Some(hit.id.clone()), Vec::new())
+    }
+
+    /// Resolves a pending hover once its grace period is over (call every frame).
+    pub fn tick(&mut self, now: f64) -> Vec<Effect> {
+        match &self.pending_hover {
+            Some((target, since)) if now - since >= HOVER_GRACE_MS && self.drag.is_none() => {
+                let target = target.clone();
+                self.pending_hover = None;
+                if target != self.hover {
+                    self.hover = target.clone();
+                    return vec![Effect::Hover { node: target }, Effect::Overlay];
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Marquee rect in world units while selecting by drag.
     pub fn marquee(&self) -> Option<[f32; 4]> {
         match &self.drag {
@@ -205,7 +300,13 @@ impl Interaction {
                 }
                 match ctx.scene.hit_test(w) {
                     Some(n) => {
-                        let id = n.id.clone();
+                        // Clicking outside the entered group leaves it.
+                        if let Some(e) = self.entered.clone()
+                            && !Self::inside(ctx.scene, &n.id, &e)
+                        {
+                            self.entered = None;
+                        }
+                        let id = self.select_target(ctx.scene, n, mods.meta);
                         if mods.shift {
                             if let Some(i) = self.selection.iter().position(|s| *s == id) {
                                 self.selection.remove(i);
@@ -221,13 +322,14 @@ impl Interaction {
                             .selection
                             .iter()
                             .filter_map(|s| ctx.scene.get(s))
-                            .filter(|n| n.handle.is_some())
+                            .filter(|n| n.handle.is_some() || n.kind == NodeKind::Group)
                             .map(|n| (n.id.clone(), n.rect))
                             .collect();
                         self.drag = Some(Drag::Move { start: w, items, moved: false });
                     }
                     None => {
                         let base = if mods.shift { self.selection.clone() } else { Vec::new() };
+                        self.entered = None;
                         if !mods.shift && !self.selection.is_empty() {
                             self.selection.clear();
                             fx.push(Effect::Select(Vec::new()));
@@ -267,9 +369,12 @@ impl Interaction {
             Some(Drag::Marquee { start, cur, base }) => {
                 *cur = w;
                 let mut sel = base.clone();
-                for id in ctx.scene.intersecting(norm_rect(*start, *cur)) {
-                    if !sel.contains(&id) {
-                        sel.push(id);
+                let hits = ctx.scene.intersecting(norm_rect(*start, *cur));
+                for id in hits {
+                    let Some(n) = ctx.scene.get(&id) else { continue };
+                    let t = self.select_target(ctx.scene, n, false);
+                    if !sel.contains(&t) {
+                        sel.push(t);
                     }
                 }
                 if sel != self.selection {
@@ -291,7 +396,13 @@ impl Interaction {
         let mut fx = Vec::new();
         let w = ctx.camera.screen_to_world(p);
         let hit = ctx.scene.hit_test(w);
-        let node = hit.map(|n| n.id.clone());
+        // Pointer speed in CSS px/ms.
+        let speed = match self.last_move {
+            Some((q, t)) if ctx.now > t => ((p[0] - q[0]).hypot(p[1] - q[1]) / ctx.dpr) / (ctx.now - t) as f32,
+            _ => 0.0,
+        };
+        self.last_move = Some((p, ctx.now));
+        let node = hit.map(|n| self.select_target(ctx.scene, n, false));
         let cursor = if self.space || self.tool == Tool::Hand {
             "grab"
         } else if let Some((_, i)) = self.handle_at(ctx, p) {
@@ -302,10 +413,21 @@ impl Interaction {
             "default"
         };
         fx.push(Effect::Cursor(cursor));
-        if node != self.hover {
+        if node == self.hover {
+            self.pending_hover = None;
+            return fx;
+        }
+        let container = node.as_deref().and_then(|id| ctx.scene.get(id)).is_some_and(is_container);
+        let wheeling = ctx.now - self.last_wheel < HOVER_WHEEL_MS;
+        if node.is_some() && !container && speed < HOVER_FAST && !wheeling {
+            // Entering a leaf (or a group from outside): switch now, child→child directly.
+            self.pending_hover = None;
             self.hover = node.clone();
             fx.push(Effect::Hover { node });
             fx.push(Effect::Overlay);
+        } else if self.pending_hover.as_ref().is_none_or(|(t, _)| *t != node) {
+            // Containers, empty canvas and fast moves wait for the grace period.
+            self.pending_hover = Some((node, ctx.now));
         }
         fx
     }
@@ -353,6 +475,7 @@ impl Interaction {
 
     /// Wheel / trackpad: pan, or zoom with Cmd/Ctrl (browsers send pinch as ctrl+wheel).
     pub fn wheel(&mut self, ctx: &mut Ctx, p: [f32; 2], d: [f32; 2], mods: Mods) -> Vec<Effect> {
+        self.last_wheel = ctx.now;
         if mods.meta {
             // Zoom speed is per CSS pixel of wheel delta (trackpad pinch sends small deltas).
             let dy = (d[1] / ctx.dpr).clamp(-30.0, 30.0);
@@ -367,6 +490,7 @@ impl Interaction {
 
     /// Safari gesture events: relative scale factor around a screen point.
     pub fn pinch(&mut self, ctx: &mut Ctx, p: [f32; 2], factor: f32) -> Vec<Effect> {
+        self.last_wheel = ctx.now;
         ctx.camera.zoom_at(p, factor);
         vec![Effect::Camera]
     }
@@ -403,6 +527,14 @@ impl Interaction {
                 self.selection.clear();
                 fx.push(Effect::Select(Vec::new()));
                 fx.push(Effect::Commit(cmds));
+            }
+            "Escape" if self.entered.is_some() => {
+                // Go up one level: select the entered group, leave it.
+                let g = self.entered.take().unwrap_or_default();
+                self.entered = ctx.scene.get(&g).and_then(|n| n.parent.clone()).filter(|p| ctx.scene.get(p).is_some_and(|n| n.kind == NodeKind::Group));
+                self.selection = vec![g];
+                fx.push(Effect::Select(self.selection.clone()));
+                fx.push(Effect::Overlay);
             }
             "Escape" => {
                 self.drag = None;
@@ -467,6 +599,9 @@ impl Interaction {
         if self.hover.as_ref().is_some_and(|h| scene.get(h).is_none()) {
             self.hover = None;
         }
+        if self.entered.as_ref().is_some_and(|e| scene.get(e).is_none()) {
+            self.entered = None;
+        }
         before != self.selection.len()
     }
 }
@@ -478,6 +613,102 @@ fn norm_rect(a: [f32; 2], b: [f32; 2]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::RenderSink;
+    use falos_doc::{Actor, Canvas};
+    use falos_engine::Handle;
+
+    struct Sink(Handle);
+    impl RenderSink for Sink {
+        fn add(&mut self, _: &SceneNode) -> Handle {
+            self.0 += 1;
+            self.0
+        }
+        fn update(&mut self, _: Handle, _: &SceneNode, _: bool) {}
+        fn remove(&mut self, _: Handle, _: &SceneNode) {}
+        fn set_order(&mut self, _: &[Handle]) {}
+    }
+
+    /// frame F (0,0 400x200) with images a (10,10 100x100) and b (200,10 100x100);
+    /// group G (500,0) with image c inside.
+    fn scene() -> Scene {
+        let mut c = Canvas::new("c", "t");
+        let node = |id: &str, kind, parent: Option<&str>, r: [f64; 4]| Command::CreateNode {
+            id: Some(id.into()),
+            kind,
+            parent: parent.map(String::from),
+            index: None,
+            name: id.into(),
+            props: serde_json::from_value(json!({"x": r[0], "y": r[1], "w": r[2], "h": r[3], "asset": "sha256:x"})).unwrap(),
+            text: None,
+        };
+        c.apply(
+            &Actor::human("me", "me"),
+            None,
+            &[
+                node("fff", NodeKind::Frame, None, [0.0, 0.0, 400.0, 200.0]),
+                node("aaa", NodeKind::Image, Some("fff"), [10.0, 10.0, 100.0, 100.0]),
+                node("bbb", NodeKind::Image, Some("fff"), [200.0, 10.0, 100.0, 100.0]),
+                node("ggg", NodeKind::Group, None, [500.0, 0.0, 100.0, 100.0]),
+                node("ccc", NodeKind::Image, Some("ggg"), [0.0, 0.0, 100.0, 100.0]),
+            ],
+        )
+        .unwrap();
+        let mut s = Scene::default();
+        s.rebuild(&c, &mut Sink(0));
+        s
+    }
+
+    fn hovered(fx: &[Effect]) -> Option<Option<String>> {
+        fx.iter().find_map(|e| match e {
+            Effect::Hover { node } => Some(node.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn hover_goes_child_to_child_without_flashing_the_parent() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction::default();
+        let mut at = |ix: &mut Interaction, p: [f32; 2], now: f64| {
+            let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now };
+            ix.pointer_move(&mut ctx, p, Mods::default())
+        };
+        assert_eq!(hovered(&at(&mut ix, [50.0, 50.0], 0.0)), Some(Some("aaa".into())));
+        // Crossing the frame's empty area: nothing changes yet…
+        assert_eq!(hovered(&at(&mut ix, [150.0, 50.0], 300.0)), None);
+        assert_eq!(hovered(&ix.tick(350.0)), None);
+        // …and entering the sibling within the grace period switches directly.
+        assert_eq!(hovered(&at(&mut ix, [250.0, 50.0], 400.0)), Some(Some("bbb".into())));
+        assert_eq!(hovered(&ix.tick(1000.0)), None);
+        // Resting on the frame's own area hovers it after the grace period.
+        at(&mut ix, [150.0, 150.0], 2000.0);
+        assert_eq!(hovered(&ix.tick(2000.0 + HOVER_GRACE_MS)), Some(Some("fff".into())));
+    }
+
+    #[test]
+    fn clicks_select_the_group_then_double_click_enters_it() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction::default();
+        let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 0.0 };
+        ix.pointer_down(&mut ctx, [550.0, 50.0], 0, Mods::default());
+        ix.pointer_up(&mut ctx, [550.0, 50.0], Mods::default());
+        assert_eq!(ix.selection, vec!["ggg".to_string()]);
+        let (entered, node, _) = ix.double_click(&mut ctx, [550.0, 50.0]);
+        assert_eq!((entered.as_deref(), node.as_deref()), (Some("ggg"), Some("ccc")));
+        assert_eq!(ix.selection, vec!["ccc".to_string()]);
+        // Esc goes back up to the group.
+        ix.key_down(&mut ctx, "Escape", Mods::default());
+        assert_eq!(ix.selection, vec!["ggg".to_string()]);
+        assert!(ix.entered.is_none());
+        // ⌘-click deep-selects.
+        ix.pointer_down(&mut ctx, [550.0, 50.0], 0, Mods { meta: true, ..Default::default() });
+        assert_eq!(ix.selection, vec!["ccc".to_string()]);
+        // Frame children are selected directly.
+        ix.pointer_down(&mut ctx, [50.0, 50.0], 0, Mods::default());
+        assert_eq!(ix.selection, vec!["aaa".to_string()]);
+    }
 
     #[test]
     fn corner_resize_keeps_aspect_and_anchors_opposite_corner() {

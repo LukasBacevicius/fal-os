@@ -157,8 +157,10 @@ export function Stage() {
     // Double-click: edit a note/text in place, or create a note on empty canvas.
     const dbl = (e: MouseEvent) => {
       const [x, y] = pos(e);
-      const hit = app.hitTest(x, y);
-      const n = hit ? getState().nodes.find((m) => m.id === hit) : null;
+      // Groups: the first double-click enters the group (selects inside it).
+      const r = app.doubleClick(x, y) as { entered: string | null; node: string | null };
+      if (r.entered) return;
+      const n = r.node ? getState().nodes.find((m) => m.id === r.node) : null;
       if (n && (n.kind === 'note' || n.kind === 'text')) editNode(n.id);
       else if (!n || n.kind === 'frame') createNote([x, y]);
     };

@@ -366,7 +366,7 @@ impl App {
     }
 
     fn with_ctx<R>(&mut self, f: impl FnOnce(&mut Interaction, &mut Ctx) -> R) -> R {
-        let mut ctx = Ctx { scene: &self.scene, camera: &mut self.camera, dpr: self.dpr };
+        let mut ctx = Ctx { scene: &self.scene, camera: &mut self.camera, dpr: self.dpr, now: now_ms() };
         f(&mut self.ix, &mut ctx)
     }
 
@@ -391,8 +391,17 @@ impl App {
                     self.dirty = true;
                 }
                 Effect::Commit(cmds) => {
+                    let moved: Vec<String> = cmds
+                        .iter()
+                        .filter_map(|c| match c {
+                            Command::UpdateNode { id, .. } => Some(id.clone()),
+                            _ => None,
+                        })
+                        .collect();
                     let cmds = self.to_parent_space(cmds);
-                    let _ = self.commit(&cmds);
+                    if self.commit(&cmds).is_ok() {
+                        self.refit_groups(&moved);
+                    }
                 }
                 Effect::Select(ids) => {
                     self.emit("selection", json!(ids));
@@ -422,6 +431,61 @@ impl App {
                 Effect::FitAll => self.fit_all(),
             }
         }
+    }
+
+    /// Groups hug their children: after children move or resize, each affected group's
+    /// rect becomes the union of its children (children keep their world positions).
+    fn refit_groups(&mut self, moved: &[String]) {
+        let mut groups: Vec<String> = Vec::new();
+        for id in moved {
+            let mut cur = self.scene.get(id).and_then(|n| n.parent.clone());
+            while let Some(p) = cur {
+                let Some(pn) = self.scene.get(&p) else { break };
+                if pn.kind != NodeKind::Group {
+                    break;
+                }
+                if !groups.contains(&p) {
+                    groups.push(p.clone());
+                }
+                cur = pn.parent.clone();
+            }
+        }
+        // Innermost first, so outer groups see their inner groups' new bounds.
+        groups.sort_by_key(|g| std::cmp::Reverse(self.depth_of(g)));
+        for g in groups {
+            let kids: Vec<String> = self.scene.iter().filter(|n| n.parent.as_deref() == Some(g.as_str())).map(|n| n.id.clone()).collect();
+            let (Some(b), Some(cur)) = (self.scene.bounds_of(&kids), self.scene.get(&g).map(|n| n.rect)) else { continue };
+            if (b[0] - cur[0]).abs() < 0.5 && (b[1] - cur[1]).abs() < 0.5 && (b[2] - cur[2]).abs() < 0.5 && (b[3] - cur[3]).abs() < 0.5 {
+                continue;
+            }
+            let o = self.scene.parent_origin(&g);
+            let (dx, dy) = (b[0] - cur[0], b[1] - cur[1]);
+            let num = |v: f32| json!((v as f64 * 100.0).round() / 100.0);
+            let mut cmds = vec![Command::UpdateNode {
+                id: g.clone(),
+                props: serde_json::from_value(json!({"x": num(b[0] - o[0]), "y": num(b[1] - o[1]), "w": num(b[2]), "h": num(b[3])})).unwrap_or_default(),
+            }];
+            for k in &kids {
+                if let Some(kr) = self.scene.get(k).map(|n| n.rect) {
+                    // Child positions are relative to the group's origin, which moved.
+                    cmds.push(Command::UpdateNode {
+                        id: k.clone(),
+                        props: serde_json::from_value(json!({"x": num(kr[0] - cur[0] - dx), "y": num(kr[1] - cur[1] - dy)})).unwrap_or_default(),
+                    });
+                }
+            }
+            let _ = self.commit(&cmds);
+        }
+    }
+
+    fn depth_of(&self, id: &str) -> usize {
+        let mut d = 0;
+        let mut cur = self.scene.get(id).and_then(|n| n.parent.clone());
+        while let Some(p) = cur {
+            d += 1;
+            cur = self.scene.get(&p).and_then(|n| n.parent.clone());
+        }
+        d
     }
 
     fn preview_rect(&mut self, id: &str, r: [f32; 4]) {
@@ -590,6 +654,8 @@ impl App {
         }
         self.sync_doc();
         self.pump_media();
+        let fx = self.ix.tick(now);
+        self.handle_fx(fx);
         self.update_video_focus();
         // The animation clock stands still during heavy gestures (drags, camera moves), so
         // generating tiles don't add work to those frames.
@@ -1195,6 +1261,19 @@ impl CanvasApp {
     #[wasm_bindgen(js_name = worldToScreen)]
     pub fn world_to_screen(&self, x: f32, y: f32) -> Vec<f32> {
         self.app.borrow().css_point([x, y]).to_vec()
+    }
+
+    /// Double-click at a CSS point: enters the group around the node there (Figma). Returns
+    /// `{entered, node}`: the group entered (if any) and the node under the pointer.
+    #[wasm_bindgen(js_name = doubleClick)]
+    pub fn double_click(&self, x: f32, y: f32) -> JsValue {
+        let mut a = self.app.borrow_mut();
+        let p = [x * a.dpr, y * a.dpr];
+        let (entered, node, fx) = a.with_ctx(|ix, ctx| ix.double_click(ctx, p));
+        a.handle_fx(fx);
+        drop(a);
+        dispatch(&self.app);
+        to_js(&json!({"entered": entered, "node": node}))
     }
 
     /// Topmost drawn node under a CSS point, if any.

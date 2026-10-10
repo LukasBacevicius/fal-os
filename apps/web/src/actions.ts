@@ -134,7 +134,8 @@ export async function paste(e: ClipboardEvent, at: [number, number] | null) {
   }
 }
 
-/** ⌘G: wraps the selection (siblings of one parent) in a new frame. */
+/** ⌘G: wraps the selection (siblings of one parent) in a new group fitted to it; the
+ *  children keep their world positions. */
 export function groupIntoFrame() {
   const { app, nodes, selection } = getState();
   if (!app || !selection.length) return;
@@ -146,12 +147,12 @@ export function groupIntoFrame() {
   }
   const rects = worldRects(nodes);
   const rs = roots.map((n) => rects.get(n.id)!);
-  const pad = 24;
+  const pad = 0;
   const x0 = Math.min(...rs.map((r) => r[0])) - pad, y0 = Math.min(...rs.map((r) => r[1])) - pad;
   const x1 = Math.max(...rs.map((r) => r[0] + r[2])) + pad, y1 = Math.max(...rs.map((r) => r[1] + r[3])) + pad;
   const po: Rect = parent ? rects.get(parent)! : [0, 0, 0, 0];
   const id = newId();
-  const cmds: unknown[] = [{ op: 'create', id, kind: 'frame', parent, name: 'frame', props: { x: Math.round(x0 - po[0]), y: Math.round(y0 - po[1]), w: Math.round(x1 - x0), h: Math.round(y1 - y0) } }];
+  const cmds: unknown[] = [{ op: 'create', id, kind: 'group', parent, name: 'group', props: { x: Math.round(x0 - po[0]), y: Math.round(y0 - po[1]), w: Math.round(x1 - x0), h: Math.round(y1 - y0) } }];
   roots.forEach((n, i) => {
     const r = rs[i];
     cmds.push({ op: 'move', id: n.id, parent: id });

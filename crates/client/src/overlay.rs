@@ -96,7 +96,8 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
     if let Some(h) = i.hover.and_then(|h| i.scene.get(h))
         && !i.selection.iter().any(|s| s == &h.id)
     {
-        out.push(OverlayPrim::rect(h.rect, 0, p.dim, d));
+        // Subtle: clearly weaker than the selection outline.
+        out.push(OverlayPrim::rect(h.rect, 0, (p.ink & 0x00ff_ffff) | (100 << 24), d));
     }
     for s in i.selection.iter().filter_map(|id| i.scene.get(id)) {
         out.push(OverlayPrim::rect(s.rect, 0, p.ink, d));

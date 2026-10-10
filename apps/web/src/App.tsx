@@ -3,6 +3,7 @@ import { useStore } from './store';
 import { Stage } from './components/Stage';
 import { ChatPanel } from './components/ChatPanel';
 import { Help, Palette } from './components/Palette';
+import { Outline } from './components/Outline';
 
 function stored(key: string, fallback: number) {
   try {
@@ -18,6 +19,7 @@ export function App() {
   const toast = useStore((s) => s.toast);
   const chatOpen = useStore((s) => s.chatOpen);
   const overlay = useStore((s) => s.overlay);
+  const outline = useStore((s) => s.outlineOpen ?? s.nodes.some((n) => n.kind === 'frame' || n.kind === 'group'));
   const [chatWidth, setChatWidth] = useState(() => stored('falos.chatWidth', 360));
 
   useEffect(() => {
@@ -32,6 +34,7 @@ export function App() {
   return (
     <div className="app">
       <div className="main">
+        {outline && <Outline />}
         <Stage />
         {chatOpen && <ChatPanel width={chatWidth} onResize={setChatWidth} />}
       </div>

@@ -13,6 +13,7 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | ⌘K | Command palette: actions, chats, nodes (everywhere) |
 | `?` | Shortcut list |
 | ⌘\\ | Show or hide the chat panel (everywhere) |
+| ⌘⇧\\ | Show or hide the outline of frames and groups (everywhere) |
 
 ## Chat
 | Keys | Action |
@@ -39,7 +40,9 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | ⌘A | Select all |
 | Esc | Deselect |
 | ⌘D | Duplicate |
-| ⌘G / ⌘⇧G | Group the selection into a frame / ungroup, keeping children in place |
+| ⌘G / ⌘⇧G | Group the selection / ungroup. Children keep their place, and a group always hugs its children |
+| Click / double-click / Esc | A click on something inside a group selects the group. Double-click enters the group, and Esc goes back up a level |
+| ⌘-click | Select inside groups directly |
 | ⌘C / ⌘V | Copy or paste nodes. Pasting images or files creates media nodes, uploaded to the host like a drop; pasting text creates a note |
 | ⌫ / Delete | Delete |
 | Arrows / ⇧Arrows | Nudge 1 px / 10 px |
@@ -54,3 +57,12 @@ palette. The shortcuts marked "everywhere" work in those places too.
 - ⌘+, ⌘− and ⌘0 are taken over on the canvas, so they zoom the canvas rather than the page.
 - ⌘L, ⌘D and ⌘G are taken only while the canvas has focus (not while you type),
   so the browser's own address bar, bookmark and find shortcuts stay reachable from inputs.
+
+## Outline (left panel)
+| Keys | Action |
+|---|---|
+| Click | Select and zoom to the frame or group |
+| ⏎ or double-click | Rename |
+| ⌫ / Delete | Delete the frame or group with its contents. To keep the children, use ⌘⇧G on the canvas |
+| ↑ ↓ / → ← | Move between rows / expand or collapse |
+| Drag | Reorder, or drop onto a frame or group to move into it (world position is kept) |

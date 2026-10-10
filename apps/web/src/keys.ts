@@ -37,7 +37,10 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: '⌘A', desc: 'select all' },
   { group: 'canvas', keys: 'esc', desc: 'deselect' },
   { group: 'canvas', keys: '⌘D', desc: 'duplicate' },
-  { group: 'canvas', keys: '⌘G  ⌘⇧G', desc: 'group into a frame / ungroup' },
+  { group: 'canvas', keys: '⌘G  ⌘⇧G', desc: 'group / ungroup (children keep their place)' },
+  { group: 'canvas', keys: 'double-click  esc', desc: 'enter a group / back up a level' },
+  { group: 'canvas', keys: '⌘ click', desc: 'select inside groups directly' },
+  { group: 'app', keys: '⌘⇧\\', desc: 'show / hide the outline (frames and groups)' },
   { group: 'canvas', keys: '⌘C  ⌘V', desc: 'copy / paste nodes; paste images and files as media' },
   { group: 'canvas', keys: '⌫', desc: 'delete' },
   { group: 'canvas', keys: 'arrows  ⇧arrows', desc: 'nudge 1 px / 10 px' },
@@ -75,6 +78,18 @@ export function switchChat(i: number | 'prev' | 'next') {
   const idx = i === 'prev' ? Math.max(0, cur - 1) : i === 'next' ? Math.min(list.length - 1, cur + 1) : i;
   const id = list[idx];
   if (id) setState((s) => ({ chatOpen: true, chat: selectChat(s.chat, id) }));
+}
+
+export function toggleOutline() {
+  setState((s) => {
+    const open = !(s.outlineOpen ?? s.nodes.some((n) => n.kind === 'frame' || n.kind === 'group'));
+    try {
+      localStorage.setItem('falos.outline', open ? '1' : '0');
+    } catch {
+      /* private mode */
+    }
+    return { outlineOpen: open };
+  });
 }
 
 export function toggleChat() {
@@ -116,6 +131,7 @@ export function installKeys(): () => void {
 
     // Global (also while typing).
     if (mod && !e.shiftKey && (k === 'k' || k === 'K')) return done(), setState({ overlay: overlay === 'palette' ? null : 'palette' });
+    if (mod && e.shiftKey && (k === '\\' || k === '|')) return done(), toggleOutline();
     if (mod && k === '\\') return done(), toggleChat();
     if ((mod || ctrl) && !e.shiftKey && (k === 'n' || k === 'N')) return done(), newChat();
     if ((mod || ctrl) && e.shiftKey && (k === '[' || k === '{')) return done(), switchChat('prev');

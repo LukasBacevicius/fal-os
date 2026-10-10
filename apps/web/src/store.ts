@@ -29,6 +29,8 @@ export interface State {
   jobs: Record<string, import('./sync').JobInfo>;
   chat: ChatState;
   chatOpen: boolean;
+  /** Left outline of frames/groups; null = automatic (shown when the canvas has any). */
+  outlineOpen: boolean | null;
   /** Modal overlay: command palette or the shortcut list. */
   overlay: 'palette' | 'help' | null;
   toast: string | null;
@@ -62,6 +64,14 @@ let state: State = {
     }
   })(),
   overlay: null,
+  outlineOpen: (() => {
+    try {
+      const v = localStorage.getItem('falos.outline');
+      return v === '1' ? true : v === '0' ? false : null;
+    } catch {
+      return null;
+    }
+  })(),
   toast: null,
   saved: 'idle',
 };

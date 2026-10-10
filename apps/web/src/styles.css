@@ -195,6 +195,23 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .help-row { display: flex; gap: 2ch; }
 .help-keys { width: 24ch; flex: none; color: var(--dim); white-space: pre; }
 
+/* ---- outline ---- */
+
+.outline { flex: none; width: 220px; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.outline-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.outline-row { display: flex; gap: 1ch; align-items: center; padding-right: 8px; white-space: nowrap; cursor: default; outline: none; border-top: 1px solid transparent; border-bottom: 1px solid transparent; }
+.outline-row:hover { color: var(--text); background: var(--panel); }
+.outline-row:focus-visible { background: var(--panel); }
+.outline-row.on { color: var(--bg); background: var(--text); }
+.outline-row.on .faint, .outline-row.on .dim { color: var(--bg); }
+.outline-row.drop-in { outline: 1px solid var(--dim); outline-offset: -1px; }
+.outline-row.drop-before { border-top-color: var(--text); }
+.outline-row.drop-after { border-bottom-color: var(--text); }
+.outline-caret { width: 1ch; flex: none; cursor: pointer; }
+.outline-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.outline-edit { flex: 1; min-width: 0; border: 0; outline: 1px solid var(--line); background: var(--bg); padding: 0; }
+.outline-empty { padding: 4px 8px; white-space: normal; }
+
 /* ---- chat ---- */
 
 .chat {
