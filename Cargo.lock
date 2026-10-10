@@ -699,6 +699,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "falos-client"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "falos-doc",
+ "falos-engine",
+ "js-sys",
+ "log",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "wgpu",
+]
+
+[[package]]
 name = "falos-doc"
 version = "0.1.0"
 dependencies = [

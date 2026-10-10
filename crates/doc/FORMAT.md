@@ -7,10 +7,10 @@ children by 2 spaces. Sibling order is z-order: the first row is at the bottom.
 ```
 jbuzws frame "Moodboard" s(2000,1200) by(@lukas)
   881s9r image "red car v3" p(40,80) s(1024,1024) asset(sha:9f86) by(@claude)
-    ! yflw1y open box(10,20,200,100) to(@codex) by(@lukas)
+    ! yflw1y open box(0.1,0.2,0.4,0.3) to(@codex) by(@lukas)
       > @lukas "make the sky stormier"
   g466bb video "drive" p(1100,80) asset(sha:aa) in(1.5) out(4) loop muted by(@lukas)
-    ! 5zjgm0 open frame(4.2) box(0,0,300,120) by(@lukas)
+    ! 5zjgm0 open frame(4.2) box(0,0,0.5,0.25) by(@lukas)
   b59dlc generation "variation" status(running) model(fal-ai/flux/dev) progress(0.4) params({"prompt":"red car"}) by(@claude)
 ```
 
@@ -64,7 +64,9 @@ follows as `>` rows one level deeper.
 `! <id> <status> <anchor> [to(@actor)] [out(id,…)] [by(@author)]`
 
 - **status**: `open`, `in_progress` or `resolved`.
-- **anchor**, in node-local pixels or seconds:
+- **anchor**: 2D coordinates are node-local and normalized (0..1 of the node's width and
+  height, so they survive resizing; multiply by the asset's pixel size for media pixels); times
+  are seconds:
 
   | anchor | syntax |
   |---|---|

@@ -284,7 +284,8 @@ pub struct Camera {
     pub fov: f64,
 }
 
-/// Where on a node an annotation points. Coordinates are node-local (media pixels),
+/// Where on a node an annotation points. 2D coordinates are node-local and normalized
+/// (0..1 of the node's width/height),
 /// times are seconds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

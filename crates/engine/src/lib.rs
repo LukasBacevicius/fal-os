@@ -1677,7 +1677,7 @@ pub fn demo_scene(count: usize, videos: usize) -> Vec<NodeDesc> {
     };
     let row_width = (count as f32).sqrt() * 300.0;
     let (mut x, mut y, mut row_h) = (0.0f32, 0.0f32, 0.0f32);
-    let video_every = if videos == 0 { usize::MAX } else { (count / videos).max(1) };
+    let video_every = count.checked_div(videos).map_or(usize::MAX, |v| v.max(1));
     (0..count)
         .map(|i| {
             let aspect = [1.0, 1.5, 0.75, 1.777, 0.5625, 1.0][(next() % 6) as usize];
