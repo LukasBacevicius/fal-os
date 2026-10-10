@@ -124,6 +124,13 @@ impl Relay {
         if let Some(s) = result.get("structuredContent").filter(|s| !s.is_null()) {
             return Ok(s.clone());
         }
-        Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({"text": text})))
+        // The relay's text content is a JSON document, sometimes followed by a footer line
+        // (e.g. "fal account: …"): take the leading JSON value.
+        let start = text.find(['{', '[']).unwrap_or(0);
+        Ok(serde_json::Deserializer::from_str(&text[start..])
+            .into_iter::<Json>()
+            .next()
+            .and_then(Result::ok)
+            .unwrap_or_else(|| json!({"text": text})))
     }
 }
