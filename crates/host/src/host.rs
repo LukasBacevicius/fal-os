@@ -21,6 +21,17 @@ const COLORS: [&str; 8] = [
     "#e5484d", "#f76b15", "#ffc53d", "#46a758", "#12a594", "#0090ff", "#8e4ec6", "#d6409f",
 ];
 
+/// `FAL_KEY=…` from `$FALOS_HOME/fal.env` (the same file the agent runtime reads).
+fn fal_env_key() -> Option<String> {
+    let text = std::fs::read_to_string(crate::server::home_dir().join("fal.env")).ok()?;
+    text.lines().find_map(|l| {
+        let l = l.trim().trim_start_matches("export ").trim();
+        let v = l.strip_prefix("FAL_KEY")?.trim_start().strip_prefix('=')?;
+        let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
+        (!v.is_empty()).then(|| v.to_string())
+    })
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -93,6 +104,9 @@ pub enum Event {
         canvas: String,
         chats: serde_json::Value,
     },
+    /// Batch generation progress (see `batch.rs`); same payload as the `batch` chat event.
+    #[serde(rename = "batch")]
+    Batch { canvas: String, batch: serde_json::Value },
     /// A chat was deleted (see `chat.rs`).
     #[serde(rename = "chat.deleted")]
     ChatDeleted { canvas: String, chat: String },
@@ -147,6 +161,7 @@ impl Event {
             | Event::ChatEvent { canvas, .. }
             | Event::ChatList { canvas, .. }
             | Event::ChatDeleted { canvas, .. }
+            | Event::Batch { canvas, .. }
             | Event::Activity { canvas, .. } => Some(canvas),
             Event::Presence { .. }
             | Event::SessionClosed { .. }
@@ -289,7 +304,10 @@ impl Default for HostOptions {
         Self {
             fal_queue_url: std::env::var("FALOS_FAL_QUEUE_URL")
                 .unwrap_or_else(|_| "https://queue.fal.run".into()),
-            fal_key: std::env::var("FAL_KEY").ok().filter(|k| !k.is_empty()),
+            fal_key: std::env::var("FAL_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .or_else(fal_env_key),
             fal_session: true,
             renderer: Box::new(NoRenderer),
             home: std::env::var_os("HOME").map(PathBuf::from),
@@ -312,6 +330,8 @@ pub struct Host {
     pub chat: crate::chat::ChatHub,
     /// `(mcp url, token)` of the running server, for `agent.register`.
     pub endpoint: Mutex<Option<(String, String)>>,
+    /// Running and finished batch generations (`generate_batch`).
+    pub batches: crate::batch::Batches,
     sweeper: std::sync::Once,
 }
 
@@ -367,6 +387,7 @@ impl Host {
             http: reqwest::Client::new(),
             chat: Default::default(),
             endpoint: Mutex::default(),
+            batches: Default::default(),
             sweeper: std::sync::Once::new(),
         }))
     }

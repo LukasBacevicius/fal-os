@@ -520,6 +520,17 @@ impl Canvas {
     }
 
     fn owner_of(&self, cid: &ContainerID, anns_root: &ContainerID) -> Option<Owner> {
+        // Containers of deleted nodes (e.g. a generation placeholder's meta after the job
+        // updated it and the conversion deleted it) have no path: asking Loro for one logs
+        // "Missing in parent's children" for each. Their deletion is reported through the
+        // tree's last-move ids in `changes_since` instead.
+        if self
+            .doc
+            .get_container(cid.clone())
+            .is_none_or(|c| c.is_deleted())
+        {
+            return None;
+        }
         // Path entries are (container, how it's reached from the previous entry), root first.
         let path = self.doc.get_path_to_container(cid)?;
         if let Some(t) = path.iter().find_map(|(_, i)| match i {

@@ -212,6 +212,40 @@ pub struct PlacementArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct GenerateBatchArgs {
+    pub session_id: String,
+    pub canvas: String,
+    /// fal endpoint for every job (or per job in `jobs`). Prefer fast models for "quick"
+    /// requests (e.g. fal-ai/flux/schnell).
+    pub model: Option<String>,
+    /// Shared input (e.g. {"prompt": "...", "image_size": "square_hd", "num_images": 4}).
+    /// `num_images` > 1 makes each request return several outputs: fewer requests.
+    pub input: Option<serde_json::Map<String, Json>>,
+    /// Number of requests with the shared input (default: one per variation, else 1).
+    pub count: Option<usize>,
+    /// Prompt variations, cycled over the requests (sets `input.prompt`).
+    pub variations: Option<Vec<String>>,
+    /// Explicit jobs: [{"model"?, "input": {...}, "name"?}] (merged over the shared input).
+    pub jobs: Option<Vec<Json>>,
+    /// Frame/group to place the batch in.
+    pub parent: Option<String>,
+    /// Node ids to place the batch next to (default: the user's selection).
+    pub near: Option<Vec<String>>,
+    /// Frame title (default: the first words of the prompt); a frame is made for 8+ outputs.
+    pub label: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AwaitBatchArgs {
+    pub session_id: String,
+    pub batch: String,
+    /// Max seconds to wait (default 300, max 1800).
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct FinishWorkingArgs {
     pub session_id: String,
     /// Node ids you are done with (default: all).
@@ -1050,6 +1084,73 @@ impl CanvasMcp {
                 "hint": "read with root=<node> to follow progress; it turns into the media node with the same id",
             }))?)
         })();
+        self.finish(Some(&a.session_id), r)
+    }
+
+    #[tool(
+        description = "Generate MANY outputs at once (use this instead of calling `generate` in a loop): all placeholders appear immediately in a tidy grid in free space (in a frame for 8+), every fal job is submitted in parallel, results land progressively. Returns the batch id and node ids at once; call `await_batch` only if you need the results. Use `num_images` in the input when the model supports it.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn generate_batch(&self, Parameters(a): Parameters<GenerateBatchArgs>) -> CallToolResult {
+        let r = (|| {
+            let actor = self.host.actor(&a.session_id)?;
+            let jobs = crate::batch::jobs_from(
+                a.jobs,
+                a.model,
+                a.input.map(Json::Object),
+                a.count,
+                a.variations,
+            )?;
+            let b = crate::batch::start(
+                &self.host,
+                &actor,
+                Some(&a.session_id),
+                &a.canvas,
+                crate::batch::Request {
+                    jobs,
+                    parent: a.parent,
+                    near: a.near.unwrap_or_default(),
+                    label: a.label,
+                    cell: None,
+                },
+            )?;
+            if let Some(n) = b.nodes.first() {
+                self.host.touch_nodes(&a.session_id, &a.canvas, std::slice::from_ref(n));
+            }
+            Ok(serde_json::to_string_pretty(&json!({
+                "batch": b.id, "frame": b.frame, "total": b.nodes.len(), "nodes": b.nodes,
+                "hint": "placeholders turn into media as jobs finish; await_batch(batch) to wait for them",
+            }))?)
+        })();
+        self.finish(Some(&a.session_id), r)
+    }
+
+    #[tool(
+        description = "Wait for a generate_batch batch to finish (or the timeout) and return its outcome: done/failed counts, node ids, errors.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn await_batch(&self, Parameters(a): Parameters<AwaitBatchArgs>) -> CallToolResult {
+        let r = async {
+            self.host.actor(&a.session_id)?;
+            let b = self
+                .host
+                .batches
+                .get(&a.batch)
+                .ok_or_else(|| anyhow!("unknown batch `{}`", a.batch))?;
+            b.wait(Duration::from_secs(a.timeout_secs.unwrap_or(300).clamp(1, 1800))).await;
+            Ok(serde_json::to_string_pretty(&b.summary())?)
+        }
+        .await;
         self.finish(Some(&a.session_id), r)
     }
 

@@ -20,7 +20,8 @@ use crate::host::{Event, Host};
 
 /// How jobs reach fal: the user's OAuth session through the fal MCP relay (default), or a
 /// raw `FAL_KEY` against the queue API (CI/tests).
-enum Backend {
+#[derive(Clone)]
+pub(crate) enum Backend {
     Relay(&'static Relay),
     Key(String),
 }
@@ -34,7 +35,7 @@ const POLL: Duration = Duration::from_millis(1000);
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The system actor that writes job progress (kept off the requester's undo stack).
-fn jobs_actor() -> Actor {
+pub(crate) fn jobs_actor() -> Actor {
     Actor::agent("fal", "fal queue")
 }
 
@@ -47,6 +48,22 @@ pub struct Placement {
 }
 
 /// Create the generation node and spawn the job. Returns the node id.
+/// How the host talks to fal: `FAL_KEY`, else the signed-in fal session.
+pub(crate) fn backend(host: &Host) -> Result<Backend> {
+    Ok(match host.opts.fal_key.clone() {
+        Some(key) => Backend::Key(key),
+        None if host.opts.fal_session && Relay::available() => Backend::Relay(relay(&host.http)),
+        None => bail!("the fal-os host is not signed in to fal: ask the user to run `falos-host login`"),
+    })
+}
+
+pub(crate) fn check_model(model: &str) -> Result<()> {
+    if model.is_empty() || model.contains("..") || model.starts_with('/') {
+        bail!("bad model id `{model}`");
+    }
+    Ok(())
+}
+
 pub fn start(
     host: &Arc<Host>,
     actor: &Actor,
@@ -55,14 +72,8 @@ pub fn start(
     input: Json,
     place: Placement,
 ) -> Result<String> {
-    let backend = match host.opts.fal_key.clone() {
-        Some(key) => Backend::Key(key),
-        None if host.opts.fal_session && Relay::available() => Backend::Relay(relay(&host.http)),
-        None => bail!("the fal-os host is not signed in to fal: ask the user to run `falos-host login`"),
-    };
-    if model.is_empty() || model.contains("..") || model.starts_with('/') {
-        bail!("bad model id `{model}`");
-    }
+    let backend = backend(host)?;
+    check_model(model)?;
     let canvas = host.resolve_canvas(canvas)?;
     let (w, h) = (place.w.unwrap_or(512.0), place.h.unwrap_or(512.0));
     let (x, y) = match (place.x, place.y) {
@@ -122,14 +133,14 @@ pub fn start(
     Ok(node)
 }
 
-struct Job {
-    host: Arc<Host>,
-    canvas: String,
-    node: String,
-    model: String,
-    input: Json,
-    backend: Backend,
-    requester: String,
+pub(crate) struct Job {
+    pub host: Arc<Host>,
+    pub canvas: String,
+    pub node: String,
+    pub model: String,
+    pub input: Json,
+    pub backend: Backend,
+    pub requester: String,
 }
 
 impl Job {
@@ -175,7 +186,7 @@ impl Job {
         self.event("failed", None, Some(err.into()));
     }
 
-    async fn submit(&self) -> Result<(String, Json)> {
+    pub(crate) async fn submit(&self) -> Result<(String, Json)> {
         match &self.backend {
             Backend::Key(key) => {
                 let submit: Json = self
@@ -207,7 +218,7 @@ impl Job {
     }
 
     /// Returns the job status (`IN_QUEUE`, `IN_PROGRESS`, `COMPLETED`, …) and queue position.
-    async fn status(&self, id: &str, submit: &Json) -> Result<(String, Option<u64>, Option<String>)> {
+    pub(crate) async fn status(&self, id: &str, submit: &Json) -> Result<(String, Option<u64>, Option<String>)> {
         let s: Json = match &self.backend {
             Backend::Key(key) => {
                 let url = submit["status_url"]
@@ -237,7 +248,7 @@ impl Job {
         Ok((status, s["queue_position"].as_u64(), error))
     }
 
-    async fn result(&self, id: &str, submit: &Json) -> Result<Json> {
+    pub(crate) async fn result(&self, id: &str, submit: &Json) -> Result<Json> {
         match &self.backend {
             Backend::Key(key) => {
                 let url = submit["response_url"]
@@ -303,27 +314,10 @@ impl Job {
 
         let result = self.result(&request_id, &submit).await?;
         let media = find_media(&result).ok_or_else(|| anyhow!("no media url in fal result"))?;
-        let bytes = http
-            .get(&media.url)
-            .send()
-            .await?
-            .error_for_status()
-            .context("downloading output")?
-            .bytes()
-            .await?;
-        let hex: String = Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let dir = self.host.dir().join("assets");
-        tokio::fs::create_dir_all(&dir).await?;
-        let file = dir.join(format!("{hex}.{}", media.ext));
-        tokio::fs::write(&file, &bytes).await?;
-        let asset = Asset {
-            id: format!("sha256:{hex}"),
-            mime: media.mime.clone(),
-            uri: Some(media.url.clone()),
-            lineage: Some(Lineage {
+        let asset = download(
+            &self.host,
+            &media,
+            Lineage {
                 model: self.model.clone(),
                 params: self.input.clone(),
                 seed: result.get("seed").and_then(Json::as_i64),
@@ -331,73 +325,132 @@ impl Job {
                 fal_request_id: Some(request_id),
                 cost: None,
                 actor: self.requester.clone(),
-            }),
-        };
-        self.convert(media, asset)?;
+            },
+        )
+        .await?;
+        let actor = jobs_actor();
+        self.host.mutate(&self.canvas, &actor.id, None, |c| {
+            let cmds = convert_cmds(c, &self.node, &media, &asset)
+                .map_err(|e| falos_doc::Error::Invalid(format!("{e:#}")))?;
+            if !cmds.is_empty() {
+                c.apply(&actor, None, &cmds)?;
+            }
+            Ok(())
+        })?;
+        let _ = http;
         self.event("done", None, None);
         Ok(())
     }
+}
 
-    /// Turn the generation node into the media node, keeping id, parent and z-order.
-    fn convert(&self, media: Media, asset: Asset) -> Result<()> {
-        let actor = jobs_actor();
-        self.host.mutate(&self.canvas, &actor.id, None, |c| {
-            let Some(n) = c
-                .node(&self.node)
-                .filter(|n| n.kind == NodeKind::Generation)
-            else {
-                return Ok(());
-            };
-            let siblings: Vec<String> = match &n.parent {
-                Some(p) => c.node(p).map(|p| p.children).unwrap_or_default(),
-                None => c
-                    .nodes()
-                    .into_iter()
-                    .filter(|x| x.parent.is_none())
-                    .map(|x| x.id)
-                    .collect(),
-            };
-            let index = siblings.iter().position(|s| *s == n.id);
-            let h = match (media.width, media.height) {
-                (Some(mw), Some(mh)) if mw > 0.0 => n.w * mh / mw,
-                _ => n.h,
-            };
-            let props: Props = serde_json::from_value(json!({
-                "x": n.x, "y": n.y, "w": n.w, "h": h, "asset": asset.id,
-            }))?;
-            c.apply(
-                &actor,
-                None,
-                &[
-                    Command::PutAsset(asset.clone()),
-                    Command::DeleteNode { id: n.id.clone() },
-                    Command::CreateNode {
-                        id: Some(n.id.clone()),
-                        kind: media.kind,
-                        parent: n.parent.clone(),
-                        index,
-                        name: n.name.clone(),
-                        props,
-                        text: None,
-                    },
-                ],
-            )?;
-            Ok(())
-        })
+/// Download a fal output into the project's assets (by sha256); returns its asset record.
+pub(crate) async fn download(host: &Host, media: &Media, lineage: Lineage) -> Result<Asset> {
+    let bytes = host
+        .http
+        .get(&media.url)
+        .send()
+        .await?
+        .error_for_status()
+        .context("downloading output")?
+        .bytes()
+        .await?;
+    let hex: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let dir = host.dir().join("assets");
+    tokio::fs::create_dir_all(&dir).await?;
+    let file = dir.join(format!("{hex}.{}", media.ext));
+    if !file.exists() {
+        tokio::fs::write(&file, &bytes).await?;
+    }
+    Ok(Asset {
+        id: format!("sha256:{hex}"),
+        mime: media.mime.clone(),
+        uri: Some(media.url.clone()),
+        lineage: Some(lineage),
+    })
+}
+
+/// Commands that turn the generation node `node` into the media node (same id, parent and
+/// z-order; height follows the media's aspect). Empty when the node is gone or converted.
+pub(crate) fn convert_cmds(
+    c: &falos_doc::Canvas,
+    node: &str,
+    media: &Media,
+    asset: &Asset,
+) -> Result<Vec<Command>> {
+    let Some(n) = c.node(node).filter(|n| n.kind == NodeKind::Generation) else {
+        return Ok(vec![]);
+    };
+    let siblings: Vec<String> = match &n.parent {
+        Some(p) => c.node(p).map(|p| p.children).unwrap_or_default(),
+        None => c
+            .nodes()
+            .into_iter()
+            .filter(|x| x.parent.is_none())
+            .map(|x| x.id)
+            .collect(),
+    };
+    let index = siblings.iter().position(|s| *s == n.id);
+    let h = match (media.width, media.height) {
+        (Some(mw), Some(mh)) if mw > 0.0 => n.w * mh / mw,
+        _ => n.h,
+    };
+    let props: Props = serde_json::from_value(json!({
+        "x": n.x, "y": n.y, "w": n.w, "h": h, "asset": asset.id,
+    }))?;
+    Ok(vec![
+        Command::PutAsset(asset.clone()),
+        Command::DeleteNode { id: n.id.clone() },
+        Command::CreateNode {
+            id: Some(n.id.clone()),
+            kind: media.kind,
+            parent: n.parent.clone(),
+            index,
+            name: n.name.clone(),
+            props,
+            text: None,
+        },
+    ])
+}
+
+pub(crate) struct Media {
+    pub url: String,
+    pub mime: Option<String>,
+    pub kind: NodeKind,
+    pub ext: String,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+}
+
+/// Every media output of a fal result, in order (e.g. all of `images` for `num_images` > 1).
+pub(crate) fn find_all_media(v: &Json) -> Vec<Media> {
+    fn walk(v: &Json, out: &mut Vec<Media>) {
+        if let Some(m) = find_media_here(v) {
+            out.push(m);
+            return;
+        }
+        match v {
+            Json::Object(o) => o.values().for_each(|x| walk(x, out)),
+            Json::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = vec![];
+    walk(v, &mut out);
+    out
+}
+
+fn find_media_here(v: &Json) -> Option<Media> {
+    match v {
+        Json::Object(o) if o.get("url").and_then(Json::as_str).is_some() => find_media(v),
+        _ => None,
     }
 }
 
-struct Media {
-    url: String,
-    mime: Option<String>,
-    kind: NodeKind,
-    ext: String,
-    width: Option<f64>,
-    height: Option<f64>,
-}
-
 /// First `{url, content_type?}` object in a fal result, depth-first.
-fn find_media(v: &Json) -> Option<Media> {
+pub(crate) fn find_media(v: &Json) -> Option<Media> {
     match v {
         Json::Object(o) => {
             if let Some(url) = o.get("url").and_then(Json::as_str)

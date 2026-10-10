@@ -344,7 +344,7 @@ fn bbox(rs: &[[f64; 4]]) -> Option<[f64; 4]> {
     let y0 = rs.iter().map(|r| r[1]).fold(f64::INFINITY, f64::min);
     let x1 = rs.iter().map(|r| r[0] + r[2]).fold(f64::NEG_INFINITY, f64::max);
     let y1 = rs.iter().map(|r| r[1] + r[3]).fold(f64::NEG_INFINITY, f64::max);
-    x0.is_finite().then(|| [x0, y0, x1 - x0, y1 - y0])
+    x0.is_finite().then_some([x0, y0, x1 - x0, y1 - y0])
 }
 
 /// Pick the free position closest to the anchors (right of / below / left of / above them

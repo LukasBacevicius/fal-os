@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod assets;
 pub mod auth;
+pub mod batch;
 pub mod chat;
 pub mod context;
 pub mod fal;
