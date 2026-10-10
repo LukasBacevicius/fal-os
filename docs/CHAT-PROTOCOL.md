@@ -10,8 +10,10 @@ The product surface is **chat + canvas**, as in Cursor. You talk to a director a
 apps/web (chat panel) ──ws /sync──► falos-host ──ws /runtime──► agent runtime (Node, Claude Agent SDK)
                          ◄── chat events ──┘         ◄── events ──┘   │
                                                                      ├─ MCP: fal-os canvas (http://127.0.0.1:<port>/mcp, bearer)
-                                                                     └─ MCP: fal relay (https://mcp.fal.ai/mcp-relay, user's fal OAuth token from the host)
+                                                                     └─ MCP: swarm (in-process): fal Agent SDK (FAL_KEY, AGENT preset), direct fal models,
+                                                                        fal storage uploads, Codex SDK worker
 ```
+fal access lives in the runtime: `FAL_KEY` comes from the environment or `~/.fal-os/fal.env` and never reaches agents or clients. See [`apps/agent-runtime/README.md`](../apps/agent-runtime/README.md).
 
 ## Context chips
 ```jsonc
@@ -23,17 +25,32 @@ apps/web (chat panel) ──ws /sync──► falos-host ──ws /runtime──
 ```
 The host turns chips into context the agent can read. Each chip gets its node's text projection row, its lineage, and a local file path for its media. The runtime passes images and frames to Claude as image blocks: the region is cropped, and the frame is extracted with ffmpeg.
 
+A resolved chip (in `run.context` and in `get_context` results) looks like this:
+```jsonc
+{ "chip": {…}, "node": "a1b2c3", "type": "image", "name": "…", "row": "<untrusted-canvas-data>…", "lineage": ["asset sha256:… ← model by @actor params {…}"],
+  "asset": "sha256:…", "mime": "image/png", "uri": "https://…" /* null when local-only */, "file": "/abs/project/assets/<hex>.png",
+  "media": { "width": 1024, "height": 768, "duration": null },
+  "crop": { "x": 102, "y": 154, "w": 512, "h": 307 } /* pixels: region/spot/frame box */, "point": {…} /* spot */,
+  "frame": { "t": 3.24 }, "range": { "t0": 2, "t1": 5.5 }, "hint": "ffmpeg … crop=…" }
+```
+
+**User media** (the UI uploads files via `PUT /assets/{sha256}`) is a first-class reference and model input. When fal needs a public URL for local-only media, the runtime uploads the file to fal storage once and records it on the asset with `set_asset_uri`. Fal needs this for fal Agent attachments and for model inputs such as `image_url` or `video_url`.
+
 ## Client ↔ host (JSON text frames on the existing `/sync/<canvas>` socket)
 Client → host:
 ```jsonc
-{ "type": "chat.send", "chat": "c_123" /* omit to start a new chat */, "text": "OPUS please direct me an ad for the headphones", "context": [/* chips */] }
+{ "type": "chat.send", "chat": "c_123" /* omit to start a new chat */, "text": "OPUS please direct me an ad for the headphones", "context": [/* chips */], "options": {/* optional, passed to the runtime */} }
 { "type": "chat.stop", "chat": "c_123" }
 ```
-Host → client, broadcast to every client on the canvas:
+Host → client, broadcast to every client on the chat's canvas:
 ```jsonc
-{ "type": "chat.event", "chat": "c_123", "seq": 17, "event": { /* below */ } }
-{ "type": "chat.history", "chats": [{ "chat": "c_123", "title": "Headphones ad", "events": [/*…*/] }] } // sent after hello
+{ "type": "chat.event", "canvas": "main", "chat": "c_123", "seq": 17, "event": { /* below */ } }
+{ "type": "chat.history", "chats": [{ "chat": "c_123", "title": "Headphones ad", "events": [/* events, each with its "seq" */] }] } // after hello + snapshot
 ```
+- A new chat id has the form `c_<hex>`. The client learns it from the first `chat.event`, which is the `user` event.
+- Chat ids must match `[A-Za-z0-9_-]{1,64}`. Bad frames get `{"type":"error"}`.
+- `seq` is per chat and increases by 1.
+- `chat.history` covers the chats of this canvas, with up to 5000 events each.
 
 ## Runtime events (`event` payload)
 ```jsonc
@@ -48,15 +65,38 @@ Host → client, broadcast to every client on the canvas:
 { "kind": "plan", "agent": "director", "steps": [{ "title": "Storyboard", "state": "done" }, …] }
 { "kind": "cost", "usd": 0.42 }                                       // cumulative fal spend for the chat
 { "kind": "done", "summary": "…", "nodes": ["final01"] }
+{ "kind": "title", "title": "Headphones ad" }                         // optional; otherwise the title comes from the first user message
 ```
+Agents are labelled by subagent type (`storyboard`, `generator`, `generator-2`, `motion`, `qa`) and `codex`. `director` is the main agent. The runtime emits these event kinds:
+- `tool` events for canvas tools, with the touched `nodes`;
+- `tool` events for the swarm tools: `fal_agent`, `fal_model`, `codex`;
+- `cost` events from fal Agent `usage.cost`, or from list-price estimates for direct model calls.
 
-## Host ↔ runtime (`/runtime` WebSocket, bearer token)
-The runtime connects to the host as a client. The host sends `{"type":"run","chat":…,"text":…,"context":[resolved chips],"history":[…]}` and `{"type":"stop","chat":…}`. The runtime replies with `{"type":"event","chat":…,"event":{…}}`. Chats persist in `<project>/chats/<chat>.jsonl`, one event per line.
+## Host ↔ runtime (`/runtime` WebSocket)
+The runtime connects to the host as a client with two credentials:
+- `Authorization: Bearer <per-install token>`;
+- `X-Falos-Runtime: <runtime token>`. The host passes it as `FALOS_RUNTIME_TOKEN` when it spawns the runtime (`falos-host serve --runtime <dir>`, auto-detected `apps/agent-runtime`, `--no-runtime`).
+
+Messages:
+- Host → runtime:
+  - `{"type":"hello","project":…}`, sent first;
+  - `{"type":"run","chat":…,"canvas":…,"text":…,"author":…,"context":[resolved chips],"history":[{"role","text"}…],"options":…,"project":<dir>}`;
+  - `{"type":"stop","chat":…}`.
+- Runtime → host: `{"type":"event","chat":…,"event":{…}}`, where `event` needs a `kind`.
+
+Behaviour:
+- Runs sent while no runtime is connected are queued and delivered when one connects. One runtime is active at a time; a new connection replaces the old one.
+- If the runtime disconnects, each running chat gets a `status: error` event.
+- Chats persist in `<project>/chats/<chat>.jsonl`, one `{"seq","ts","event"}` per line, plus `<chat>.meta.json` with the canvas and title.
 
 ## Canvas tools the swarm relies on (fal-os MCP)
-- `session`, `read`, `edit`, `set_status`, `claim`/`release`, `generate`: these exist.
-- `import_file(sessionId, canvas, path, placement?, name?)`: copies a local file (e.g. a Remotion render) into project assets and creates the media node.
-- `get_context(sessionId, canvas, chips)`: resolves chips to rows, lineage, local file paths and crops, for agents that weren't given them directly.
+- These already existed: `session`, `read`, `edit`, `set_status`, `claim`/`release`, `annotate`, and `generate` (a single model; the fallback path).
+- `import_file(sessionId, canvas, path, placement?, name?, lineage?, replace?)` copies a local media file (a Remotion render, a downloaded fal output) into project assets by sha256.
+  - It creates the media node, sized from ffprobe.
+  - `replace` turns a `generation` placeholder into the media node in place, keeping its id and spot.
+  - `lineage` is `{model, params, falRequestId, cost, parents, uri}`.
+- `get_context(sessionId, canvas, chips)` resolves chips (shape above), for agents that weren't given them directly.
+- `set_asset_uri(sessionId, canvas, asset, uri)` records where an asset's bytes live publicly (https), so they're uploaded once. Asset records are otherwise immutable.
 
 ## UI (minimal, in the style of the fal.ai dashboard)
 - **Canvas** fills the window. The top bar is minimal: project name, connection dot, signed-in fal account.

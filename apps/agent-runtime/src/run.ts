@@ -79,6 +79,7 @@ export class ChatRun {
   private flushTimer: NodeJS.Timeout | null = null;
   private cost = 0;
   private finalNodes: string[] = [];
+  private background = new Set<string>(); // Agent tool_use ids of background subagents
   readonly workDir: string;
 
   constructor(
@@ -203,7 +204,9 @@ export class ChatRun {
         if (m.type === "result") {
           summary = (m as any).result ?? "";
           if (m.subtype !== "success") this.emit({ kind: "status", state: "error", error: `${m.subtype}${(m as any).errors ? `: ${(m as any).errors.join("; ")}` : ""}` });
-          done();
+          // Background subagents still running: keep the session open; their completion
+          // starts another Director turn (and another result).
+          if (this.background.size === 0 || m.subtype !== "success") done();
         }
       }
       this.flush();
@@ -242,6 +245,12 @@ export class ChatRun {
           const agent = this.labels.get(s.tool_use_id);
           if (agent) this.emit({ kind: "agent", agent, state: "working", status: s.summary.slice(0, 140) });
         }
+        if (s.subtype === "task_notification" && s.tool_use_id) {
+          this.background.delete(s.tool_use_id);
+          const agent = this.labels.get(s.tool_use_id);
+          if (agent)
+            this.emit({ kind: "agent", agent, state: s.status === "completed" ? "done" : "failed", status: String(s.summary ?? s.status).replace(/\s+/g, " ").slice(0, 160) });
+        }
         break;
       }
     }
@@ -278,6 +287,12 @@ export class ChatRun {
     const text = typeof b.content === "string" ? b.content : (b.content ?? []).map((c: any) => c.text ?? "").join("\n");
     const label = this.labels.get(id);
     if (label) {
+      // A background subagent: this is only the launch ack; it ends with a task_notification.
+      if (/^Async agent launched/i.test(text.trim())) {
+        this.background.add(id);
+        this.emit({ kind: "agent", agent: label, state: "working", status: "running in the background" });
+        return;
+      }
       // Drop the SDK's hand-back preamble paragraph; keep the subagent's own report.
       const report = text.startsWith("[Subagent hand-back]") ? text.split(/\n\s*\n/).slice(1).join("\n") || text : text;
       this.emit({ kind: "agent", agent: label, state: b.is_error ? "failed" : "done", status: report.replace(/\s+/g, " ").trim().slice(0, 160) });

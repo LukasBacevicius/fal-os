@@ -202,42 +202,51 @@ export async function modelSchema(endpoint: string): Promise<string> {
   return `${endpoint} input:\n${lines.join("\n")}`;
 }
 
-/** Rough USD estimate for direct calls (from fal list prices; reporting only). */
-const PRICES: Record<string, { unit: "image" | "mp" | "second" | "minute" | "call" | "30s"; usd: number }> = {
-  "fal-ai/flux/schnell": { unit: "mp", usd: 0.003 },
-  "fal-ai/flux/dev": { unit: "mp", usd: 0.025 },
-  "fal-ai/flux/krea": { unit: "mp", usd: 0.025 },
-  "fal-ai/flux-pro/v1.1": { unit: "mp", usd: 0.04 },
-  "fal-ai/flux-pro/v1.1-ultra": { unit: "image", usd: 0.06 },
-  "fal-ai/nano-banana": { unit: "image", usd: 0.0398 },
-  "fal-ai/nano-banana/edit": { unit: "image", usd: 0.0398 },
-  "fal-ai/kling-video/v2.1/standard/image-to-video": { unit: "second", usd: 0.056 },
-  "fal-ai/kling-video/v2.5-turbo/pro/image-to-video": { unit: "second", usd: 0.07 },
-  "fal-ai/minimax/hailuo-02/standard/image-to-video": { unit: "second", usd: 0.045 },
-  "fal-ai/minimax/hailuo-02-fast/image-to-video": { unit: "second", usd: 0.017 },
-  "fal-ai/ltx-2/image-to-video/fast": { unit: "second", usd: 0.04 },
-  "fal-ai/lyria2": { unit: "30s", usd: 0.1 },
-  "cassetteai/music-generator": { unit: "minute", usd: 0.02 },
-  "fal-ai/minimax-music/v1.5": { unit: "call", usd: 0.03 },
-  "fal-ai/elevenlabs/music": { unit: "minute", usd: 0.6 },
-};
+export type UnitPrice = { unit: string; usd: number };
+const prices = new Map<string, Promise<UnitPrice | undefined>>();
 
-export function estimateCost(endpoint: string, input: any, media: { width?: number; height?: number }[], durationS?: number): number | undefined {
-  const p = PRICES[endpoint];
-  if (!p) return undefined;
-  const n = Math.max(1, media.length);
-  switch (p.unit) {
-    case "image":
-      return p.usd * n;
-    case "mp":
-      return media.reduce((s, m) => s + p.usd * Math.max(0.25, ((m.width ?? 1024) * (m.height ?? 1024)) / 1e6), 0) || p.usd;
-    case "second":
-      return p.usd * Number(durationS ?? input?.duration ?? 5);
-    case "minute":
-      return p.usd * Math.max(1, Math.ceil(Number(durationS ?? input?.duration ?? 30) / 60));
-    case "30s":
-      return p.usd * Math.max(1, Math.ceil(Number(durationS ?? 30) / 30));
-    case "call":
-      return p.usd;
+/** fal's live unit price for an endpoint (platform pricing API), cached per process. */
+export function unitPrice(endpoint: string): Promise<UnitPrice | undefined> {
+  let p = prices.get(endpoint);
+  if (!p) {
+    p = (async () => {
+      try {
+        const res = await fetch(`https://api.fal.ai/v1/models/pricing?endpoint_id=${encodeURIComponent(endpoint)}`, {
+          headers: { authorization: `Key ${falKey()}` },
+        });
+        if (!res.ok) return undefined;
+        const d: any = await res.json();
+        const e = d?.prices?.find((x: any) => x.endpoint_id === endpoint) ?? d?.prices?.[0];
+        return e ? { unit: String(e.unit), usd: Number(e.unit_price) } : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    prices.set(endpoint, p);
   }
+  return p;
+}
+
+/**
+ * USD estimate for a direct call from its unit price, the outputs and their duration
+ * (reporting only; fal bills the actual units). Unknown units → undefined.
+ */
+export function costFromPrice(
+  price: UnitPrice | undefined,
+  input: any,
+  media: { width?: number; height?: number }[],
+  durationS?: number,
+): number | undefined {
+  if (!price || !Number.isFinite(price.usd)) return undefined;
+  const n = Math.max(1, media.length);
+  const unit = price.unit.toLowerCase();
+  const secs = Number(durationS ?? input?.duration ?? input?.seconds_total ?? input?.duration_seconds ?? 5);
+  if (/megapixel/.test(unit))
+    return media.reduce((s, m) => s + price.usd * Math.max(0.25, ((m.width ?? 1024) * (m.height ?? 1024)) / 1e6), 0) || price.usd;
+  if (/^(image|images|video|videos|audio|audios|generation|generations|request|requests|run|runs)$/.test(unit)) return price.usd * n;
+  const per = unit.match(/^(\d+)\s*seconds?$/);
+  if (per) return price.usd * Math.max(1, Math.ceil(secs / Number(per[1])));
+  if (/^seconds?$/.test(unit)) return price.usd * secs;
+  if (/^minutes?$/.test(unit)) return price.usd * Math.max(1, secs / 60);
+  return undefined;
 }

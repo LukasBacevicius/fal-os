@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { codexAuthAvailable, config } from "./config.ts";
-import { autoDecide, EXT, estimateCost, falAgentAvailable, findMedia, modelSchema, runAgentTask, runModel, uploadFile } from "./fal.ts";
+import { autoDecide, costFromPrice, EXT, falAgentAvailable, unitPrice, findMedia, modelSchema, runAgentTask, runModel, uploadFile } from "./fal.ts";
 import type { HostMcp } from "./hostMcp.ts";
 
 export type ToolCtx = {
@@ -271,7 +271,7 @@ export function createSwarmTools(ctx: ToolCtx) {
             }),
           );
         }
-        const cost = estimateCost(a.model, input, media, nodes[0]?.duration);
+        const cost = costFromPrice(await unitPrice(a.model), input, media, nodes[0]?.duration);
         if (cost) ctx.addCost(cost);
         consecutiveFailures = 0;
         await status(a.sessionId, `${a.model}: done`);
