@@ -2,7 +2,12 @@
 //!
 //! Controls: drag empty space to pan, drag a node to move it, trackpad scroll pans,
 //! pinch / ctrl+scroll / mouse wheel zooms, `f` fits everything, `b` runs the benchmark.
-//! Options (native args / web query string): `nodes=10000 videos=50 bench novsync`.
+//! Options (native args / web query string): `nodes=10000 videos=50 bench novsync`, plus
+//! `realvideo` (zero-copy import) or `realvideo=copy` on web: real `<video>` decode instead of
+//! synthesized frames; `blank` (web) leaves the page after posting bench results.
+
+#[cfg(target_arch = "wasm32")]
+mod web_video;
 
 use falos_engine::{Budgets, Camera, FrameStats, Renderer, demo_scene};
 use std::sync::Arc;
@@ -19,12 +24,15 @@ struct Options {
     videos: usize,
     bench: bool,
     vsync: bool,
+    /// Real `<video>` decode on web; `Some(true)` = zero-copy import, `Some(false)` = copy.
+    realvideo: Option<bool>,
+    blank: bool,
     budgets: Budgets,
 }
 
 impl Options {
     fn parse(args: &[String]) -> Self {
-        let mut o = Options { nodes: 10_000, videos: 50, bench: false, vsync: true, budgets: Budgets::default() };
+        let mut o = Options { nodes: 10_000, videos: 50, bench: false, vsync: true, realvideo: None, blank: false, budgets: Budgets::default() };
         for a in args {
             let (k, v) = a.trim_start_matches('-').split_once('=').unwrap_or((a.trim_start_matches('-'), ""));
             match k {
@@ -32,6 +40,8 @@ impl Options {
                 "videos" => o.videos = v.parse().unwrap_or(o.videos),
                 "bench" => o.bench = true,
                 "novsync" => o.vsync = false,
+                "realvideo" => o.realvideo = Some(v != "copy"),
+                "blank" => o.blank = true,
                 "detail" => o.budgets.detail_slots = v.parse().unwrap_or(o.budgets.detail_slots),
                 "uploads" => o.budgets.detail_uploads_per_frame = v.parse().unwrap_or(o.budgets.detail_uploads_per_frame),
                 "active_videos" => o.budgets.max_active_videos = v.parse().unwrap_or(o.budgets.max_active_videos),
@@ -64,6 +74,10 @@ struct Bench {
     frame_ms: Vec<f32>,
     cpu_ms: Vec<f32>,
     uploads: u64,
+    video_frames: u64,
+    /// Sum of per-frame video CPU time and the number of frames with active videos.
+    video_ms: f64,
+    video_active_frames: u64,
 }
 
 const BENCH_SECS: f32 = 12.0;
@@ -110,11 +124,15 @@ impl App {
         }
     }
 
+    fn realvideo_on(&self) -> bool {
+        self.opts.realvideo.is_some() && cfg!(target_arch = "wasm32")
+    }
+
     fn start_bench(&mut self) {
         if let Some(gpu) = &self.gpu {
             self.fitted = true;
             self.bench_center = gpu.renderer.bounds();
-            self.bench = Some(Bench { start: Instant::now(), frame_ms: Vec::new(), cpu_ms: Vec::new(), uploads: 0 });
+            self.bench = Some(Bench { start: Instant::now(), frame_ms: Vec::new(), cpu_ms: Vec::new(), uploads: 0, video_frames: 0, video_ms: 0.0, video_active_frames: 0 });
         }
     }
 
@@ -160,7 +178,7 @@ impl App {
         let avg = f.iter().sum::<f32>() / f.len().max(1) as f32;
         let backend = self.gpu.as_ref().map(|g| g.backend.clone()).unwrap_or_default();
         let json = format!(
-            "{{\"platform\":\"{}\",\"backend\":\"{}\",\"nodes\":{},\"videos\":{},\"vsync\":{},\"frames\":{},\"fps_avg\":{:.1},\"frame_ms_p50\":{:.2},\"frame_ms_p99\":{:.2},\"frame_ms_max\":{:.2},\"cpu_ms_p50\":{:.2},\"cpu_ms_p99\":{:.2},\"detail_uploads\":{},\"viewport\":[{},{}]}}",
+            "{{\"platform\":\"{}\",\"backend\":\"{}\",\"nodes\":{},\"videos\":{},\"vsync\":{},\"frames\":{},\"fps_avg\":{:.1},\"frame_ms_p50\":{:.2},\"frame_ms_p99\":{:.2},\"frame_ms_max\":{:.2},\"cpu_ms_p50\":{:.2},\"cpu_ms_p99\":{:.2},\"detail_uploads\":{},\"realvideo\":\"{}\",\"video_frames\":{},\"presented_frames\":{},\"video_active_frames\":{},\"video_ms_avg_active\":{:.3},\"viewport\":[{},{}]}}",
             if cfg!(target_arch = "wasm32") { "web" } else { "native" },
             backend,
             self.opts.nodes,
@@ -174,10 +192,19 @@ impl App {
             pct(&c, 0.5),
             pct(&c, 0.99),
             b.uploads,
+            match self.opts.realvideo.filter(|_| self.realvideo_on()) {
+                Some(true) => "import",
+                Some(false) => "copy",
+                None => "off",
+            },
+            b.video_frames,
+            presented_frames(),
+            b.video_active_frames,
+            b.video_ms / b.video_active_frames.max(1) as f64,
             self.camera.viewport[0],
             self.camera.viewport[1],
         );
-        report_bench(&json);
+        report_bench(&json, self.opts.blank);
         if self.opts.bench && !cfg!(target_arch = "wasm32") {
             std::process::exit(0);
         }
@@ -197,6 +224,7 @@ impl App {
             }
         }
 
+        let real = self.realvideo_on();
         let Some(gpu) = &mut self.gpu else { return };
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -214,11 +242,16 @@ impl App {
         }
         gpu.renderer.present(frame);
 
-        if let Some(b) = &mut self.bench {
-            if b.start.elapsed().as_secs_f32() > 0.25 {
-                b.frame_ms.push(dt);
-                b.cpu_ms.push(cpu);
-                b.uploads += stats.detail_uploads as u64;
+        if let Some(b) = &mut self.bench
+            && b.start.elapsed().as_secs_f32() > 0.25
+        {
+            b.frame_ms.push(dt);
+            b.cpu_ms.push(cpu);
+            b.uploads += stats.detail_uploads as u64;
+            b.video_frames += stats.video_frames as u64;
+            if stats.active_videos > 0 {
+                b.video_ms += stats.video_ms as f64;
+                b.video_active_frames += 1;
             }
         }
         self.window_ms.push(dt);
@@ -229,7 +262,7 @@ impl App {
             let worst = self.window_ms.iter().cloned().fold(0.0, f32::max);
             let s = stats;
             let title = format!(
-                "fal-os spike · {} · {:.0} fps (worst {:.1} ms, cpu {:.2} ms) · {} nodes, {} visible · detail {} · videos {} · thumbs {}/{}{}",
+                "fal-os spike · {} · {:.0} fps (worst {:.1} ms, cpu {:.2} ms) · {} nodes, {} visible · detail {} · videos {}{} · thumbs {}/{}{}",
                 gpu.backend,
                 1000.0 / avg,
                 worst,
@@ -238,6 +271,7 @@ impl App {
                 s.visible,
                 s.detail_resident,
                 s.active_videos,
+                if real { " (real)" } else { "" },
                 s.low_ready,
                 s.nodes,
                 if self.bench.is_some() { " · BENCH" } else { "" }
@@ -284,7 +318,18 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Ready(gpu) = event;
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+        let UserEvent::Ready(mut gpu) = event;
+        if let Some(_import) = self.opts.realvideo {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let count = gpu.renderer.video_count();
+                let mode = if _import { web_video::IngestMode::Import } else { web_video::IngestMode::Copy };
+                gpu.renderer.set_video_source(Box::new(web_video::WebVideoSource::new(count, mode)));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            log::warn!("realvideo is web-only for now; native keeps synthesized frames");
+        }
         self.camera.viewport = [gpu.config.width as f32, gpu.config.height as f32];
         self.gpu = Some(*gpu);
         if self.opts.bench {
@@ -401,7 +446,7 @@ async fn init_gpu(window: Arc<Window>, opts: &Options) -> Gpu {
     Gpu { surface, config, renderer, backend: format!("{:?} · {}", info.backend, info.name) }
 }
 
-fn report_bench(json: &str) {
+fn report_bench(json: &str, _blank_after: bool) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         println!("BENCH {json}");
@@ -423,9 +468,28 @@ fn report_bench(json: &str) {
             let init = web_sys::RequestInit::new();
             init.set_method("POST");
             init.set_body(&json.into());
-            let _ = w.fetch_with_str_and_init("/bench", &init);
+            let sent = w.fetch_with_str_and_init("/bench", &init);
+            // `blank`: leave the page once the result is posted, so a finished bench tab
+            // stops rendering and decoding while later runs are measured.
+            if _blank_after {
+                let leave = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(|| {
+                    if let Some(w) = web_sys::window() {
+                        let _ = w.location().set_href("about:blank");
+                    }
+                });
+                let _ = sent.finally(&leave);
+                leave.forget();
+            }
         }
     }
+}
+
+/// Video frames presented by the platform decoder (web `realvideo` only).
+fn presented_frames() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    return web_video::presented_total();
+    #[cfg(not(target_arch = "wasm32"))]
+    0
 }
 
 fn set_overlay(_text: &str) {

@@ -25,7 +25,7 @@ env_logger = "0.11"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location", "console", "RequestInit", "Response"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location", "console", "RequestInit", "Response", "HtmlElement", "HtmlMediaElement", "HtmlVideoElement", "Node"] }
 console_error_panic_hook = "0.1"
 console_log = "1"
 js-sys = "0.3"

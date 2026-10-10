@@ -37,7 +37,7 @@ crates/
 
   | | Native (macOS / iPadOS) | Web |
   |---|---|---|
-  | Video | AVFoundation / VideoToolbox → IOSurface → Metal texture | WebCodecs `VideoFrame` → `importExternalTexture` |
+  | Video | AVFoundation / VideoToolbox → IOSurface → Metal texture | `<video>` → `importExternalTexture` (measured; WebCodecs `VideoFrame` for scrubbing) |
   | Audio | AVAudioEngine | WebAudio |
   | Images | ImageIO, including HDR/EXR | `createImageBitmap` |
 

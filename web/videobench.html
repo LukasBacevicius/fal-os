@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>fal-os video ingest microbench</title>
+  <style>
+    body { margin: 0; background: #121214; color: #ddd; font: 13px/1.5 ui-monospace, monospace; padding: 16px; }
+    canvas { width: 256px; height: 256px; display: block; margin-top: 8px; }
+    #vids video { width: 64px; height: 36px; margin: 1px; }
+  </style>
+</head>
+<body>
+  <div>Main-thread cost of getting decoded &lt;video&gt; frames into WebGPU (16 videos, every display frame).</div>
+  <pre id="out">starting…</pre>
+  <canvas id="c" width="256" height="256"></canvas>
+  <div id="vids"></div>
+  <script type="module">
+    // Compares, per display frame for N playing videos:
+    //  copy-video  : queue.copyExternalImageToTexture({source: <video>})      (what wgpu 30 exposes)
+    //  copy-frame  : new VideoFrame(<video>) → copyExternalImageToTexture → close
+    //  import-video: device.importExternalTexture({source: <video>}) + bind group + blit draw (zero-copy)
+    //  import-frame: same with a VideoFrame source
+    // Each mode also blits into a 256px target so GPU work is comparable. Results POST to /bench.
+    const N = +(new URLSearchParams(location.search).get('n') || 16);
+    const SECS = 4;
+    const out = document.getElementById('out');
+    const log = (s) => { out.textContent += '\n' + s; };
+    out.textContent = '';
+
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+    const ctx = document.getElementById('c').getContext('webgpu');
+    ctx.configure({ device, format: 'bgra8unorm' });
+
+    const videos = [];
+    for (let i = 0; i < N; i++) {
+      const v = document.createElement('video');
+      Object.assign(v, { muted: true, loop: true, playsInline: true, preload: 'auto', src: `media/clip${i % 4}.mp4` });
+      document.getElementById('vids').appendChild(v);
+      videos.push(v);
+    }
+    await Promise.all(videos.map((v) => v.play()));
+    await new Promise((r) => setTimeout(r, 500));
+    log(`${N} videos playing, ${videos[0].videoWidth}x${videos[0].videoHeight}`);
+
+    const W = videos[0].videoWidth, H = videos[0].videoHeight;
+    const staging = videos.map(() => device.createTexture({ size: [W, H], format: 'rgba8unorm',
+      usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }));
+    const target = device.createTexture({ size: [256, 256], format: 'rgba8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    const vs = `struct O { @builtin(position) p: vec4f, @location(0) uv: vec2f };
+      @vertex fn vs(@builtin(vertex_index) i: u32) -> O { let c = vec2f(f32(i & 1u), f32(i >> 1u));
+        return O(vec4f(c.x * 2 - 1, 1 - c.y * 2, 0, 1), c); }`;
+    const mk = (texDecl, sample) => {
+      const module = device.createShaderModule({ code: `${vs}
+        @group(0) @binding(0) var t: ${texDecl}; @group(0) @binding(1) var s: sampler;
+        @fragment fn fs(i: O) -> @location(0) vec4f { return ${sample}; }` });
+      return device.createRenderPipeline({ layout: 'auto', vertex: { module }, fragment: { module, targets: [{ format: 'rgba8unorm' }] },
+        primitive: { topology: 'triangle-strip' } });
+    };
+    const texPipe = mk('texture_2d<f32>', 'textureSampleLevel(t, s, i.uv, 0)');
+    const extPipe = mk('texture_external', 'textureSampleBaseClampToEdge(t, s, i.uv)');
+    const texBinds = staging.map((t) => device.createBindGroup({ layout: texPipe.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: t.createView() }, { binding: 1, resource: sampler }] }));
+    const pm = device.createShaderModule({ code: `${vs} @group(0) @binding(0) var t: texture_2d<f32>; @group(0) @binding(1) var s: sampler;
+      @fragment fn fs(i: O) -> @location(0) vec4f { return textureSampleLevel(t, s, i.uv, 0); }` });
+    const present = device.createRenderPipeline({ layout: 'auto', vertex: { module: pm }, fragment: { module: pm, targets: [{ format: 'bgra8unorm' }] },
+      primitive: { topology: 'triangle-strip' } });
+    const presentBind = device.createBindGroup({ layout: present.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: target.createView() }, { binding: 1, resource: sampler }] });
+
+    function blitAll(enc, binds, pipe) {
+      const pass = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store' }] });
+      pass.setPipeline(pipe);
+      binds.forEach((b, i) => { const x = (i % 4) * 64, y = Math.floor(i / 4) % 4 * 64;
+        pass.setViewport(x, y, 64, 64, 0, 1); pass.setBindGroup(0, b); pass.draw(4); });
+      pass.end();
+      const p2 = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }] });
+      p2.setPipeline(present); p2.setBindGroup(0, presentBind); p2.draw(4); p2.end();
+    }
+
+    const modes = {
+      'copy-video': () => {
+        videos.forEach((v, i) => device.queue.copyExternalImageToTexture({ source: v }, { texture: staging[i] }, [W, H]));
+        const enc = device.createCommandEncoder(); blitAll(enc, texBinds, texPipe); device.queue.submit([enc.finish()]);
+      },
+      'copy-frame': () => {
+        videos.forEach((v, i) => { const f = new VideoFrame(v);
+          device.queue.copyExternalImageToTexture({ source: f }, { texture: staging[i] }, [W, H]); f.close(); });
+        const enc = device.createCommandEncoder(); blitAll(enc, texBinds, texPipe); device.queue.submit([enc.finish()]);
+      },
+      'import-video': () => {
+        const binds = videos.map((v) => device.createBindGroup({ layout: extPipe.getBindGroupLayout(0),
+          entries: [{ binding: 0, resource: device.importExternalTexture({ source: v }) }, { binding: 1, resource: sampler }] }));
+        const enc = device.createCommandEncoder(); blitAll(enc, binds, extPipe); device.queue.submit([enc.finish()]);
+      },
+      'import-frame': () => {
+        const frames = videos.map((v) => new VideoFrame(v));
+        const binds = frames.map((f) => device.createBindGroup({ layout: extPipe.getBindGroupLayout(0),
+          entries: [{ binding: 0, resource: device.importExternalTexture({ source: f }) }, { binding: 1, resource: sampler }] }));
+        const enc = device.createCommandEncoder(); blitAll(enc, binds, extPipe); device.queue.submit([enc.finish()]);
+        frames.forEach((f) => f.close());
+      },
+      'blit-only': () => { const enc = device.createCommandEncoder(); blitAll(enc, texBinds, texPipe); device.queue.submit([enc.finish()]); },
+    };
+
+    const results = { microbench: 'video-ingest', n: N, size: [W, H], modes: {} };
+    for (const [name, fn] of Object.entries(modes)) {
+      let frames = 0, cpu = 0, err = null;
+      const t0 = performance.now();
+      let last = t0;
+      const gaps = [];
+      await new Promise((resolve) => {
+        const tick = () => {
+          const now = performance.now();
+          gaps.push(now - last); last = now;
+          const s = performance.now();
+          try { fn(); } catch (e) { err = String(e); }
+          cpu += performance.now() - s;
+          frames++;
+          if (err || now - t0 > SECS * 1000) resolve(); else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+      await device.queue.onSubmittedWorkDone();
+      const fps = frames / ((performance.now() - t0) / 1000);
+      const r = { fps: +fps.toFixed(1), cpu_ms_per_frame: +(cpu / frames).toFixed(3), cpu_ms_per_video: +(cpu / frames / N).toFixed(3), frames, error: err };
+      results.modes[name] = r;
+      log(`${name.padEnd(13)} fps ${r.fps}  cpu/frame ${r.cpu_ms_per_frame} ms  per video ${r.cpu_ms_per_video} ms${err ? '  ERROR ' + err : ''}`);
+    }
+    fetch('/bench', { method: 'POST', body: JSON.stringify(results) }).finally(() => {
+      if (new URLSearchParams(location.search).has('blank')) location.href = 'about:blank';
+    });
+    log('done');
+  </script>
+</body>
+</html>

@@ -88,3 +88,52 @@ pub fn downsample(src: &[u8], w: u32, h: u32) -> Vec<u8> {
     }
     dst
 }
+
+/// The detail-tier slot a video frame lands in: a square region of one array layer, with
+/// `mips` levels (each level's region is the mip-0 region shifted right by the level).
+pub struct SlotTarget<'a> {
+    pub texture: &'a wgpu::Texture,
+    pub layer: u32,
+    /// Top-left texel of the slot at mip 0.
+    pub origin: [u32; 2],
+    /// Edge length in texels at mip 0.
+    pub size: u32,
+    pub mips: u32,
+}
+
+/// What a [`VideoSource`] produced for one video this frame.
+pub enum FrameUpdate<'a> {
+    /// Nothing new (or not ready yet): keep showing what the slot holds.
+    None,
+    /// A decoded frame as a sampleable 2D view; the engine blits it into the slot (all mips).
+    Texture(&'a wgpu::TextureView),
+    /// The source already wrote the frame into the slot itself (all mips), e.g. zero-copy
+    /// sampling of a platform-native frame.
+    Written,
+}
+
+/// A platform video decoder feeding the detail tier.
+///
+/// The engine decides which videos play (the biggest visible ones, up to
+/// `Budgets::max_active_videos`) and asks for each active video's latest frame:
+/// - web: hidden `<video>` elements; zero-copy `importExternalTexture` drawn straight into the
+///   slot (`Written`), or `copyExternalImageToTexture` into a per-video texture (`Texture`)
+/// - native (later): VideoToolbox → IOSurface-backed Metal texture (`Texture`, zero-copy)
+///
+/// Without a source the engine falls back to synthesized frames.
+pub trait VideoSource {
+    /// Starts (`true`) or pauses decoding of video `id`, the index of the node among the
+    /// scene's video nodes in node order. Paused videos keep their last frame on screen.
+    fn set_active(&mut self, id: usize, active: bool);
+
+    /// Delivers the latest decoded frame of video `id` if it is newer than the last one
+    /// delivered, or whenever `force` is set (its slot was just assigned).
+    fn update(
+        &mut self,
+        id: usize,
+        force: bool,
+        target: &SlotTarget,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> FrameUpdate<'_>;
+}
