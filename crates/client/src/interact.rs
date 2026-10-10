@@ -381,8 +381,9 @@ impl Interaction {
     /// Wheel / trackpad: pan, or zoom with Cmd/Ctrl (browsers send pinch as ctrl+wheel).
     pub fn wheel(&mut self, ctx: &mut Ctx, p: [f32; 2], d: [f32; 2], mods: Mods) -> Vec<Effect> {
         if mods.meta {
-            let dy = d[1].clamp(-60.0, 60.0);
-            ctx.camera.zoom_at(p, (-dy * 0.012).exp());
+            // Zoom speed is per CSS pixel of wheel delta (trackpad pinch sends small deltas).
+            let dy = (d[1] / ctx.dpr).clamp(-30.0, 30.0);
+            ctx.camera.zoom_at(p, (-dy * 0.01).exp());
         } else if mods.shift && d[0] == 0.0 {
             ctx.camera.pan(-d[1], 0.0);
         } else {

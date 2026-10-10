@@ -1,0 +1,3 @@
+# Standalone pnpm project (apps/web). esbuild (used by Vite) needs its install script.
+allowBuilds:
+  esbuild: true

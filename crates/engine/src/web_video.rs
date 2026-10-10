@@ -133,6 +133,8 @@ struct Video {
     held: Option<f64>,
     /// A seek happened: deliver the next ready frame even if no new frame was presented.
     refresh: bool,
+    /// The engine wants this video playing (it may still be held).
+    active: bool,
     texture: Option<(wgpu::Texture, wgpu::TextureView)>,
     _callback: Rc<RefCell<Option<FrameCallback>>>,
 }
@@ -209,8 +211,12 @@ impl WebVideos {
 
     /// Lets a held video play again when the engine wants it.
     pub fn release(&self, id: Handle) {
-        if let Some(v) = self.inner.borrow_mut().videos.get_mut(&id) {
-            v.held = None;
+        if let Some(v) = self.inner.borrow_mut().videos.get_mut(&id)
+            && v.held.take().is_some()
+            && v.active
+            && let Ok(p) = v.el.play()
+        {
+            let _ = p.catch(&self.on_play_error);
         }
     }
 
@@ -261,7 +267,7 @@ fn create_video(src: &str) -> Video {
     if let Some(cb) = callback.borrow().as_ref() {
         request_video_frame(&el, cb);
     }
-    Video { el, presented, seen: 0, last_time: -1.0, held: None, refresh: false, texture: None, _callback: callback }
+    Video { el, presented, seen: 0, last_time: -1.0, held: None, refresh: false, active: false, texture: None, _callback: callback }
 }
 
 /// `HTMLVideoElement.requestVideoFrameCallback` (no web-sys binding yet).
@@ -279,6 +285,7 @@ impl VideoSource for WebVideos {
         if active {
             let Some(src) = inner.srcs.get(&id).cloned() else { return };
             let v = inner.videos.entry(id).or_insert_with(|| create_video(&src));
+            v.active = true;
             if v.held.is_some() {
                 return;
             }
@@ -286,7 +293,8 @@ impl VideoSource for WebVideos {
                 // Report rejections (autoplay policy, interrupted by pause) instead of throwing.
                 let _ = p.catch(&self.on_play_error);
             }
-        } else if let Some(v) = inner.videos.get(&id) {
+        } else if let Some(v) = inner.videos.get_mut(&id) {
+            v.active = false;
             let _ = v.el.pause();
         }
     }

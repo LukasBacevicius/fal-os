@@ -1,13 +1,16 @@
 # fal-os desktop (Tauri v2)
 
-A minimal Tauri v2 shell (WKWebView on macOS) around the web UI in `../../web`. The Rust side in `src-tauri` is its own Cargo workspace, so the root `cargo build` is unaffected. Only the Xcode Command Line Tools are needed; tauri-cli is optional.
+A minimal Tauri v2 shell (WKWebView on macOS) around the canvas app in `../web` (devUrl `http://127.0.0.1:5173`, frontendDist `apps/web/dist`). The engine spike in `/web` can still be loaded with `FALOS_URL`. The Rust side in `src-tauri` is its own Cargo workspace, so the root `cargo build` is unaffected. Only the Xcode Command Line Tools are needed; tauri-cli is optional.
 
-## Run (dev: loads devUrl http://127.0.0.1:8789)
+## Run (dev: loads devUrl http://127.0.0.1:5173)
 ```sh
-./web/build.sh                       # build the wasm into web/pkg
-python3 -I web/serve.py 8789 &       # devUrl; also collects POST /bench into web/bench-results.jsonl
+pnpm --dir apps/web dev &            # wasm + Vite dev server on 5173
 cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
 ```
+The bundled build below needs `pnpm --dir apps/web build` first (frontendDist = `apps/web/dist`).
+
+Engine spike instead: `./web/build.sh && python3 -I web/serve.py 8789 &`, then
+`FALOS_URL=http://127.0.0.1:8789/ cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml`.
 
 ## Run with the bundled frontend (tauri://localhost, no server)
 ```sh
