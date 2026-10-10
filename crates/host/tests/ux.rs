@@ -469,3 +469,96 @@ async fn batch_num_images_and_concurrent_edits_stress() {
         .unwrap();
     assert_eq!(assets.len(), 100);
 }
+
+#[tokio::test]
+async fn external_agents_drive_in_app_chats_and_drivers() {
+    let env = start("http://127.0.0.1:1", None).await;
+    let mut rt = runtime_client(env.port, &env.host.chat.runtime_token).await;
+    assert_eq!(next_json(&mut rt).await["type"], "hello");
+    let mut ui = sync_client(env.port).await;
+    next_of(&mut ui, "chat.list").await;
+    let c = client_as(env.port, "claude-code", None).await;
+    let sid = call(&c, "session", json!({"agentName": "Claude Code", "canvas": "main"})).await["sessionId"].as_str().unwrap().to_string();
+
+    // chat_new: a new in-app chat, the message authored by the external client.
+    let n = call(&c, "chat_new", json!({"sessionId": sid, "text": "make a moodboard", "driver": "fal"})).await;
+    let chat = n["chat"].as_str().unwrap().to_string();
+    let user = next_event(&mut ui, &chat, "user").await;
+    assert_eq!((user["author"].as_str(), user["text"].as_str()), (Some("ext:claude"), Some("make a moodboard")));
+    let run = next_of(&mut rt, "run").await;
+    assert_eq!((run["chat"].as_str(), run["driver"].as_str()), (Some(chat.as_str()), Some("fal")));
+    assert_eq!(run["previous_driver"], Json::Null);
+    let rows = call(&c, "chat_list", json!({"sessionId": sid})).await;
+    let r = rows.as_array().unwrap().iter().find(|r| r["chat"] == chat).unwrap().clone();
+    assert_eq!(r["driver"], "fal");
+    assert!(rows.as_array().unwrap().iter().all(|r| !r["chat"].as_str().unwrap().starts_with("ext:")));
+
+    send(&mut rt, json!({"type": "event", "chat": chat, "event": {"kind": "text", "delta": "Board is up."}})).await;
+    // While running, chat_send queues.
+    let s = call(&c, "chat_send", json!({"sessionId": sid, "chat": chat, "text": "more neon"})).await;
+    assert_eq!(s["queued"], true);
+    next_event(&mut ui, &chat, "queued").await;
+    let rd = call(&c, "chat_read", json!({"sessionId": sid, "chat": chat})).await;
+    assert!(rd["transcript"].as_str().unwrap().contains("Board is up."), "{rd}");
+    call(&c, "chat_stop", json!({"sessionId": sid, "chat": chat})).await;
+    assert_eq!(next_of(&mut rt, "stop").await["chat"], chat);
+    send(&mut rt, json!({"type": "event", "chat": chat, "event": {"kind": "status", "state": "idle", "error": "stopped"}})).await;
+    next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == chat && v["event"]["kind"] == "turn" && v["event"]["state"] == "end").await;
+
+    // chat.continue resumes without a new user message; switching the driver is reported.
+    send(&mut ui, json!({"type": "chat.continue", "chat": chat})).await;
+    let run = next_of(&mut rt, "run").await;
+    assert_eq!((run["continue"].as_bool(), run["driver"].as_str()), (Some(true), Some("fal")));
+    send(&mut rt, json!({"type": "event", "chat": chat, "event": {"kind": "status", "state": "idle"}})).await;
+    next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == chat && v["event"]["kind"] == "turn" && v["event"]["state"] == "end").await;
+    send(&mut ui, json!({"type": "chat.send", "chat": chat, "text": "now polish it", "driver": "opus"})).await;
+    let run = next_of(&mut rt, "run").await;
+    assert_eq!((run["driver"].as_str(), run["previous_driver"].as_str()), (Some("opus"), Some("fal")));
+    assert!(run["history"].as_array().unwrap().iter().any(|h| h["text"] == "make a moodboard"));
+    send(&mut ui, json!({"type": "chat.send", "chat": chat, "text": "x", "driver": "gpt"})).await;
+    assert!(next_of(&mut ui, "error").await["message"].as_str().unwrap().contains("unknown driver"));
+}
+
+#[tokio::test]
+async fn stdio_relay_reaches_the_host() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let env = start("http://127.0.0.1:1", None).await;
+    let home = env.dir.path().join("falos-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("host.json"),
+        json!({"port": env.port, "url": server::mcp_url(env.port), "token": TOKEN, "pid": 1, "project": "x"}).to_string(),
+    )
+    .unwrap();
+    let mut events = env.host.subscribe();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_falos-host"))
+        .arg("mcp")
+        .env("FALOS_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap()).lines();
+    let line = |v: Json| format!("{v}\n");
+    stdin.write_all(line(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "gemini-cli", "version": "1"}}})).as_bytes()).await.unwrap();
+    let init: Json = serde_json::from_str(&tokio::time::timeout(Duration::from_secs(10), out.next_line()).await.unwrap().unwrap().unwrap()).unwrap();
+    assert_eq!(init["id"], 1);
+    assert!(init["result"]["serverInfo"].is_object(), "{init}");
+    stdin.write_all(line(json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).as_bytes()).await.unwrap();
+    stdin.write_all(line(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "session", "arguments": {"agentName": "Gemini"}}})).as_bytes()).await.unwrap();
+    let res: Json = serde_json::from_str(&tokio::time::timeout(Duration::from_secs(10), out.next_line()).await.unwrap().unwrap().unwrap()).unwrap();
+    assert_eq!(res["id"], 2);
+    assert!(res["result"]["content"][0]["text"].as_str().unwrap().contains("ext:gemini-1"), "{res}");
+    let conn = loop {
+        let e = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+        if let falos_host::Event::AgentConnected { client, transport, .. } = e {
+            break (client, transport);
+        }
+    };
+    assert_eq!(conn, ("gemini".to_string(), "stdio".to_string()));
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}

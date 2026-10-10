@@ -15,6 +15,7 @@ pub mod knowledge;
 pub mod mcp;
 pub mod presence;
 pub mod register;
+pub mod relay;
 pub mod runtime;
 pub mod server;
 pub mod sync;
