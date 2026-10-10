@@ -160,6 +160,13 @@ fn command(dir: &Path) -> tokio::process::Command {
     c
 }
 
+/// SIGTERM the runtime's whole process group.
+fn kill_group(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &format!("-{pid}")])
+        .status();
+}
+
 /// Spawn the runtime at `dir` and keep it running (restart with backoff) until `cancel`.
 pub fn supervise(
     host: Arc<Host>,
@@ -178,6 +185,9 @@ pub fn supervise(
                 .env("FALOS_TOKEN", &token)
                 .env("FALOS_RUNTIME_TOKEN", &host.chat.runtime_token)
                 .env("FALOS_PROJECT_DIR", host.dir())
+                .env("FALOS_HOST_PID", std::process::id().to_string())
+                // Own process group, so stopping it also stops tsx's node child.
+                .process_group(0)
                 .kill_on_drop(true);
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
@@ -197,8 +207,11 @@ pub fn supervise(
             tokio::select! {
                 s = child.wait() => tracing::warn!("agent runtime exited: {s:?}"),
                 _ = cancel.cancelled() => {
+                    if let Some(pid) = child.id() {
+                        kill_group(pid);
+                    }
+                    let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
                     let _ = child.start_kill();
-                    let _ = child.wait().await;
                     return;
                 }
             }

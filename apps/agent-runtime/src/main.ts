@@ -99,4 +99,17 @@ for (const sig of ["SIGINT", "SIGTERM"] as const)
     setTimeout(() => process.exit(0), 1500);
   });
 
+// Exit when the host that spawned us is gone (e.g. it was SIGKILLed), instead of lingering.
+const hostPid = Number(process.env.FALOS_HOST_PID);
+if (hostPid > 0)
+  setInterval(() => {
+    try {
+      process.kill(hostPid, 0);
+    } catch {
+      log("host process gone; exiting");
+      for (const r of runs.values()) r.stop();
+      setTimeout(() => process.exit(0), 1500);
+    }
+  }, 2000).unref();
+
 connect();

@@ -86,7 +86,11 @@ async fn main() -> Result<()> {
                 (false, None) => tracing::warn!("no agent runtime found (pass --runtime <apps/agent-runtime>): chat is disabled"),
                 _ => {}
             }
-            tokio::signal::ctrl_c().await?;
+            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! {
+                r = tokio::signal::ctrl_c() => r?,
+                _ = term.recv() => {}
+            }
             running.cancel.cancel();
             running.task.await?;
         }
