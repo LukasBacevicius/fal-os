@@ -2,7 +2,7 @@
 // swarm per chat turn (see docs/CHAT-PROTOCOL.md and README.md).
 import WebSocket from "ws";
 import { config } from "./config.ts";
-import { ChatRun, type RunFrame } from "./run.ts";
+import { ChatRun, type Queued, type RunFrame } from "./run.ts";
 
 if (!config.token || !config.runtimeToken) {
   console.error("FALOS_TOKEN and FALOS_RUNTIME_TOKEN are required (the host passes them when it spawns the runtime)");
@@ -45,7 +45,7 @@ async function start(frame: RunFrame) {
     queued.set(frame.chat, [...(queued.get(frame.chat) ?? []), frame]);
     return;
   }
-  const run = new ChatRun(frame, (event) => send({ type: "event", chat: frame.chat, event }), hostRequest);
+  const run = new ChatRun(frame, (event) => send({ type: "event", chat: frame.chat, event }), hostRequest, send);
   runs.set(frame.chat, run);
   log(`run ${frame.chat}: ${frame.text.slice(0, 80)}`);
   try {
@@ -81,6 +81,10 @@ function connect() {
         msg.ok ? w.resolve(msg.result) : w.reject(new Error(msg.error ?? "host request failed"));
       }
     } else if (msg.type === "run") void start(msg as RunFrame);
+    // A message sent while the chat runs: injected after the next tool call. When the run
+    // is already wrapping up it's dropped here and the host re-delivers it as a new run.
+    else if (msg.type === "queue") runs.get(msg.chat)?.enqueue(msg as Queued);
+    else if (msg.type === "unqueue") runs.get(msg.chat)?.unqueue(msg.id);
     else if (msg.type === "stop") {
       queued.delete(msg.chat);
       runs.get(msg.chat)?.stop();

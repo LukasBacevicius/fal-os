@@ -10,10 +10,13 @@ export class HostMcp {
   constructor(
     private url = `${config.hostUrl}/mcp`,
     private token = config.token,
+    /** Extra headers, e.g. `X-Falos-Chat` so sessions made here join the chat. */
+    private headers: Record<string, string> = {},
   ) {}
 
   private async post(body: unknown): Promise<any> {
     const headers: Record<string, string> = {
+      ...this.headers,
       authorization: `Bearer ${this.token}`,
       "content-type": "application/json",
       accept: "application/json, text/event-stream",

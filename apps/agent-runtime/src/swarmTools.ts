@@ -7,6 +7,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { codexAuthAvailable, config } from "./config.ts";
 import { autoDecide, costFromPrice, EXT, falAgentAvailable, unitPrice, findMedia, modelSchema, runAgentTask, runModel, uploadFile } from "./fal.ts";
+import { generatedSummary, shortModel } from "./events.ts";
 import type { HostMcp } from "./hostMcp.ts";
 
 export type ToolCtx = {
@@ -24,6 +25,8 @@ export type ToolCtx = {
   chat: string;
   /** Host request (cross-chat ops: chat.list / chat.read / chat.send). */
   request: (op: string, args: Record<string, unknown>) => Promise<any>;
+  /** Tell the host which agent a fal-os session belongs to. */
+  reportSession?: (sessionId: string, agent: string) => void;
 };
 
 type Kind = "image" | "video" | "audio";
@@ -160,7 +163,7 @@ export function createSwarmTools(ctx: ToolCtx) {
       try {
         const refs = await Promise.all((a.references ?? []).map((n) => mediaUrl(a.sessionId, n)));
         for (const o of a.outputs) ids.push(await placeholder(a.sessionId, o.name, o.kind, a.parent, "fal-agent", { task: a.task.slice(0, 400) }));
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_agent", summary: `fal Agent · ${a.task.slice(0, 80)}`, state: "running", nodes: ids });
+        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_agent", summary: `generating with the fal Agent: ${a.task.slice(0, 80)}`, state: "running", nodes: ids });
         await status(a.sessionId, `fal Agent: starting — ${a.task.slice(0, 80)}`);
         let lastLabel = "";
         let lastCost = 0;
@@ -213,7 +216,16 @@ export function createSwarmTools(ctx: ToolCtx) {
         if (unused.length) await ctx.host.call("edit", { sessionId: a.sessionId, canvas: ctx.canvas, text: `delete(${unused.join(",")})` }).catch(() => {});
         consecutiveFailures = result.artifacts.length ? 0 : consecutiveFailures + 1;
         await status(a.sessionId, `fal Agent: done — ${nodes.length} output(s)`);
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_agent", summary: `fal Agent · ${nodes.length} output(s) · $${result.costUsd.toFixed(2)}`, state: "done", nodes: nodes.map((n) => n.node) });
+        ctx.emit({
+          kind: "tool",
+          agent,
+          id: toolId,
+          name: "fal_agent",
+          summary: generatedSummary(nodes.map((n) => n.kind), models.length ? models.join("+") : "fal Agent"),
+          state: "done",
+          nodes: nodes.map((n) => n.node),
+          usd: Math.round(result.costUsd * 10000) / 10000,
+        });
         return ok({ responseId: result.id, costUsd: result.costUsd, models, agentText: result.text.slice(0, 1500), nodes });
       } catch (e: any) {
         consecutiveFailures++;
@@ -256,7 +268,7 @@ export function createSwarmTools(ctx: ToolCtx) {
           input[field] = Array.isArray(v) ? urls.map((u) => u.url) : urls[0].url;
         }
         ph = await placeholder(a.sessionId, a.name, a.kind, a.parent, a.model, input);
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_model", summary: `${a.model} · ${a.name}`, state: "running", nodes: [ph] });
+        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_model", summary: `generating ${a.kind} (${shortModel(a.model)}): ${a.name}`, state: "running", nodes: [ph] });
         await status(a.sessionId, `${a.model}: ${a.name}`);
         const { requestId, data } = await runModel(a.model, input, (s) => status(a.sessionId, `${a.model}: ${s}`), ctx.signal);
         const media = findMedia(data);
@@ -279,7 +291,16 @@ export function createSwarmTools(ctx: ToolCtx) {
         if (cost) ctx.addCost(cost);
         consecutiveFailures = 0;
         await status(a.sessionId, `${a.model}: done`);
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_model", summary: `${a.model} · ${a.name}${cost ? ` · ~$${cost.toFixed(2)}` : ""}`, state: "done", nodes: nodes.map((n) => n.node) });
+        ctx.emit({
+          kind: "tool",
+          agent,
+          id: toolId,
+          name: "fal_model",
+          summary: generatedSummary(nodes.map((n) => n.kind), a.model),
+          state: "done",
+          nodes: nodes.map((n) => n.node),
+          ...(cost ? { usd: Math.round(cost * 10000) / 10000 } : {}),
+        });
         return ok({ requestId, estimatedCostUsd: cost ?? null, nodes });
       } catch (e: any) {
         consecutiveFailures++;
@@ -339,6 +360,7 @@ export function createSwarmTools(ctx: ToolCtx) {
       const s = await ctx.host.call("session", { agentName: "Codex", canvas: ctx.canvas });
       const sid = s.sessionId as string;
       const agent = "codex";
+      ctx.reportSession?.(sid, agent);
       const toolId = `cx_${Date.now().toString(36)}`;
       ctx.emit({ kind: "agent", agent, role: "Codex (code)", parent: "motion", state: "started", status: a.task.slice(0, 100) });
       ctx.emit({ kind: "tool", agent, id: toolId, name: "codex", summary: a.task.slice(0, 100), state: "running" });
