@@ -15,6 +15,7 @@ pub enum Client {
     Codex,
     Cursor,
     Gemini,
+    Opencode,
 }
 
 impl Client {
@@ -24,6 +25,16 @@ impl Client {
             Client::Codex => home.join(".codex/config.toml"),
             Client::Cursor => home.join(".cursor/mcp.json"),
             Client::Gemini => home.join(".gemini/settings.json"),
+            // `opencode.jsonc` when the user has one (edited only if it has no comments).
+            Client::Opencode => {
+                let dir = home.join(".config/opencode");
+                let jsonc = dir.join("opencode.jsonc");
+                if jsonc.exists() {
+                    jsonc
+                } else {
+                    dir.join("opencode.json")
+                }
+            }
         }
     }
 }
@@ -57,6 +68,9 @@ pub fn register(
     let auth = format!("Bearer {token}");
     let after = match client {
         Client::Codex => update_toml(&before, url, &auth)?,
+        Client::Opencode => update_opencode(&before, url, &auth).with_context(|| {
+            format!("{} is not plain JSON (comments?); edit it by hand", path.display())
+        })?,
         _ => update_json(client, &before, url, &auth)
             .with_context(|| format!("{} is not plain JSON; edit it by hand", path.display()))?,
     };
@@ -102,6 +116,47 @@ fn update_json(client: Client, before: &str, url: &str, auth: &str) -> Result<St
         _ => "url",
     };
     e.insert(url_key.into(), url.into());
+    let headers = e
+        .entry("headers")
+        .or_insert_with(|| Json::Object(Map::new()));
+    if !headers.is_object() {
+        *headers = Json::Object(Map::new());
+    }
+    headers
+        .as_object_mut()
+        .unwrap()
+        .insert("Authorization".into(), auth.into());
+    let mut s = serde_json::to_string_pretty(&root)?;
+    if before.is_empty() || before.ends_with('\n') {
+        s.push('\n');
+    }
+    Ok(s)
+}
+
+/// OpenCode: `{"mcp": {"fal-os": {"type": "remote", "url", "enabled": true, "headers"}}}`.
+fn update_opencode(before: &str, url: &str, auth: &str) -> Result<String> {
+    let mut root: Json = if before.trim().is_empty() {
+        serde_json::json!({"$schema": "https://opencode.ai/config.json"})
+    } else {
+        serde_json::from_str(before)?
+    };
+    let Some(obj) = root.as_object_mut() else {
+        bail!("top level is not an object");
+    };
+    let servers = obj.entry("mcp").or_insert_with(|| Json::Object(Map::new()));
+    let Some(servers) = servers.as_object_mut() else {
+        bail!("`mcp` is not an object");
+    };
+    let entry = servers
+        .entry(SERVER_NAME)
+        .or_insert_with(|| Json::Object(Map::new()));
+    if !entry.is_object() {
+        *entry = Json::Object(Map::new());
+    }
+    let e = entry.as_object_mut().unwrap();
+    e.insert("type".into(), "remote".into());
+    e.insert("url".into(), url.into());
+    e.entry("enabled").or_insert(Json::Bool(true));
     let headers = e
         .entry("headers")
         .or_insert_with(|| Json::Object(Map::new()));
@@ -281,6 +336,27 @@ mod tests {
         // Token rotation updates in place.
         let o = register(Client::Codex, home.path(), URL, "t2", false).unwrap();
         assert!(o.after.contains("Bearer t2") && !o.after.contains("Bearer t1"));
+    }
+
+    #[test]
+    fn opencode_json_and_jsonc() {
+        let home = tempfile::tempdir().unwrap();
+        let o = register(Client::Opencode, home.path(), URL, "t1", false).unwrap();
+        assert!(o.path.ends_with(".config/opencode/opencode.json"));
+        let v: Json = serde_json::from_str(&o.after).unwrap();
+        assert_eq!(v["mcp"]["fal-os"]["type"], "remote");
+        assert_eq!(v["mcp"]["fal-os"]["url"], URL);
+        assert_eq!(v["mcp"]["fal-os"]["enabled"], true);
+        assert_eq!(v["mcp"]["fal-os"]["headers"]["Authorization"], "Bearer t1");
+        assert!(!register(Client::Opencode, home.path(), URL, "t1", false).unwrap().changed());
+        // A .jsonc wins; with comments it is refused and left alone.
+        let jsonc = home.path().join(".config/opencode/opencode.jsonc");
+        std::fs::write(&jsonc, "{ // mine\n}").unwrap();
+        assert!(register(Client::Opencode, home.path(), URL, "t1", false).is_err());
+        assert_eq!(std::fs::read_to_string(&jsonc).unwrap(), "{ // mine\n}");
+        std::fs::write(&jsonc, "{\"theme\": \"x\"}\n").unwrap();
+        let o = register(Client::Opencode, home.path(), URL, "t1", false).unwrap();
+        assert!(o.path.ends_with("opencode.jsonc") && o.after.starts_with("{\n  \"theme\""));
     }
 
     #[test]

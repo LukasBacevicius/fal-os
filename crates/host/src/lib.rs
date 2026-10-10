@@ -2,6 +2,7 @@
 //! (actors with presence), soft claims and an event bus; serves the canvas MCP server and
 //! the client sync WebSocket on one loopback HTTP server.
 
+pub mod activity;
 pub mod assets;
 pub mod auth;
 pub mod chat;
@@ -16,5 +17,6 @@ pub mod register;
 pub mod runtime;
 pub mod server;
 pub mod sync;
+pub mod transcript;
 
 pub use host::{Event, Host, HostOptions};

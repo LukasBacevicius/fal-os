@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
-use falos_doc::{Actor, Asset, Canvas, Command, Lineage, NodeKind, Props, ReadOpts};
+use falos_doc::{Actor, Asset, Canvas, Command, Lineage, NodeKind, Props, ReadOpts, Version};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router};
@@ -37,6 +37,19 @@ const HISTORY_EVENTS: usize = 5000;
 pub const CROSS_CHAT_PER_MIN: usize = 5;
 /// Events summarized for a `chat` chip.
 const CHIP_EVENTS: usize = 20;
+/// An external pseudo-chat goes idle after this long without tool calls.
+const EXT_IDLE_MS: i64 = 30_000;
+/// Rows in the canvas outline the director gets on a chat's first turn.
+const OUTLINE_ROWS: usize = 40;
+
+/// Chat colors: 8 muted, desaturated hues (UX v1). Assigned per chat, least used first.
+pub const CHAT_COLORS: [&str; 8] = [
+    "#c47a7a", "#c4956a", "#b5a965", "#7fa57a", "#68a39c", "#7393c2", "#9585c2", "#b47aa3",
+];
+
+fn yes() -> bool {
+    true
+}
 
 /// Persistent chat metadata (`chats/index.json`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -56,6 +69,28 @@ struct ChatMeta {
     cost: f64,
     #[serde(default)]
     state: String,
+    /// One of [`CHAT_COLORS`], stable per chat.
+    #[serde(default)]
+    color: String,
+    /// Shown as a tab (closing a tab keeps the chat in the history; distinct from archive).
+    #[serde(default = "yes")]
+    open: bool,
+    /// An external agent's read-only pseudo-chat (`ext:<client>-<n>`).
+    #[serde(default)]
+    external: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client: Option<String>,
+}
+
+/// A message sent while a run was active, waiting to be injected (`queued` event).
+#[derive(Clone)]
+struct Queued {
+    id: String,
+    text: String,
+    author: String,
+    chips: Vec<Json>,
+    options: Json,
+    from: Option<Json>,
 }
 
 #[derive(Default)]
@@ -66,6 +101,24 @@ struct ChatState {
     agents: std::collections::BTreeMap<String, String>,
     /// Spend of the current turn (the runtime reports it per turn).
     turn_cost: f64,
+    /// The running turn (`t_…`), if any.
+    turn: Option<String>,
+    queue: Vec<Queued>,
+    /// Last tool call of an external pseudo-chat (ms).
+    ext_last: i64,
+}
+
+/// One run of a chat: what its agent sessions changed, for `chat.revert` / `chat.redo`.
+struct Turn {
+    chat: String,
+    active: bool,
+    /// Canvas versions when the turn started.
+    versions: HashMap<String, Version>,
+    /// (canvas, actor) pairs that mutated during the turn.
+    actors: std::collections::BTreeSet<(String, String)>,
+    nodes: std::collections::BTreeSet<String>,
+    /// Set while reverted: (canvas, actor, undone steps), for redo.
+    reverted: Option<Vec<(String, String, usize)>>,
 }
 
 impl ChatState {
@@ -81,6 +134,12 @@ impl ChatState {
             "updated": self.meta.updated,
             "agents": self.agents.iter().map(|(a, s)| json!({"agent": a, "status": s})).collect::<Vec<_>>(),
             "cost": self.total_cost(),
+            "color": self.meta.color,
+            "open": self.meta.open,
+            "external": self.meta.external,
+            "client": self.meta.client,
+            "turn": self.turn,
+            "queued": self.queue.iter().map(|q| json!({"id": q.id, "text": q.text})).collect::<Vec<_>>(),
         })
     }
 }
@@ -102,6 +161,7 @@ pub struct ChatHub {
     cross: Mutex<HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>>,
     /// The host spawned a runtime (so a missing connection is transient).
     pub supervised: std::sync::atomic::AtomicBool,
+    turns: Mutex<HashMap<String, Turn>>,
 }
 
 impl Default for ChatHub {
@@ -123,16 +183,28 @@ impl Default for ChatHub {
             flusher: std::sync::Once::new(),
             cross: Mutex::default(),
             supervised: Default::default(),
+            turns: Mutex::default(),
         }
     }
 }
 
-fn valid_chat_id(id: &str) -> bool {
+/// `[A-Za-z0-9_-]{1,64}`, or an external pseudo-chat `ext:<same>`.
+pub fn valid_chat_id(id: &str) -> bool {
+    let id = id.strip_prefix("ext:").unwrap_or(id);
     !id.is_empty()
         && id.len() <= 64
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn short_id(prefix: &str) -> String {
+    format!(
+        "{prefix}{}",
+        (0..4)
+            .map(|_| format!("{:02x}", rand::random::<u8>()))
+            .collect::<String>()
+    )
 }
 
 fn new_chat_id() -> String {
@@ -149,7 +221,7 @@ fn chats_dir(host: &Host) -> PathBuf {
 }
 
 fn log_path(host: &Host, chat: &str) -> PathBuf {
-    chats_dir(host).join(format!("{chat}.jsonl"))
+    chats_dir(host).join(format!("{}.jsonl", chat.replace(':', "_")))
 }
 
 /// `{"seq":…,"ts":…,"event":{…}}` lines of a chat log.
@@ -312,9 +384,10 @@ impl ChatHub {
         chat
     }
 
-    /// Make sure a chat exists (new chats start with an automatic title).
+    /// Make sure a chat exists (new chats start open, with an automatic title and a color).
     fn ensure(&self, host: &Host, chat: &str, canvas: &str) {
         self.with_chats(host, |chats| {
+            let mut save = false;
             if !chats.contains_key(chat) {
                 let now = now_ms();
                 chats.insert(
@@ -328,15 +401,298 @@ impl ChatHub {
                             created: now,
                             updated: now,
                             state: "idle".into(),
+                            open: true,
+                            external: chat.starts_with("ext:"),
                             ..Default::default()
                         },
                         ..Default::default()
                     },
                 );
+                save = true;
+            }
+            save |= assign_colors(chats);
+            if save {
                 Self::save_index(host, chats);
             }
         });
         self.mark_dirty(canvas);
+    }
+
+    /// The chat's color (`None` for unknown chats).
+    pub fn color_of(&self, host: &Host, chat: &str) -> Option<String> {
+        self.with_chats(host, |chats| {
+            assign_colors(chats);
+            chats.get(chat).map(|s| s.meta.color.clone())
+        })
+    }
+
+    /// Is `chat` a known, runtime-driven (not external) chat?
+    pub fn is_runtime_chat(&self, host: &Host, chat: &str) -> bool {
+        self.with_chats(host, |chats| chats.get(chat).is_some_and(|s| !s.meta.external))
+    }
+
+    fn set_open(&self, host: &Host, chat: &str, open: bool) -> Result<()> {
+        let changed = self.with_chats(host, |chats| {
+            let s = chats.get_mut(chat).ok_or_else(|| anyhow!("unknown chat `{chat}`"))?;
+            let changed = s.meta.open != open;
+            s.meta.open = open;
+            let canvas = s.meta.canvas.clone();
+            if changed {
+                Self::save_index(host, chats);
+            }
+            Ok::<_, anyhow::Error>(changed.then_some(canvas))
+        })?;
+        if let Some(c) = changed {
+            self.mark_dirty(&c);
+        }
+        Ok(())
+    }
+
+    fn active_turn(&self, host: &Host, chat: &str) -> Option<String> {
+        self.with_chats(host, |chats| chats.get(chat).and_then(|s| s.turn.clone()))
+    }
+
+    /// Start a turn: remember every canvas's version (for revert) and emit `turn` start.
+    fn start_turn(&self, host: &Host, chat: &str) -> Result<String> {
+        let turn = short_id("t_");
+        let versions: HashMap<String, Version> = host
+            .project()
+            .canvases
+            .iter()
+            .filter_map(|c| host.read(&c.id, |cv| (c.id.clone(), cv.version())).ok())
+            .collect();
+        self.turns.lock().unwrap().insert(
+            turn.clone(),
+            Turn {
+                chat: chat.into(),
+                active: true,
+                versions,
+                actors: Default::default(),
+                nodes: Default::default(),
+                reverted: None,
+            },
+        );
+        self.with_chats(host, |chats| {
+            if let Some(s) = chats.get_mut(chat) {
+                s.turn = Some(turn.clone());
+            }
+        });
+        self.append(host, chat, None, json!({"kind": "turn", "turn": turn, "state": "start"}))?;
+        Ok(turn)
+    }
+
+    /// End the running turn (if any): emit `turn` end with the nodes it touched.
+    fn end_turn(&self, host: &Host, chat: &str) {
+        let Some(turn) = self.with_chats(host, |chats| chats.get_mut(chat).and_then(|s| s.turn.take()))
+        else {
+            return;
+        };
+        let nodes: Vec<String> = {
+            let mut turns = self.turns.lock().unwrap();
+            match turns.get_mut(&turn) {
+                Some(t) => {
+                    t.active = false;
+                    t.nodes.iter().cloned().collect()
+                }
+                None => vec![],
+            }
+        };
+        let _ = self.append(
+            host,
+            chat,
+            None,
+            json!({"kind": "turn", "turn": turn, "state": "end", "nodes": nodes}),
+        );
+    }
+
+    /// A chat's agent session mutated `canvas`: remember it in the running turn.
+    pub fn track_mutation(&self, host: &Host, chat: &str, canvas: &str, actor: &str, touched: &[String]) {
+        let Some(turn) = self.active_turn(host, chat) else { return };
+        if let Some(t) = self.turns.lock().unwrap().get_mut(&turn) {
+            t.actors.insert((canvas.to_string(), actor.to_string()));
+            t.nodes.extend(touched.iter().take(500).cloned());
+        }
+    }
+
+    /// `chat.revert`: undo everything the turn's agent sessions changed (per actor,
+    /// `revert_since` the turn's start version), as one step. Returns (steps, nodes).
+    pub fn revert_turn(&self, host: &Host, chat: &str, turn: &str) -> Result<(usize, Vec<String>)> {
+        let (versions, actors, nodes) = {
+            let turns = self.turns.lock().unwrap();
+            let t = turns
+                .get(turn)
+                .filter(|t| t.chat == chat)
+                .ok_or_else(|| anyhow!("unknown turn `{turn}` (turns from before a host restart can't be reverted)"))?;
+            if t.active {
+                bail!("turn `{turn}` is still running; stop it first");
+            }
+            if t.reverted.is_some() {
+                bail!("turn `{turn}` is already reverted");
+            }
+            (t.versions.clone(), t.actors.clone(), t.nodes.iter().cloned().collect::<Vec<_>>())
+        };
+        let mut done = vec![];
+        let mut total = 0;
+        for (canvas, actor) in actors {
+            let Some(v) = versions.get(&canvas) else { continue };
+            let n = host.mutate(&canvas, &actor, None, |c| c.revert_since(&actor, v))?;
+            total += n;
+            done.push((canvas, actor, n));
+        }
+        if let Some(t) = self.turns.lock().unwrap().get_mut(turn) {
+            t.reverted = Some(done);
+        }
+        Ok((total, nodes))
+    }
+
+    /// `chat.redo`: re-apply a reverted turn.
+    pub fn redo_turn(&self, host: &Host, chat: &str, turn: &str) -> Result<(usize, Vec<String>)> {
+        let (steps, nodes) = {
+            let mut turns = self.turns.lock().unwrap();
+            let t = turns
+                .get_mut(turn)
+                .filter(|t| t.chat == chat)
+                .ok_or_else(|| anyhow!("unknown turn `{turn}`"))?;
+            let steps = t.reverted.take().ok_or_else(|| anyhow!("turn `{turn}` is not reverted"))?;
+            (steps, t.nodes.iter().cloned().collect::<Vec<_>>())
+        };
+        let mut total = 0;
+        for (canvas, actor, n) in steps {
+            total += host.mutate(&canvas, &actor, None, |c| {
+                let mut k = 0;
+                while k < n && c.redo(&actor)? {
+                    k += 1;
+                }
+                Ok(k)
+            })?;
+        }
+        Ok((total, nodes))
+    }
+
+    /// `chat.delete`: stop it, drop its log and index entry.
+    pub fn delete(&self, host: &Host, chat: &str) -> Result<String> {
+        let canvas = self.with_chats(host, |chats| {
+            let s = chats.remove(chat).ok_or_else(|| anyhow!("unknown chat `{chat}`"))?;
+            Self::save_index(host, chats);
+            Ok::<_, anyhow::Error>(s.meta.canvas)
+        })?;
+        self.to_runtime(json!({"type": "stop", "chat": chat}).to_string());
+        self.turns.lock().unwrap().retain(|_, t| t.chat != chat);
+        let _ = std::fs::remove_file(log_path(host, chat));
+        let _ = std::fs::remove_file(chats_dir(host).join(format!("{chat}.meta.json")));
+        self.mark_dirty(&canvas);
+        host.emit(Event::ChatDeleted {
+            canvas: canvas.clone(),
+            chat: chat.into(),
+        });
+        Ok(canvas)
+    }
+
+    // ---- external agents' pseudo-chats -------------------------------------------------
+
+    /// A pseudo-chat `ext:<client>-<n>` for an external agent session (read-only transcript).
+    pub fn create_ext(&self, host: &Host, client: &str, title: &str, canvas: &str) -> String {
+        let chat = self.with_chats(host, |chats| {
+            let prefix = format!("ext:{client}-");
+            let n = chats
+                .keys()
+                .filter_map(|k| k.strip_prefix(&prefix)?.parse::<u64>().ok())
+                .max()
+                .unwrap_or(0)
+                + 1;
+            format!("{prefix}{n}")
+        });
+        self.ensure(host, &chat, canvas);
+        let _ = self.update_meta(host, &chat, |m| {
+            m.title = title.chars().take(80).collect();
+            m.title_auto = false;
+            m.client = Some(client.to_string());
+            m.external = true;
+            m.state = "running".into();
+        });
+        self.with_chats(host, |chats| {
+            if let Some(s) = chats.get_mut(&chat) {
+                s.ext_last = now_ms();
+            }
+        });
+        chat
+    }
+
+    /// An external agent made a tool call: its pseudo-chat is running.
+    pub fn ext_active(&self, host: &Host, chat: &str) {
+        let changed = self.with_chats(host, |chats| {
+            let s = chats.get_mut(chat)?;
+            s.ext_last = now_ms();
+            (s.meta.state != "running").then(|| {
+                s.meta.state = "running".into();
+                s.meta.canvas.clone()
+            })
+        });
+        if let Some(c) = changed {
+            self.mark_dirty(&c);
+        }
+    }
+
+    pub fn ext_session_closed(&self, host: &Host, chat: &str) {
+        let _ = self.update_meta(host, chat, |m| m.state = "idle".into());
+    }
+
+    /// External pseudo-chats go idle after [`EXT_IDLE_MS`] without tool calls.
+    pub(crate) fn sweep(&self, host: &Host) {
+        let now = now_ms();
+        let idle: Vec<String> = {
+            let guard = self.chats.lock().unwrap();
+            let Some(chats) = guard.as_ref() else { return };
+            chats
+                .values()
+                .filter(|s| s.meta.external && s.meta.state == "running" && now - s.ext_last > EXT_IDLE_MS)
+                .map(|s| s.meta.chat.clone())
+                .collect()
+        };
+        for chat in idle {
+            let _ = self.update_meta(host, &chat, |m| m.state = "idle".into());
+        }
+    }
+
+    // ---- queue ---------------------------------------------------------------------------
+
+    /// The runtime injected a queued message into the running turn.
+    pub fn injected(&self, host: &Host, chat: &str, id: &str, text: Option<&str>) {
+        let q = self.with_chats(host, |chats| {
+            let s = chats.get_mut(chat)?;
+            let i = s.queue.iter().position(|q| q.id == id)?;
+            Some(s.queue.remove(i))
+        });
+        let _ = self.append(host, chat, None, json!({"kind": "dequeued", "id": id, "reason": "injected"}));
+        let (text, chips, author) = match &q {
+            Some(q) => (q.text.clone(), q.chips.clone(), q.author.clone()),
+            None => (text.unwrap_or_default().to_string(), vec![], "user".into()),
+        };
+        let mut ev = json!({"kind": "user", "text": text, "context": chips, "author": author, "queued": id});
+        if let Some(f) = q.as_ref().and_then(|q| q.from.as_ref()) {
+            ev["from_title"] = f["title"].clone();
+        }
+        let _ = self.append(host, chat, None, ev);
+    }
+
+    /// Remove a queued message; returns whether it was still queued.
+    fn unqueue(&self, host: &Host, chat: &str, id: &str) -> bool {
+        let removed = self.with_chats(host, |chats| {
+            let s = chats.get_mut(chat)?;
+            let i = s.queue.iter().position(|q| q.id == id)?;
+            Some(s.queue.remove(i))
+        });
+        if removed.is_some() {
+            let _ = self.append(host, chat, None, json!({"kind": "dequeued", "id": id, "reason": "cancelled"}));
+            self.to_runtime(json!({"type": "unqueue", "chat": chat, "id": id}).to_string());
+        }
+        removed.is_some()
+    }
+
+    fn take_queue(&self, host: &Host, chat: &str) -> Vec<Queued> {
+        self.with_chats(host, |chats| {
+            chats.get_mut(chat).map(|s| std::mem::take(&mut s.queue)).unwrap_or_default()
+        })
     }
 
     fn canvas_of(&self, host: &Host, chat: &str) -> Option<String> {
@@ -390,9 +746,12 @@ impl ChatHub {
                         s.meta.title = title_from(event["text"].as_str().unwrap_or_default());
                         s.meta.title_auto = false;
                     }
-                    // A new turn: bank the last turn's spend.
-                    s.meta.cost += s.turn_cost;
-                    s.turn_cost = 0.0;
+                    // A new run: bank the last run's spend (an injected message joins the
+                    // running one, whose cost reports keep accumulating).
+                    if event.get("queued").is_none() {
+                        s.meta.cost += s.turn_cost;
+                        s.turn_cost = 0.0;
+                    }
                     save = true;
                 }
                 Some("title") => {
@@ -460,13 +819,45 @@ impl ChatHub {
             .append(true)
             .open(log_path(host, chat))?;
         writeln!(f, "{line}")?;
+        let status = (event["kind"] == "status").then(|| event["state"].as_str().unwrap_or("idle").to_string());
         host.emit(Event::ChatEvent {
             canvas,
             chat: chat.to_string(),
             seq,
             event,
         });
+        match status.as_deref() {
+            Some("running") if !chat.starts_with("ext:") && self.active_turn(host, chat).is_none() => {
+                // A run the host didn't start (e.g. a runtime-side follow-up).
+                let _ = self.start_turn(host, chat);
+            }
+            Some(s) if s != "running" => self.end_turn(host, chat),
+            _ => {}
+        }
         Ok(seq)
+    }
+
+    /// Queued messages left when a turn ended (the runtime never injected them, e.g. it
+    /// restarted): deliver the first as a new run; the rest queue behind it again.
+    pub async fn flush_queue(host: &Arc<Host>, chat: &str) -> Result<()> {
+        let hub = &host.chat;
+        if hub.active_turn(host, chat).is_some() {
+            return Ok(());
+        }
+        let mut q = hub.take_queue(host, chat);
+        if q.is_empty() {
+            return Ok(());
+        }
+        let first = q.remove(0);
+        let canvas = hub.canvas_of(host, chat).unwrap_or_else(|| "main".into());
+        hub.append(host, chat, None, json!({"kind": "dequeued", "id": first.id, "reason": "started"}))?;
+        start_run(host, chat, &canvas, &first.text, &first.author, first.chips, first.options, first.from).await?;
+        for m in q {
+            deliver(host, chat, &canvas, &m.text, &m.author, m.chips, m.options, m.from).await?;
+            // `deliver` queued it again under a new id; drop the old one from the UI.
+            hub.append(host, chat, None, json!({"kind": "dequeued", "id": m.id, "reason": "requeued"}))?;
+        }
+        Ok(())
     }
 
     /// Send a frame to the runtime, or queue it until one connects.
@@ -542,6 +933,62 @@ impl ChatHub {
     }
 }
 
+/// Give chats without a color the least-used one (ties: by hash of the id). Returns whether
+/// anything changed.
+fn assign_colors(chats: &mut HashMap<String, ChatState>) -> bool {
+    let mut missing: Vec<String> = chats
+        .values()
+        .filter(|s| !CHAT_COLORS.contains(&s.meta.color.as_str()))
+        .map(|s| s.meta.chat.clone())
+        .collect();
+    if missing.is_empty() {
+        return false;
+    }
+    missing.sort_by_key(|c| chats[c].meta.created);
+    for chat in missing {
+        let mut used = [0usize; 8];
+        for s in chats.values().filter(|s| !s.meta.archived) {
+            if let Some(i) = CHAT_COLORS.iter().position(|c| *c == s.meta.color) {
+                used[i] += 1;
+            }
+        }
+        let start = chat.bytes().map(|b| b as usize).sum::<usize>() % 8;
+        let min = *used.iter().min().unwrap_or(&0);
+        let i = (0..8).map(|k| (start + k) % 8).find(|i| used[*i] == min).unwrap_or(start);
+        if let Some(s) = chats.get_mut(&chat) {
+            s.meta.color = CHAT_COLORS[i].into();
+        }
+    }
+    true
+}
+
+/// A short outline of a canvas (top rows) for the director's first turn.
+fn canvas_outline(host: &Host, canvas: &str) -> Option<String> {
+    host.read(canvas, |c| {
+        let n = c.nodes().len();
+        if n == 0 {
+            return Some(format!("canvas `{canvas}` is empty"));
+        }
+        let text = c
+            .read(&ReadOpts {
+                depth: Some(1),
+                annotations: false,
+                attribution: false,
+                ..Default::default()
+            })
+            .ok()?;
+        let mut rows: Vec<&str> = text.lines().take(OUTLINE_ROWS).collect();
+        let more = text.lines().count().saturating_sub(rows.len());
+        let tail = format!("… {more} more rows");
+        if more > 0 {
+            rows.push(&tail);
+        }
+        Some(format!("canvas `{canvas}` · {n} nodes\n{}", untrusted(&rows.join("\n"))))
+    })
+    .ok()
+    .flatten()
+}
+
 fn title_from(text: &str) -> String {
     let t: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.chars().count() > 48 {
@@ -568,7 +1015,8 @@ pub fn list_frame(host: &Host, canvas: &str) -> Json {
     json!({"type": "chat.list", "chats": host.chat.list(host, Some(canvas))})
 }
 
-/// Append a user message to `chat` and start a run there (queued by the runtime if busy).
+/// Deliver a user message to `chat`: start a run there, or, while one is running, queue it
+/// (`queued` event) for the runtime to inject after the agent's next tool call.
 #[allow(clippy::too_many_arguments)]
 async fn deliver(
     host: &Arc<Host>,
@@ -582,12 +1030,27 @@ async fn deliver(
 ) -> Result<u64> {
     let hub = &host.chat;
     hub.ensure(host, chat, canvas);
+    hub.set_open(host, chat, true)?;
     let canvas = hub
         .canvas_of(host, chat)
         .unwrap_or_else(|| canvas.to_string());
-    // Prior turns, before this message is appended.
-    let history = condensed_history(host, chat);
-    let mut ev = json!({"kind": "user", "text": text, "context": chips, "author": author});
+    if hub.active_turn(host, chat).is_none() {
+        return start_run(host, chat, &canvas, text, author, chips, options, from).await;
+    }
+    let id = short_id("q_");
+    hub.with_chats(host, |chats| {
+        if let Some(s) = chats.get_mut(chat) {
+            s.queue.push(Queued {
+                id: id.clone(),
+                text: text.into(),
+                author: author.into(),
+                chips: chips.clone(),
+                options: options.clone(),
+                from: from.clone(),
+            });
+        }
+    });
+    let mut ev = json!({"kind": "queued", "id": id, "text": text, "context": chips, "author": author});
     if let Some(f) = &from {
         ev["from_title"] = f["title"].clone();
     }
@@ -599,9 +1062,51 @@ async fn deliver(
             Err(e) => json!({"chip": c, "error": format!("{e:#}")}),
         });
     }
+    if hub.runtime_connected() {
+        hub.to_runtime(
+            json!({"type": "queue", "chat": chat, "id": id, "text": text, "author": author,
+                   "from": from, "context": resolved})
+            .to_string(),
+        );
+    }
+    Ok(seq)
+}
+
+/// Append the user message, start a turn and send the `run` to the runtime.
+#[allow(clippy::too_many_arguments)]
+async fn start_run(
+    host: &Arc<Host>,
+    chat: &str,
+    canvas: &str,
+    text: &str,
+    author: &str,
+    chips: Vec<Json>,
+    options: Json,
+    from: Option<Json>,
+) -> Result<u64> {
+    let hub = &host.chat;
+    let canvas = canvas.to_string();
+    // Prior turns, before this message is appended.
+    let history = condensed_history(host, chat);
+    let outline = history.is_empty().then(|| canvas_outline(host, &canvas)).flatten();
+    let mut ev = json!({"kind": "user", "text": text, "context": chips, "author": author});
+    if let Some(f) = &from {
+        ev["from_title"] = f["title"].clone();
+    }
+    let seq = hub.append(host, chat, Some(&canvas), ev)?;
+    let turn = hub.start_turn(host, chat)?;
+    let mut resolved = Vec::new();
+    for c in &chips {
+        resolved.push(match resolve_chip(host, &canvas, c).await {
+            Ok(r) => r,
+            Err(e) => json!({"chip": c, "error": format!("{e:#}")}),
+        });
+    }
     let frame = json!({
         "type": "run",
         "chat": chat,
+        "turn": turn,
+        "outline": outline,
         "canvas": canvas,
         "title": hub.title_of(host, chat),
         "text": text,
@@ -651,6 +1156,9 @@ pub async fn handle_client(
                 Some(_) => chat_arg()?,
                 None => new_chat_id(),
             };
+            if chat.starts_with("ext:") {
+                bail!("`{chat}` is an external agent's read-only transcript");
+            }
             let chips: Vec<Json> = msg["context"].as_array().cloned().unwrap_or_default();
             let options = msg.get("options").cloned().unwrap_or(Json::Null);
             deliver(host, &chat, canvas, &text, author, chips, options, None).await?;
@@ -658,7 +1166,47 @@ pub async fn handle_client(
         }
         Some("chat.stop") => {
             let chat = chat_arg()?;
+            for q in hub.take_queue(host, &chat) {
+                hub.append(host, &chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "cancelled"}))?;
+            }
             hub.to_runtime(json!({"type": "stop", "chat": chat}).to_string());
+            Ok(None)
+        }
+        Some("chat.unqueue") => {
+            let chat = chat_arg()?;
+            let id = msg["id"].as_str().context("chat.unqueue needs id")?;
+            if !hub.unqueue(host, &chat, id) {
+                bail!("`{id}` is not queued (already sent?)");
+            }
+            Ok(None)
+        }
+        Some("chat.revert") => {
+            let chat = chat_arg()?;
+            let turn = msg["turn"].as_str().context("chat.revert needs turn")?;
+            let (count, nodes) = hub.revert_turn(host, &chat, turn)?;
+            hub.append(host, &chat, None, json!({"kind": "reverted", "turn": turn, "count": count, "nodes": nodes}))?;
+            Ok(None)
+        }
+        Some("chat.redo") => {
+            let chat = chat_arg()?;
+            let turn = msg["turn"].as_str().context("chat.redo needs turn")?;
+            let (count, nodes) = hub.redo_turn(host, &chat, turn)?;
+            hub.append(host, &chat, None, json!({"kind": "redone", "turn": turn, "count": count, "nodes": nodes}))?;
+            Ok(None)
+        }
+        Some("chat.delete") => {
+            let chat = chat_arg()?;
+            hub.delete(host, &chat)?;
+            Ok(None)
+        }
+        Some("chat.open") => {
+            let chat = chat_arg()?;
+            hub.set_open(host, &chat, true)?;
+            Ok(None)
+        }
+        Some("chat.close") => {
+            let chat = chat_arg()?;
+            hub.set_open(host, &chat, false)?;
             Ok(None)
         }
         Some("chat.new") => {
@@ -750,7 +1298,16 @@ pub async fn handle_runtime_request(host: &Arc<Host>, msg: &Json) -> Json {
 /// Last `n` events of a chat as readable lines (user messages, director text, agents, tools,
 /// done), truncated. Used for `chat` chips and `chat_read`.
 pub fn chat_digest(host: &Host, chat: &str, n: usize) -> String {
-    let log = read_log(&log_path(host, chat));
+    // Only events that make digest lines count towards `n` (not turn/queue/cost noise).
+    let log: Vec<Json> = read_log(&log_path(host, chat))
+        .into_iter()
+        .filter(|l| {
+            matches!(
+                l["event"]["kind"].as_str(),
+                Some("text" | "user" | "agent" | "tool" | "done" | "status")
+            )
+        })
+        .collect();
     let skip = log.len().saturating_sub(n);
     let mut lines: Vec<String> = Vec::new();
     let mut text = String::new();
@@ -876,16 +1433,17 @@ fn condensed_history(host: &Host, chat: &str) -> Vec<Json> {
 
 /// `chat.history` for a canvas: every (non-archived) chat on it, oldest first.
 pub fn history(host: &Host, canvas: &str) -> Json {
-    let rows: Vec<(i64, String, String)> = host.chat.with_chats(host, |chats| {
+    let rows: Vec<(i64, String, String, String)> = host.chat.with_chats(host, |chats| {
+        assign_colors(chats);
         chats
             .values()
             .filter(|s| !s.meta.archived && s.meta.canvas == canvas)
-            .map(|s| (s.meta.created, s.meta.chat.clone(), s.meta.title.clone()))
+            .map(|s| (s.meta.created, s.meta.chat.clone(), s.meta.title.clone(), s.meta.color.clone()))
             .collect()
     });
     let mut chats: Vec<(i64, Json)> = rows
         .into_iter()
-        .map(|(created, chat, title)| {
+        .map(|(created, chat, title, color)| {
             let log = read_log(&log_path(host, &chat));
             let skip = log.len().saturating_sub(HISTORY_EVENTS);
             let events: Vec<Json> = log
@@ -899,7 +1457,7 @@ pub fn history(host: &Host, canvas: &str) -> Json {
                 .collect();
             (
                 created,
-                json!({"chat": chat, "title": title, "events": events}),
+                json!({"chat": chat, "title": title, "color": color, "events": events}),
             )
         })
         .collect();
@@ -1237,13 +1795,14 @@ pub async fn import_file(
         ),
         None => None,
     };
-    let mut p = opts.place.unwrap_or(PlacementArgs {
-        x: None,
-        y: None,
-        w: None,
-        h: None,
-        parent: None,
-    });
+    let mut p = opts.place.unwrap_or_default();
+    // Place next to these when no x/y is given: `near`, else the lineage parents (node ids).
+    let mut near = p.near.clone().unwrap_or_default();
+    if near.is_empty()
+        && let Some(l) = &opts.lineage
+    {
+        near = l.parents.clone().unwrap_or_default();
+    }
     if let Some(n) = &placeholder {
         // Keep the placeholder's spot and width; the height follows the media.
         p = PlacementArgs {
@@ -1252,6 +1811,7 @@ pub async fn import_file(
             w: Some(n.w),
             h: None,
             parent: n.parent.clone(),
+            near: None,
         };
     }
     let (w, h) = match (kind, probe.width, probe.height) {
@@ -1269,15 +1829,7 @@ pub async fn import_file(
     };
     let (x, y) = match (p.x, p.y) {
         (Some(x), Some(y)) => (x, y),
-        _ => host.read(&canvas, |c| {
-            let right = c
-                .nodes()
-                .iter()
-                .filter(|n| n.parent.is_none())
-                .map(|n| n.x + n.w)
-                .fold(f64::NEG_INFINITY, f64::max);
-            (if right.is_finite() { right + 40.0 } else { 0.0 }, 0.0)
-        })?,
+        _ => host.find_space(&canvas, p.parent.as_deref(), &near, w, h)?,
     };
     let name = opts
         .name
@@ -1476,6 +2028,8 @@ impl CanvasMcp {
             }
             let opts = ImportOpts { place: a.placement, name: a.name, lineage: a.lineage, replace: a.replace };
             let i = import_file(&host, &actor, &a.canvas, &path, opts).await?;
+            host.activity(&a.session_id, &a.canvas, "write", std::slice::from_ref(&i.node));
+            host.touch_nodes(&a.session_id, &a.canvas, std::slice::from_ref(&i.node));
             Ok(serde_json::to_string_pretty(&json!({
                 "node": i.node, "type": i.kind.to_string(), "asset": i.asset,
                 "file": i.file.display().to_string(),
@@ -1500,6 +2054,8 @@ impl CanvasMcp {
         let host = self.host().clone();
         let r = async {
             host.actor(&a.session_id)?;
+            let seen: Vec<String> = a.chips.iter().filter_map(|c| c["node"].as_str().map(String::from)).collect();
+            host.activity(&a.session_id, &a.canvas, "read", &seen);
             let mut out = Vec::new();
             for c in &a.chips {
                 out.push(match resolve_chip(&host, &a.canvas, c).await {

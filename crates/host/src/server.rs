@@ -302,6 +302,9 @@ pub async fn serve(host: Arc<Host>, port: u16, token: &str) -> Result<Running> {
             .context("binding 127.0.0.1")?,
     };
     let addr = listener.local_addr()?;
+    *host.endpoint.lock().unwrap() = Some((mcp_url(addr.port()), token.to_string()));
+    host.start_sweeper();
+    host.chat.start_list_task(&host);
     let cancel = CancellationToken::new();
     let app = router(host.clone(), token, cancel.clone());
     let saver = tokio::spawn(host.clone().autosave());

@@ -43,6 +43,7 @@ async fn start() -> Env {
             fal_key: None,
             fal_session: false,
             renderer: Box::new(NoRenderer),
+            home: Some(dir.path().join("home")),
         },
     )
     .unwrap();
@@ -101,14 +102,26 @@ async fn next_json(ws: &mut Ws) -> Json {
     }
 }
 
-/// Next text frame of `ty`, skipping others (presence, doc, …).
+/// Next text frame of `ty`, skipping others (presence, doc, …) and events of external
+/// agents' pseudo-chats (`ext:…`, e.g. the test's own MCP session).
 async fn next_of(ws: &mut Ws, ty: &str) -> Json {
     loop {
         let v = next_json(ws).await;
-        if v["type"] == ty {
+        if v["type"] == ty && !v["chat"].as_str().is_some_and(|c| c.starts_with("ext:")) {
             return v;
         }
     }
+}
+
+/// Chat-history entries / list rows without external pseudo-chats.
+fn own(chats: &Json) -> Vec<Json> {
+    chats
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| !c["chat"].as_str().unwrap_or_default().starts_with("ext:"))
+        .cloned()
+        .collect()
 }
 
 async fn sync_client(port: u16) -> Ws {
@@ -388,7 +401,7 @@ async fn chat_routing_and_history() {
     assert_eq!(next_json(&mut rt).await["type"], "hello");
 
     let mut ui = sync_client(env.port).await;
-    assert_eq!(next_of(&mut ui, "chat.history").await["chats"], json!([]));
+    assert!(own(&next_of(&mut ui, "chat.history").await["chats"]).is_empty());
 
     ui.send(Message::Text(
         json!({"type": "chat.send", "text": "OPUS please direct me an ad for the headphones",
@@ -404,10 +417,15 @@ async fn chat_routing_and_history() {
     assert_eq!(ev["event"]["kind"], "user");
     assert_eq!(ev["event"]["author"], "Lukas");
     let chat = ev["chat"].as_str().unwrap().to_string();
+    let ev = next_of(&mut ui, "chat.event").await;
+    assert_eq!((ev["seq"].as_u64(), ev["event"]["kind"].as_str(), ev["event"]["state"].as_str()), (Some(2), Some("turn"), Some("start")));
+    let turn = ev["event"]["turn"].as_str().unwrap().to_string();
 
     let run = next_json(&mut rt).await;
     assert_eq!(run["type"], "run");
     assert_eq!(run["chat"], chat);
+    assert_eq!(run["turn"], turn);
+    assert!(run["outline"].as_str().unwrap().contains("1 nodes"), "{}", run["outline"]);
     assert_eq!(run["canvas"], "main");
     assert_eq!(run["options"]["demo"], true);
     assert_eq!(run["history"], json!([]));
@@ -434,8 +452,9 @@ async fn chat_routing_and_history() {
         .await
         .unwrap();
     }
-    for seq in 2..=5 {
+    for seq in 3..=6 {
         let ev = next_of(&mut ui, "chat.event").await;
+        assert!(ev["event"]["agent"].is_string(), "runtime events are attributed: {ev}");
         assert_eq!(
             (ev["chat"].as_str(), ev["seq"].as_u64()),
             (Some(chat.as_str()), Some(seq))
@@ -455,23 +474,27 @@ async fn chat_routing_and_history() {
         (Some("stop"), Some(chat.as_str()))
     );
 
-    // The runtime dies mid-run: the running chat ends with an error.
+    // The runtime dies mid-run: the running chat ends with an error, and the turn ends.
     drop(rt);
     let ev = next_of(&mut ui, "chat.event").await;
     assert_eq!(ev["event"]["state"], "error");
-    assert_eq!(ev["seq"], 6);
+    assert_eq!(ev["seq"], 7);
+    let ev = next_of(&mut ui, "chat.event").await;
+    assert_eq!((ev["event"]["kind"].as_str(), ev["event"]["state"].as_str()), (Some("turn"), Some("end")));
+    assert_eq!(ev["seq"], 8);
 
     // Persisted: one event per line, and a new client gets it as history.
     let log = std::fs::read_to_string(env.host.dir().join(format!("chats/{chat}.jsonl"))).unwrap();
-    assert_eq!(log.lines().count(), 6);
+    assert_eq!(log.lines().count(), 8);
     let first: Json = serde_json::from_str(log.lines().next().unwrap()).unwrap();
     assert_eq!(first["event"]["kind"], "user");
     let mut ui2 = sync_client(env.port).await;
-    let h = next_of(&mut ui2, "chat.history").await;
-    assert_eq!(h["chats"][0]["chat"], chat);
-    assert_eq!(h["chats"][0]["title"], "Headphones ad");
-    assert_eq!(h["chats"][0]["events"].as_array().unwrap().len(), 6);
-    assert_eq!(h["chats"][0]["events"][3]["delta"], "On it.");
+    let h = own(&next_of(&mut ui2, "chat.history").await["chats"]);
+    assert_eq!(h[0]["chat"], chat);
+    assert_eq!(h[0]["title"], "Headphones ad");
+    assert!(h[0]["color"].as_str().unwrap().starts_with('#'));
+    assert_eq!(h[0]["events"].as_array().unwrap().len(), 8);
+    assert_eq!(h[0]["events"][4]["delta"], "On it.");
 
     // A follow-up while no runtime is connected is queued and delivered on connect, with
     // the earlier turns as history.
@@ -531,10 +554,20 @@ thread_local! {
 }
 
 async fn next_run(rt: &mut Ws) -> Json {
-    if let Some(r) = RUNS.with(|q| q.borrow_mut().pop_front()) {
+    next_frame(rt, "run").await
+}
+
+/// Next runtime frame of `ty`, including frames stashed while `request` waited.
+async fn next_frame(rt: &mut Ws, ty: &str) -> Json {
+    let stashed = RUNS.with(|q| {
+        let mut q = q.borrow_mut();
+        let i = q.iter().position(|f| f["type"] == ty)?;
+        q.remove(i)
+    });
+    if let Some(r) = stashed {
         return r;
     }
-    next_of(rt, "run").await
+    next_of(rt, ty).await
 }
 
 async fn request(rt: &mut Ws, id: u64, req: Json) -> Json {
@@ -546,7 +579,7 @@ async fn request(rt: &mut Ws, id: u64, req: Json) -> Json {
         let r = next_json(rt).await;
         match r["type"].as_str() {
             Some("reply") if r["id"] == id => return r,
-            Some("run") => RUNS.with(|q| q.borrow_mut().push_back(r)),
+            Some("run" | "queue") => RUNS.with(|q| q.borrow_mut().push_back(r)),
             _ => {}
         }
     }
@@ -658,32 +691,37 @@ async fn multi_chat_and_cross_chat() {
     )
     .await;
     assert_eq!(r["ok"], true, "{r}");
+    // `a` is running: the message is queued (shown above the input) and handed to the
+    // runtime to inject after the next tool call.
     let ev = loop {
         let e = next_of(&mut ui, "chat.event").await;
-        if e["chat"] == a
-            && e["event"]["kind"] == "user"
-            && e["event"]["author"] == format!("chat:{b}")
-        {
+        if e["chat"] == a && e["event"]["kind"] == "queued" {
             break e;
         }
     };
+    assert_eq!(ev["event"]["author"], format!("chat:{b}"));
     assert_eq!(
         ev["event"]["from_title"],
         "OPUS please direct me an ad for the headphones"
     );
     assert_eq!(ev["event"]["text"], "need a logo for the end card");
-    let run = next_run(&mut rt).await;
+    let qid = ev["event"]["id"].as_str().unwrap().to_string();
+    let q = next_frame(&mut rt, "queue").await;
+    assert_eq!((q["chat"].as_str(), q["id"].as_str()), (Some(a.as_str()), Some(qid.as_str())));
+    assert_eq!(q["from"]["chat"], b);
+    // The runtime injected it: dequeued + the user message joins the transcript.
+    send(&mut rt, json!({"type": "injected", "chat": a, "id": qid})).await;
+    let ev = loop {
+        let e = next_of(&mut ui, "chat.event").await;
+        if e["chat"] == a && e["event"]["kind"] == "dequeued" {
+            break e;
+        }
+    };
+    assert_eq!(ev["event"]["reason"], "injected");
+    let ev = next_of(&mut ui, "chat.event").await;
     assert_eq!(
-        (run["chat"].as_str(), run["from"]["chat"].as_str()),
-        (Some(a.as_str()), Some(b.as_str()))
-    );
-    assert_eq!(run["author"], format!("chat:{b}"));
-    assert!(
-        run["history"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|h| h["text"] == "make a logo")
+        (ev["event"]["kind"].as_str(), ev["event"]["queued"].as_str(), ev["event"]["author"].as_str()),
+        (Some("user"), Some(qid.as_str()), Some(format!("chat:{b}").as_str()))
     );
     for i in 0..4 {
         let r = request(
@@ -734,7 +772,19 @@ async fn multi_chat_and_cross_chat() {
         "{digest}"
     );
 
-    // A new turn banks the previous turn's spend.
+    // The run ends with the 4 pings still queued (never injected): the host starts a new run
+    // with the first, the rest queue behind it again.
+    RUNS.with(|q| q.borrow_mut().retain(|f| f["type"] != "queue")); // the pings' first queue frames
+    send(&mut rt, json!({"type": "event", "chat": a, "event": {"kind": "status", "state": "idle"}})).await;
+    let run = next_run(&mut rt).await;
+    assert_eq!((run["chat"].as_str(), run["text"].as_str()), (Some(a.as_str()), Some("ping 0")));
+    for i in 1..4 {
+        let q = next_frame(&mut rt, "queue").await;
+        assert_eq!(q["text"], format!("ping {i}"));
+    }
+    send(&mut rt, json!({"type": "event", "chat": a, "event": {"kind": "status", "state": "running"}})).await;
+
+    // A new run banks the previous run's spend.
     send(
         &mut rt,
         json!({"type": "event", "chat": a, "event": {"kind": "cost", "usd": 0.25}}),

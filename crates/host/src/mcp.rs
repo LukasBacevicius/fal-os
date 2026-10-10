@@ -9,9 +9,14 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
 use falos_doc::{ActorKind, Annotation, Command, ReadOpts, Status, TxResult, Version};
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
-use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ServerCapabilities,
+    ServerConfig,
+};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
 
@@ -23,6 +28,37 @@ use crate::{fal, knowledge};
 pub struct CanvasMcp {
     host: Arc<Host>,
     tool_router: ToolRouter<Self>,
+}
+
+/// Who is calling: the MCP client and the fal-os headers of the HTTP request.
+#[derive(Clone, Default, Debug)]
+pub struct CallMeta {
+    /// `clientInfo.name` from `initialize` (e.g. `claude-code`, `codex-mcp-client`).
+    pub client_name: Option<String>,
+    /// `X-Falos-Chat`: the runtime marks its agents' connections with their chat.
+    pub chat: Option<String>,
+    /// `X-Falos-From: stdio` when relayed by `falos-host mcp`.
+    pub from: Option<String>,
+}
+
+tokio::task_local! {
+    static CALL_META: CallMeta;
+}
+
+/// The current tool call's [`CallMeta`] (default outside a call).
+pub fn call_meta() -> CallMeta {
+    CALL_META.try_with(Clone::clone).unwrap_or_default()
+}
+
+fn header(ctx: &RequestContext<RoleServer>, name: &str) -> Option<String> {
+    ctx.extensions
+        .get::<axum::http::request::Parts>()?
+        .headers
+        .get(name)?
+        .to_str()
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 // ---- parameters -------------------------------------------------------------------------
@@ -162,13 +198,43 @@ pub struct StatusArgs {
     pub viewport: Option<[f64; 4]>,
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 pub struct PlacementArgs {
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub w: Option<f64>,
     pub h: Option<f64>,
     pub parent: Option<String>,
+    /// Without x/y: node ids to place next to (default: what the user has selected).
+    /// The spot is free space, never on top of existing nodes.
+    pub near: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishWorkingArgs {
+    pub session_id: String,
+    /// Node ids you are done with (default: all).
+    pub ids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionOnlyArgs {
+    pub session_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FindSpaceArgs {
+    pub session_id: String,
+    pub canvas: String,
+    pub w: f64,
+    pub h: f64,
+    /// Frame/group to place inside (coordinates are then relative to it).
+    pub parent: Option<String>,
+    /// Node ids to place next to (default: the user's selection).
+    pub near: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -371,6 +437,35 @@ impl CanvasMcp {
                 self.host
                     .set_presence(&info.id, |p| p.canvas = Some(c.clone()))?;
             }
+            let meta = call_meta();
+            let _ = self.host.with_session(&info.id, |s| s.via = meta.from.clone());
+            let runtime_chat = meta
+                .chat
+                .clone()
+                .filter(|c| crate::chat::valid_chat_id(c) && self.host.chat.is_runtime_chat(&self.host, c));
+            let mut chat = None;
+            if let Some(c) = runtime_chat {
+                self.host.bind_session_chat(&info.id, &c, None);
+                chat = Some(c);
+            } else if meta.chat.is_none() {
+                // An external agent (Claude Code, Codex, Cursor, …): read-only pseudo-chat.
+                let client_name = meta.client_name.clone().unwrap_or_default();
+                let client = crate::activity::normalize_client(&client_name);
+                let home = canvas.clone().unwrap_or_else(|| {
+                    self.host.project().canvases.first().map(|c| c.id.clone()).unwrap_or_else(|| "main".into())
+                });
+                let c = self.host.chat.create_ext(&self.host, &client, &a.agent_name, &home);
+                self.host.bind_session_chat(&info.id, &c, Some(client.clone()));
+                self.host.emit(crate::host::Event::AgentConnected {
+                    client,
+                    client_name,
+                    agent_name: a.agent_name.clone(),
+                    session: info.id.clone(),
+                    chat: Some(c.clone()),
+                    transport: meta.from.clone().unwrap_or_else(|| "http".into()),
+                });
+                chat = Some(c);
+            }
             let project = self.host.project();
             Ok(serde_json::to_string_pretty(&json!({
                 "sessionId": info.id,
@@ -378,6 +473,7 @@ impl CanvasMcp {
                 "color": info.color,
                 "project": {"id": project.id, "name": project.name},
                 "canvas": canvas,
+                "chat": chat,
                 "canvases": project.canvases.iter().map(|c| json!({"id": c.id, "name": c.name})).collect::<Vec<_>>(),
                 "guide": GUIDE,
                 "knowledge": knowledge::KEYS,
@@ -407,9 +503,18 @@ impl CanvasMcp {
                 annotations: !blurry,
                 attribution: true,
             };
-            let (text, version, count) = self.host.read(&canvas, |c| {
-                Ok::<_, anyhow::Error>((c.read(&opts)?, c.version(), c.nodes().len()))
+            let (text, version, count, seen) = self.host.read(&canvas, |c| {
+                // Nodes the read covers, for the activity sweep: the root and its children,
+                // or the top-level nodes.
+                let seen: Vec<String> = match &a.root {
+                    Some(r) => std::iter::once(r.clone())
+                        .chain(c.node(r).map(|n| n.children).unwrap_or_default())
+                        .collect(),
+                    None => c.nodes().into_iter().filter(|n| n.parent.is_none()).map(|n| n.id).collect(),
+                };
+                Ok::<_, anyhow::Error>((c.read(&opts)?, c.version(), c.nodes().len(), seen))
             })??;
+            self.host.activity(&a.session_id, &canvas, "read", &seen);
             let vs = version.to_string();
             self.host.with_session(&a.session_id, |s| {
                 s.read_versions.insert(canvas.clone(), version);
@@ -459,8 +564,14 @@ impl CanvasMcp {
                     .host
                     .with_session(&a.session_id, |s| s.read_versions.get(&canvas).cloned())?,
             };
-            let (res, preview) = self.host.mutate(&canvas, &actor.id, None, |c| {
+            let (res, preview, gone) = self.host.mutate(&canvas, &actor.id, None, |c| {
                 let res = c.apply_edit(&a.text, &actor, expected.as_ref())?;
+                let gone: Vec<String> = res
+                    .touched
+                    .iter()
+                    .filter(|id| c.node(id).is_none() && c.annotation(id).is_none())
+                    .cloned()
+                    .collect();
                 let mut preview = String::new();
                 for id in res.created.iter().take(10) {
                     if c.node(id).is_some() {
@@ -472,11 +583,22 @@ impl CanvasMcp {
                         })?);
                     }
                 }
-                Ok((res, preview))
+                Ok((res, preview, gone))
             })?;
             self.host.with_session(&a.session_id, |s| {
                 s.read_versions.insert(canvas.clone(), res.version.clone());
             })?;
+            let is_node = |id: &String| self.host.read(&canvas, |c| c.node(id).is_some()).unwrap_or(false);
+            let created: Vec<String> = res.created.iter().filter(|i| is_node(i)).cloned().collect();
+            let edited: Vec<String> = res
+                .touched
+                .iter()
+                .filter(|i| !res.created.contains(i) && is_node(i))
+                .cloned()
+                .collect();
+            self.host.activity(&a.session_id, &canvas, "write", &created);
+            self.host.activity(&a.session_id, &canvas, "edit", &edited);
+            self.host.activity(&a.session_id, &canvas, "delete", &gone);
             let focus = if res.created.is_empty() {
                 &res.touched
             } else {
@@ -701,6 +823,7 @@ impl CanvasMcp {
         })();
         if let Some((node, p)) = pin {
             self.host.touch_point(&a.session_id, &a.canvas, &node, p);
+            self.host.activity(&a.session_id, &a.canvas, "read", &[node]);
         }
         let mut res = self.finish(Some(&a.session_id), r);
         if let Some(img) = image {
@@ -798,6 +921,7 @@ impl CanvasMcp {
             })?;
             self.host
                 .touch_point(&a.session_id, &a.canvas, &node.id, pin_point(&parsed));
+            self.host.activity(&a.session_id, &a.canvas, "edit", std::slice::from_ref(&node.id));
             let mut v = tx_json(&res);
             v["annotationId"] = json!(res.created.first());
             Ok(serde_json::to_string_pretty(&v)?)
@@ -892,13 +1016,17 @@ impl CanvasMcp {
     async fn generate(&self, Parameters(a): Parameters<GenerateArgs>) -> CallToolResult {
         let r = (|| {
             let actor = self.host.actor(&a.session_id)?;
-            let p = a.placement.unwrap_or(PlacementArgs {
-                x: None,
-                y: None,
-                w: None,
-                h: None,
-                parent: None,
-            });
+            let mut p = a.placement.unwrap_or_default();
+            if p.x.is_none() || p.y.is_none() {
+                let (x, y) = self.host.find_space(
+                    &a.canvas,
+                    p.parent.as_deref(),
+                    p.near.as_deref().unwrap_or_default(),
+                    p.w.unwrap_or(512.0),
+                    p.h.unwrap_or(512.0),
+                )?;
+                (p.x, p.y) = (Some(x), Some(y));
+            }
             let node = fal::start(
                 &self.host,
                 &actor,
@@ -915,11 +1043,70 @@ impl CanvasMcp {
             )?;
             self.host
                 .touch_nodes(&a.session_id, &a.canvas, std::slice::from_ref(&node));
+            self.host.activity(&a.session_id, &a.canvas, "write", std::slice::from_ref(&node));
             Ok(serde_json::to_string_pretty(&json!({
                 "node": node,
                 "status": "queued",
                 "hint": "read with root=<node> to follow progress; it turns into the media node with the same id",
             }))?)
+        })();
+        self.finish(Some(&a.session_id), r)
+    }
+
+    #[tool(
+        description = "Tell humans you're done with nodes (default: all you touched): their activity highlight on the canvas ends. Call it when you finish a piece of work.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn finish_working(&self, Parameters(a): Parameters<FinishWorkingArgs>) -> CallToolResult {
+        let r = (|| {
+            let n = self.host.finish_working(&a.session_id, a.ids.as_deref())?;
+            Ok(format!("finished {n} nodes"))
+        })();
+        self.finish(Some(&a.session_id), r)
+    }
+
+    #[tool(
+        description = "What the human users currently have selected on the canvas (their focus): node ids, types, names and rows. Use it when the user says \"this\"/\"these\" or to work next to their selection.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_selection(&self, Parameters(a): Parameters<SessionOnlyArgs>) -> CallToolResult {
+        let r = (|| {
+            self.host.actor(&a.session_id)?;
+            Ok(serde_json::to_string_pretty(&self.host.selections())?)
+        })();
+        self.finish(Some(&a.session_id), r)
+    }
+
+    #[tool(
+        description = "Find free space for a new w×h node next to `near` node ids (default: the user's selection; else right of the content), never overlapping existing nodes. Returns {x, y} (relative to `parent` when given).",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn find_space(&self, Parameters(a): Parameters<FindSpaceArgs>) -> CallToolResult {
+        let r = (|| {
+            self.host.actor(&a.session_id)?;
+            let (x, y) = self.host.find_space(
+                &a.canvas,
+                a.parent.as_deref(),
+                a.near.as_deref().unwrap_or_default(),
+                a.w.max(1.0),
+                a.h.max(1.0),
+            )?;
+            Ok(serde_json::to_string(&json!({"x": x, "y": y}))?)
         })();
         self.finish(Some(&a.session_id), r)
     }
@@ -943,5 +1130,28 @@ impl ServerHandler for CanvasMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(GUIDE)
+    }
+
+    /// Every tool call: capture who is calling ([`CallMeta`]) and mirror external agents'
+    /// calls into their pseudo-chat as `tool` events.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let meta = CallMeta {
+            client_name: context.peer.peer_info().map(|i| i.client_info.name.clone()),
+            chat: header(&context, "x-falos-chat"),
+            from: header(&context, "x-falos-from"),
+        };
+        let name = request.name.to_string();
+        let args = Json::Object(request.arguments.clone().unwrap_or_default());
+        let ext = crate::transcript::ext_start(&self.host, &name, &args);
+        let tcc = ToolCallContext::new(self, request, context);
+        let res = CALL_META.scope(meta, self.tool_router.call(tcc)).await;
+        if let Some(ext) = ext {
+            crate::transcript::ext_end(&self.host, ext, &name, &args, &res);
+        }
+        res
     }
 }
