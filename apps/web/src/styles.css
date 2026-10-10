@@ -319,11 +319,12 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .tabs { flex: 1; min-width: 0; display: flex; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
 .tab {
-  flex: none; max-width: 180px; display: flex; align-items: center; padding: 0 8px 0 10px;
+  flex: none; max-width: 132px; display: flex; align-items: center; padding: 0 8px 0 10px;
   color: var(--dim); white-space: nowrap; cursor: pointer; outline: none; border-right: 1px solid var(--line);
   border-left: 1px solid transparent;
 }
 .tab:hover, .tab:focus-visible { color: var(--text); background: var(--panel); }
+.tab.on { max-width: 200px; }
 .tab.on { color: var(--text); background: var(--panel); box-shadow: inset 0 -1px 0 var(--text); }
 .tab.drop-before { border-left-color: var(--text); }
 .tab.drop-after { border-right-color: var(--text); }
@@ -378,6 +379,7 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .question { border-left: 1px solid var(--line); padding-left: 1ch; }
 .question.answered { color: var(--dim); }
 .q-opt { padding-left: 1ch; }
+.sub-log { display: flex; flex-direction: column; gap: 6px; }
 .sub-head { flex: none; display: flex; gap: 2ch; padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 .empty-chat { padding: 8px 0; line-height: 20px; }
 .latest {
@@ -405,7 +407,8 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .chat.dropping { outline: 1px dashed var(--dim); outline-offset: -1px; }
 .chat-drop { position: absolute; left: 0; right: 0; bottom: 64px; text-align: center; pointer-events: none; }
 .driver { display: inline-flex; gap: 0.6ch; flex: none; font-size: 11px; line-height: 18px; }
-.driver .on { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.driver .link { color: var(--faint); }
+.driver .link.on { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 .prompt textarea:disabled { color: var(--faint); }
 .chip.gone { color: var(--faint); }
 .chip .swatch { margin-right: 0.5ch; }

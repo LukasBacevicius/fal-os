@@ -353,12 +353,12 @@ impl App {
         for (i, (id, color)) in self.working.iter().enumerate() {
             let Some(n) = self.scene.get(id) else { continue };
             if self.reduce_motion {
-                activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RECT, color: *color, t0: 0.0, dur: 0.0, seed: 0.0 });
+                activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RECT, color: *color, t0: 0.0, dur: 0.0, seed: 0.0, label_px: 0.0 });
                 continue;
             }
-            activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::PULSE, color: *color, t0: 0.0, dur: 0.0, seed: 0.0 });
+            activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::PULSE, color: *color, t0: 0.0, dur: 0.0, seed: 0.0, label_px: 0.0 });
             if matches!(n.kind, NodeKind::Frame | NodeKind::Group) {
-                activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RAIN, color: *color, t0: 0.0, dur: 0.0, seed: i as f32 + 1.0 });
+                activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RAIN, color: *color, t0: 0.0, dur: 0.0, seed: i as f32 + 1.0, label_px: 6.7 * n.name.chars().count() as f32 + 12.0 });
             }
         }
         for (node, f) in &self.fx {
@@ -1644,7 +1644,7 @@ impl CanvasApp {
             let node = a.scene.get(id);
             let Some(rect) = node.map(|n| n.rect).or(given) else { continue };
             let seed = i as f32;
-            let fx = |shape, t0, dur| ActivityFx { rect, shape, color, t0, dur, seed };
+            let fx = |shape, t0, dur| ActivityFx { rect, shape, color, t0, dur, seed, label_px: 0.0 };
             let follow = node.is_some().then(|| id.clone());
             if reduce {
                 add.push((follow, fx(OverlayPrim::RECT, t, 1.2)));
@@ -1658,7 +1658,7 @@ impl CanvasApp {
                     let kids: Vec<(String, [f32; 4])> =
                         a.scene.iter().filter(|c| c.parent.as_deref() == Some(id.as_str())).take(6).map(|c| (c.id.clone(), c.rect)).collect();
                     for (j, (kid, r)) in kids.into_iter().enumerate() {
-                        add.push((Some(kid), ActivityFx { rect: r, shape: OverlayPrim::BLINK, color, t0: t + 0.45 + j as f32 * 0.12, dur: 1.2, seed }));
+                        add.push((Some(kid), ActivityFx { rect: r, shape: OverlayPrim::BLINK, color, t0: t + 0.45 + j as f32 * 0.12, dur: 1.2, seed, label_px: 0.0 }));
                     }
                 }
                 "edit" => add.push((follow, fx(OverlayPrim::FLASH, t, 0.7))),

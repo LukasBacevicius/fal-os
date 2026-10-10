@@ -136,12 +136,12 @@ fn activity(in: VsOut, shape: u32, d: f32) -> vec4<f32> {
             let x = in.p.x + in.half.x;
             let col = floor(x / col_w);
             let h = hash11(col + in.anim.z * 17.0);
-            if h > 0.72 {
+            if h > 0.6 {
                 let speed = 0.35 + 0.5 * hash11(col * 3.1 + 1.7);
                 let ph = fract(h * 9.0 + (cam.time - t0) * speed);
                 let y = (ph - 0.5) * 2.0 * in.half.y;
                 let cx = (col + 0.5) * col_w - in.half.x;
-                let s = 1.0 * cam.dpr;
+                let s = 1.1 * cam.dpr;
                 let q = abs(in.p - vec2(cx, y)) - vec2(s);
                 let dot = clamp(0.5 - max(q.x, q.y), 0.0, 1.0);
                 fa = dot * sin(ph * 3.14159);

@@ -92,7 +92,7 @@ export function ChatTabs() {
               className={`tab ${on ? 'on' : ''} ${drag?.over === id ? (drag.after ? 'drop-after' : 'drop-before') : ''}`}
               tabIndex={0}
               draggable={renaming !== id}
-              title={`${chatTitle(chat, id)}${isExternal(id) ? ' · external agent (read-only)' : ''}`}
+              title={`${chatTitle(chat, id)}${isExternal(id) ? ' · external agent (read-only)' : chat.meta[id]?.driver ? ` · ${chat.meta[id]?.driver}` : ''}`}
               onClick={() => openChat(id)}
               onDoubleClick={() => setRenaming(id)}
               onContextMenu={(e) => {
@@ -217,7 +217,10 @@ export function ChatHistory() {
   const [sel, setSel] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  useEffect(() => input.current?.focus(), []);
+  const confirming = useStore((s) => s.confirmDelete);
+  useEffect(() => {
+    if (!confirming) input.current?.focus();
+  }, [confirming]);
 
   const groups = useMemo(() => {
     const ids = [...chat.order].reverse();
@@ -295,6 +298,7 @@ export function ChatHistory() {
                   <Swatch chat={chat} id={id} />
                   <span className="hist-title">{chatTitle(chat, id)}{chat.unread[id] ? ' •' : ''}</span>
                   <span className="dim">
+                    {m?.driver ? <span className="faint">{m.driver} </span> : null}
                     {isRunning(chat, id) ? '* ' : m?.state === 'error' ? '! ' : ''}
                     {m?.cost ? `${usd(m.cost)} ` : ''}
                     {ago(m?.updated)}

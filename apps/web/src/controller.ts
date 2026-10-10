@@ -108,10 +108,11 @@ export async function importFiles(files: File[], at?: [number, number]) {
 
 /** A screen point (CSS px) near the middle of the view where a ~`size` px box covers no
  *  node, so attached files land in empty space; falls back to the center. */
-export function emptySpot(size = 260): [number, number] {
+export function emptySpot(want = 220): [number, number] {
   const { app, camera, nodes } = getState();
   const c: [number, number] = [camera.width / 2, camera.height / 2];
   if (!app) return c;
+  const size = Math.max(80, Math.min(want, camera.width / 2.5, camera.height / 2.5));
   const rects = [...worldRects(nodes).values()];
   const free = (sx: number, sy: number) => {
     const [x0, y0] = app.screenToWorld(sx - size / 2, sy - size / 2);
@@ -129,7 +130,12 @@ export function emptySpot(size = 260): [number, number] {
       }
     }
   }
-  return c;
+  // Nothing free in view: just right of the content at the view's middle.
+  if (!rects.length) return c;
+  const [, wy] = app.screenToWorld(c[0], c[1]);
+  const right = Math.max(...rects.map((r) => r[0] + r[2]));
+  const [sx, sy] = app.worldToScreen(right + 40, wy);
+  return [sx + size / 2, sy];
 }
 
 /** Files dropped or pasted on the chat: imported as canvas nodes in empty space near the

@@ -176,8 +176,8 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
         <div className="row sub-card" onClick={go} title="open this agent's transcript">
           <span style={{ color }}>{failed ? '✕' : '✓'}</span> {item.agent} {failed ? 'failed' : 'done'}
           <span className="faint">
-            {` · ${item.tools} tool${item.tools === 1 ? '' : 's'}`}
-            {item.ms != null ? ` · ${secs(item.ms)}` : ''}
+            {item.tools > 0 ? ` · ${item.tools} tool${item.tools === 1 ? '' : 's'}` : ''}
+            {item.ms != null && item.ms >= 1000 ? ` · ${secs(item.ms)}` : ''}
           </span>
           {item.nodes.length > 0 && <> →<Refs ids={item.nodes} max={4} /></>}
           {item.status && <div className="row-body">{item.status}</div>}
@@ -236,7 +236,7 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
             <div className="row-line done-line">
               {item.reverted ? '· reverted' : '· done'}
               {!item.reverted && item.nodes.length > 0 && <> →<Refs ids={item.nodes} /></>}
-              {turn && (
+              {turn && (item.reverted || item.nodes.length > 0) && (
                 <button
                   className="link faint revert"
                   title={item.reverted ? 'redo this turn' : "undo everything this turn's agents changed"}
@@ -259,7 +259,12 @@ export function TurnView({ turn, live, ids, chat, kindOf }: { turn: Turn; live: 
   const [open, setOpen] = useState<boolean | null>(null);
   const expanded = open ?? false;
   const summary = workSummary(turn.work);
-  const tail = live && !expanded ? turn.work.filter((w) => w.type !== 'text').slice(-3) : [];
+  const tail = live && !expanded
+    ? [
+        ...turn.work.filter((w) => w.type === 'batch' && w.done + w.failed < w.total),
+        ...turn.work.filter((w) => w.type !== 'text' && w.type !== 'batch').slice(-3),
+      ]
+    : [];
   return (
     <div className="turn">
       {turn.user && <Row item={turn.user} ids={ids} chat={chat} kindOf={kindOf} />}
@@ -282,7 +287,7 @@ export function TurnView({ turn, live, ids, chat, kindOf }: { turn: Turn; live: 
       )}
       {turn.final.map((it) => <Row key={it.key} item={it} ids={ids} chat={chat} kindOf={kindOf} />)}
       {turn.errors.map((it) => <Row key={it.key} item={it} ids={ids} chat={chat} kindOf={kindOf} />)}
-      {turn.done && <Row item={turn.done} ids={ids} chat={chat} kindOf={kindOf} />}
+      {turn.done && !(turn.errors.length && !turn.done.nodes.length && !turn.done.summary) && <Row item={turn.done} ids={ids} chat={chat} kindOf={kindOf} />}
     </div>
   );
 }

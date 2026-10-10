@@ -87,7 +87,9 @@ export function SelectionPrompt() {
   let left = box.right + 10;
   if (left + size[0] > camera.width - 8) left = Math.max(8, box.left - size[0] - 10);
   if (left < 8 || box.right - box.left > camera.width * 0.6) left = Math.min(Math.max(8, box.right - size[0]), camera.width - size[0] - 8);
-  const top = Math.min(Math.max(8, box.top), camera.height - size[1] - 8);
+  left = Math.max(8, left);
+  const top = Math.max(8, Math.min(box.top, camera.height - size[1] - 8));
+  const width = Math.min(340, camera.width - 16);
 
   const close = () => setState({ promptOpen: false });
   const done = () => {
@@ -114,7 +116,7 @@ export function SelectionPrompt() {
   };
 
   return (
-    <div className="sel-prompt" ref={el} style={{ transform: `translate(${left}px, ${top}px)` }} onPointerDown={(e) => e.stopPropagation()}>
+    <div className="sel-prompt" ref={el} style={{ transform: `translate(${left}px, ${top}px)`, width }} onPointerDown={(e) => e.stopPropagation()}>
       <Chips chips={chips} onRemove={(i) => setRemoved((r) => [...r, (chips[i] as { node: string }).node])} />
       <div className="prompt">
         <span className="dim">✦</span>

@@ -358,7 +358,9 @@ function Properties() {
     if (Number.isFinite(n)) set({ [k]: Math.round(n * 100) / 100 });
   };
   const locked = sel.every((n) => n.locked);
-  const lin = detail?.asset?.lineage;
+  const raw = detail?.asset?.lineage;
+  // Imported media carry an `import` lineage: no generation to rerun.
+  const lin = raw && raw.model && raw.model !== 'import' ? raw : undefined;
   const media = one && (one.kind === 'image' || one.kind === 'video' || one.kind === 'audio');
   const prompt = lin ? String((lin.params as any)?.prompt ?? '') : '';
   const chip = one ? [{ kind: 'node' as const, node: one.id }] : [];

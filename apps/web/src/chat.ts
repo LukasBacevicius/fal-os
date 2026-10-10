@@ -139,7 +139,8 @@ export function isRunning(s: ChatState, chat: string): boolean {
 /** The open tabs, in display order: chats the host marks open (and not closed here),
  *  running chats always, and the active chat. */
 export function tabs(s: ChatState): string[] {
-  const known = s.order.filter((id) => {
+  const ids = s.active && !s.order.includes(s.active) && s.threads[s.active] ? [...s.order, s.active] : s.order;
+  const known = ids.filter((id) => {
     const m = s.meta[id];
     if (id === s.active) return true;
     if (isRunning(s, id)) return true;
@@ -583,7 +584,8 @@ export function workSummary(work: Item[]): string {
     if (it.type === 'thinking') {
       thought = true;
       think += it.seconds ?? 0;
-    } else if (it.type === 'act') add(it.verb, it.verb === 'gen' ? Math.max(it.calls.length, actNodes(it).length) : it.calls.length);
+    } else if (it.type === 'batch') add('gen', it.total);
+    else if (it.type === 'act') add(it.verb, it.verb === 'gen' ? Math.max(it.calls.length, actNodes(it).length) : it.calls.length);
     else if (it.type === 'sub' && it.phase === 'start') add('agents');
   }
   const parts: string[] = [];
@@ -628,7 +630,8 @@ export function actLabel(it: ActItem, kindOf: (id: string) => string | undefined
     case 'gen': {
       const models = [...new Set(c.map((x) => x.summary.split(' · ')[0]).filter((m) => m && !/^fal Agent/.test(m) && !/failed/.test(m)))];
       const via = c.some((x) => x.name === 'fal_agent') ? 'fal Agent' : models.slice(0, 2).join(', ');
-      s = `${runningNow ? 'generating' : 'generated'} ${media()}${via ? ` (${via})` : ''}`;
+      const what = runningNow && !nodes.length ? (n > 1 ? `${n} outputs` : '') : media();
+      s = [runningNow ? 'generating' : 'generated', what, via ? `(${via})` : ''].filter(Boolean).join(' ');
       break;
     }
     case 'edit':

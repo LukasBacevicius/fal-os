@@ -119,7 +119,7 @@ function Composer({ running, readOnly, question }: { running: boolean; readOnly:
   const placeholder = readOnly
     ? 'external agent · read-only'
     : chat.active
-      ? running ? 'message (queued until the next step)…' : `message ${chatTitle(chat, chat.active)}…`
+      ? running ? 'queue a message…' : `message ${chatTitle(chat, chat.active)}…`
       : 'start a chat…';
 
   return (
@@ -278,7 +278,7 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
               </div>
             )}
             {subView
-              ? t.items.map((it) => <Row key={it.key} item={it} ids={ids} chat={chat.active!} kindOf={kindOf} />)
+              ? <div className="sub-log">{t.items.map((it) => <Row key={it.key} item={it} ids={ids} chat={chat.active!} kindOf={kindOf} />)}</div>
               : turns.map((tn, i) => (
                   <TurnView key={tn.key} turn={tn} live={t.running && i === turns.length - 1} ids={ids} chat={chat.active!} kindOf={kindOf} />
                 ))}

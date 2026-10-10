@@ -75,6 +75,8 @@ pub struct ActivityFx {
     pub t0: f32,
     pub dur: f32,
     pub seed: f32,
+    /// Rain only: width of the frame's title label (CSS px), skipped by the dots.
+    pub label_px: f32,
 }
 
 /// `#rgb`, `#rrggbb` or `#rrggbbaa` → RGBA8 (red in the low byte).
@@ -133,13 +135,14 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
         out.push(OverlayPrim::dashed([r[0] - pad, r[1] - pad, r[2] + 2.0 * pad, r[3] + 2.0 * pad], 0, p.dim, d));
     }
     for f in i.activity {
-        let stroke = with_alpha(f.color, 190);
+        let stroke = with_alpha(f.color, 220);
         let prim = match f.shape {
+            // The strip starts after the frame's title (`label_px`, CSS px) so dots never cross the text.
             OverlayPrim::RAIN => OverlayPrim {
                 world: [f.rect[0], f.rect[1]],
                 world_size: [f.rect[2], 0.0],
-                px_offset: [0.0, -12.0 * d],
-                px_size: [0.0, 9.0 * d],
+                px_offset: [f.label_px * d, -12.0 * d],
+                px_size: [-f.label_px * d, 9.0 * d],
                 fill: with_alpha(f.color, 200),
                 shape: OverlayPrim::RAIN,
                 t0: f.t0,
@@ -150,9 +153,9 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
             OverlayPrim::RECT => OverlayPrim::rect(f.rect, 0, with_alpha(f.color, 150), d),
             shape => {
                 let fill = match shape {
-                    OverlayPrim::GHOST => with_alpha(f.color, 40),
-                    OverlayPrim::FLASH => with_alpha(f.color, 30),
-                    _ => with_alpha(f.color, 46),
+                    OverlayPrim::GHOST => with_alpha(f.color, 56),
+                    OverlayPrim::FLASH => with_alpha(f.color, 60),
+                    _ => with_alpha(f.color, 120),
                 };
                 OverlayPrim { seed: f.seed, ..OverlayPrim::activity(f.rect, shape, fill, stroke, d, f.t0, f.dur) }
             }

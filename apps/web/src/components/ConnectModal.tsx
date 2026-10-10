@@ -82,10 +82,16 @@ export function ConnectModal() {
   useEffect(() => {
     const on = (e: Event) => {
       const m = (e as CustomEvent).detail as { client: string; nodes: string[] };
-      const { app, nodes } = getState();
       close();
-      const have = (m.nodes ?? []).filter((id) => nodes.some((n) => n.id === id));
-      if (app && have.length) app.zoomToNodes(have);
+      // The doc update with the new nodes may land just after the event: retry briefly.
+      let tries = 0;
+      const zoom = () => {
+        const { app, nodes } = getState();
+        const have = (m.nodes ?? []).filter((id) => nodes.some((n) => n.id === id));
+        if (app && have.length) app.zoomToNodes(have);
+        else if (++tries < 20) window.setTimeout(zoom, 100);
+      };
+      zoom();
       const name = CLIENTS.find((c) => matches(c.id, m.client))?.label ?? m.client;
       toast(`${name} is connected: it just wrote ${m.nodes?.length ?? 0} node${m.nodes?.length === 1 ? '' : 's'}`);
     };

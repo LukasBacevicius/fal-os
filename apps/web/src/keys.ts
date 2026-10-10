@@ -150,7 +150,7 @@ export function installKeys(): () => void {
     if ((mod || ctrl) && e.shiftKey && (k === ']' || k === '}')) return done(), switchChat('next');
     if ((mod || ctrl) && !e.shiftKey && !e.altKey && /^[1-9]$/.test(k)) return done(), switchChat(Number(k) - 1);
     if (mod && !e.shiftKey && (k === 'i' || k === 'I')) return done(), focusChat();
-    if (mod && !e.shiftKey && (k === 'y' || k === 'Y')) return done(), toggleHistory();
+    if ((mod || ctrl) && !e.shiftKey && (k === 'y' || k === 'Y')) return done(), toggleHistory();
     if (mod && k === '.') return done(), setDriver();
     if (overlay) return; // the palette / help own the keyboard
     if (editable(e.target) || getState().editing) return;
