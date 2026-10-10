@@ -6,3 +6,8 @@
 /apps/desktop/src-tauri/gen
 /.claude/worktrees
 /web/media
+node_modules
+/apps/web/dist
+/apps/web/src/wasm/pkg
+/apps/web/public/samples
+*.tsbuildinfo

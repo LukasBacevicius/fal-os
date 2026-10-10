@@ -998,6 +998,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "falos-client"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "falos-doc",
+ "falos-engine",
+ "js-sys",
+ "log",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "wgpu",
+]
+
+[[package]]
 name = "falos-doc"
 version = "0.1.0"
 dependencies = [
@@ -1006,6 +1025,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "web-time",
 ]
 
 [[package]]
@@ -1013,7 +1033,10 @@ name = "falos-engine"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "js-sys",
  "log",
+ "wasm-bindgen",
+ "web-sys",
  "web-time",
  "wgpu",
 ]

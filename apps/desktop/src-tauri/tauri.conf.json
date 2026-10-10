@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "ai.fal.os",
   "build": {
-    "frontendDist": "../../../web",
-    "devUrl": "http://127.0.0.1:8789"
+    "frontendDist": "../../web/dist",
+    "devUrl": "http://127.0.0.1:5173"
   },
   "app": {
     "windows": [],
