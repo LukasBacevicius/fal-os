@@ -76,180 +76,139 @@ export async function probe_video(url) {
   return { bitmap, width, height, duration };
 }
 
-const ICON_COLORS = {
-  audio: '#f59e0b', model3d: '#22c55e', document: '#ef4444', text: '#60a5fa', vector: '#ec4899',
-  embed: '#14b8a6', timeline: '#a855f7', stream: '#f43f5e', generation: '#8b5cf6', note: '#eab308',
+// Cards follow UI-SPEC.md: monospace, grays only, no ornament. Sizes are in canvas px; `k`
+// converts CSS px at 100% zoom (the node's world width maps to the canvas width).
+const MONO = 'ui-monospace, "SF Mono", Menlo, monospace';
+const THEMES = {
+  dark: { panel: '#0f0f0f', tile: '#1a1a1c', text: '#e6e6e6', dim: '#8a8a8a', faint: '#4a4a4a' },
+  light: { panel: '#f7f7f7', tile: '#ececee', text: '#0a0a0a', dim: '#6e6e6e', faint: '#b5b5b5' },
 };
+const theme = (spec) => THEMES[spec.theme] || THEMES.dark;
 
-const NOTE_COLORS = { yellow: '#fde68a', orange: '#fdba74', red: '#fca5a5', pink: '#f9a8d4', purple: '#d8b4fe', blue: '#93c5fd', green: '#86efac', gray: '#d4d4d8', grey: '#d4d4d8', white: '#fafafa' };
-function noteColor(c) {
-  if (!c) return '#fde68a';
-  if (NOTE_COLORS[c]) return NOTE_COLORS[c];
-  return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c) ? c : '#fde68a';
-}
-
-function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
-
-function roundRect(g, x, y, w, h, r) { g.beginPath(); g.roundRect ? g.roundRect(x, y, w, h, r) : g.rect(x, y, w, h); }
-
-function glyph(g, kind, x, y, s) {
-  g.save(); g.translate(x, y); g.strokeStyle = '#fff'; g.fillStyle = '#fff';
-  g.lineWidth = s * 0.07; g.lineCap = 'round'; g.lineJoin = 'round';
-  const k = kind.startsWith('style') ? 'style' : kind;
-  if (k === 'audio') {
-    const bars = [0.35, 0.7, 0.5, 0.95, 0.6, 0.8, 0.4];
-    bars.forEach((b, i) => { const bx = s * (0.2 + i * 0.1); g.beginPath(); g.moveTo(bx, s * (0.5 - b * 0.3)); g.lineTo(bx, s * (0.5 + b * 0.3)); g.stroke(); });
-  } else if (k === 'model3d') {
-    const c = s / 2, r = s * 0.3;
-    g.beginPath(); g.moveTo(c, c - r); g.lineTo(c + r, c - r / 2); g.lineTo(c + r, c + r / 2); g.lineTo(c, c + r); g.lineTo(c - r, c + r / 2); g.lineTo(c - r, c - r / 2); g.closePath(); g.stroke();
-    g.beginPath(); g.moveTo(c - r, c - r / 2); g.lineTo(c, c); g.lineTo(c + r, c - r / 2); g.moveTo(c, c); g.lineTo(c, c + r); g.stroke();
-  } else if (k === 'document') {
-    g.beginPath(); g.moveTo(s * 0.3, s * 0.2); g.lineTo(s * 0.58, s * 0.2); g.lineTo(s * 0.72, s * 0.34); g.lineTo(s * 0.72, s * 0.8); g.lineTo(s * 0.3, s * 0.8); g.closePath(); g.stroke();
-    [0.45, 0.56, 0.67].forEach(t => { g.beginPath(); g.moveTo(s * 0.38, s * t); g.lineTo(s * 0.64, s * t); g.stroke(); });
-  } else if (k === 'text' || k === 'note') {
-    g.font = `600 ${s * 0.42}px Inter, system-ui, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('Aa', s / 2, s / 2 + s * 0.02);
-  } else if (k === 'embed') {
-    g.font = `600 ${s * 0.36}px ui-monospace, Menlo, monospace`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('</>', s / 2, s / 2);
-  } else if (k === 'generation') {
-    const c = s / 2; g.beginPath();
-    for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, r = i % 2 ? s * 0.12 : s * 0.32; g.lineTo(c + Math.cos(a) * r, c + Math.sin(a) * r); }
-    g.closePath(); g.fill();
-  } else if (k === 'vector') {
-    g.beginPath(); g.moveTo(s * 0.22, s * 0.72); g.bezierCurveTo(s * 0.3, s * 0.2, s * 0.7, s * 0.8, s * 0.78, s * 0.28); g.stroke();
-    [[0.22, 0.72], [0.78, 0.28]].forEach(([px, py]) => { g.fillRect(s * px - s * 0.05, s * py - s * 0.05, s * 0.1, s * 0.1); });
-  } else {
-    roundRect(g, s * 0.28, s * 0.28, s * 0.44, s * 0.44, s * 0.08); g.stroke();
-  }
-  g.restore();
+function cardCanvas(spec, minH) {
+  const W = 768;
+  const H = Math.max(minH, Math.min(2048, Math.round(W / Math.max(0.2, spec.aspect || 1.5))));
+  const c = canvas(W, H), g = c.getContext('2d');
+  const k = W / Math.max(40, Number(spec.w) || 320);
+  return { c, g, W, H, k };
 }
 
 function wrap(g, text, maxW, maxLines) {
   const out = [];
   for (const para of String(text).split('\n')) {
     let line = '';
-    for (const word of para.split(/\s+/)) {
-      const t = line ? line + ' ' + word : word;
-      if (g.measureText(t).width > maxW && line) { out.push(line); line = word; } else line = t;
+    for (const word of para.split(/(\s+)/)) {
+      const t = line + word;
+      if (g.measureText(t).width > maxW && line.trim()) { out.push(line.trimEnd()); line = word.trimStart(); } else line = t;
       if (out.length >= maxLines) return out;
     }
-    out.push(line);
+    out.push(line.trimEnd());
     if (out.length >= maxLines) return out;
   }
   return out;
 }
 
-// Text card: the body is the content; the name is a small caption.
+function clip(g, text, maxW) {
+  let t = String(text);
+  if (g.measureText(t).width <= maxW) return t;
+  while (t.length > 1 && g.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+  return t + '…';
+}
+
+// note / text: a plain mono text block on the panel color (the overlay draws the 1 px border).
 async function textSource(spec) {
-  const W = 768, H = Math.max(120, Math.min(2048, Math.round(W / Math.max(0.2, spec.aspect || 1.5))));
-  const c = canvas(W, H), g = c.getContext('2d');
-  g.fillStyle = '#18181c'; g.fillRect(0, 0, W, H);
-  g.strokeStyle = 'rgba(255,255,255,0.10)'; g.lineWidth = 3; g.strokeRect(1.5, 1.5, W - 3, H - 3);
-  const pad = 36;
-  let top = pad;
-  if (spec.title && spec.title !== 'Text') {
-    g.fillStyle = '#8b8b94'; g.font = `500 24px Inter, system-ui, -apple-system, sans-serif`; g.textBaseline = 'alphabetic';
-    g.fillText(spec.title.slice(0, 60), pad, top + 22);
-    top += 44;
-  }
-  const body = spec.body || '';
-  const size = body.length < 80 ? 44 : body.length < 400 ? 34 : 28;
-  g.fillStyle = '#f4f4f5'; g.font = `400 ${size}px Inter, system-ui, -apple-system, sans-serif`;
-  const lh = Math.round(size * 1.35);
-  const lines = wrap(g, body, W - pad * 2, Math.max(1, Math.floor((H - top - pad) / lh)));
-  lines.forEach((l, i) => g.fillText(l, pad, top + size + i * lh));
-  return { bitmap: await createImageBitmap(c), width: W, height: H, duration: 0 };
-}
-
-// Generation placeholder: model, prompt snippet, status and a progress bar. The page adds an
-// animated shimmer on top while it runs; this bitmap is re-rendered when status/progress change.
-async function generationSource(spec) {
-  const W = 768, H = Math.max(200, Math.min(2048, Math.round(W / Math.max(0.2, spec.aspect || 1))));
-  const c = canvas(W, H), g = c.getContext('2d');
-  const status = spec.status || 'queued';
-  const failed = status === 'failed' || status === 'canceled';
-  const accent = failed ? '#ef4444' : status === 'done' ? '#22c55e' : '#8b5cf6';
-  const grad = g.createLinearGradient(0, 0, W, H);
-  grad.addColorStop(0, '#1d1830'); grad.addColorStop(1, '#141418');
-  g.fillStyle = grad; g.fillRect(0, 0, W, H);
-  g.strokeStyle = accent + '66'; g.lineWidth = 4; g.strokeRect(2, 2, W - 4, H - 4);
-  const pad = 40;
-  // Header: sparkle glyph + model.
-  g.fillStyle = accent; roundRect(g, pad, pad, 64, 64, 16); g.fill();
-  glyph(g, 'generation', pad, pad, 64);
+  const th = theme(spec);
+  const { c, g, W, H, k } = cardCanvas(spec, 64);
+  g.fillStyle = th.panel; g.fillRect(0, 0, W, H);
+  const pad = 10 * k, fs = 12.5 * k, lh = Math.round(fs * 1.45);
   g.textBaseline = 'alphabetic';
-  g.fillStyle = '#f4f4f5'; g.font = `600 30px Inter, system-ui, -apple-system, sans-serif`;
-  let model = spec.model || 'generation';
-  while (g.measureText(model).width > W - pad * 2 - 88 && model.length > 6) model = model.slice(1);
-  g.fillText(model === (spec.model || 'generation') ? model : '…' + model, pad + 88, pad + 30);
-  g.fillStyle = failed ? '#fca5a5' : '#a1a1aa'; g.font = `500 24px Inter, system-ui, -apple-system, sans-serif`;
-  const pct = Math.round(Math.max(0, Math.min(1, Number(spec.progress) || 0)) * 100);
-  const label = failed ? (status === 'failed' ? 'Failed' : 'Canceled') : status === 'running' ? `Generating… ${pct ? pct + '%' : ''}` : status === 'done' ? 'Done' : 'Queued';
-  g.fillText(label, pad + 88, pad + 62);
-  // Prompt snippet.
-  const body = failed && spec.error ? spec.error : spec.prompt || '';
-  if (body) {
-    g.fillStyle = failed ? '#fecaca' : '#d4d4d8'; g.font = `400 30px Inter, system-ui, -apple-system, sans-serif`;
-    const top = pad + 120;
-    const lines = wrap(g, (failed ? '' : '“') + body + (failed ? '' : '”'), W - pad * 2, Math.max(1, Math.floor((H - top - pad - 40) / 42)));
-    lines.forEach((l, i) => g.fillText(l, pad, top + i * 42));
+  let top = pad;
+  const body = spec.body || '';
+  if (spec.kind === 'text' && spec.title && spec.title !== body.split('\n')[0]) {
+    g.fillStyle = th.dim; g.font = `400 ${fs * 0.9}px ${MONO}`;
+    g.fillText(clip(g, spec.title, W - pad * 2), pad, top + fs);
+    top += lh;
   }
-  // Progress bar.
-  const by = H - pad - 12;
-  g.fillStyle = 'rgba(255,255,255,0.10)'; roundRect(g, pad, by, W - pad * 2, 12, 6); g.fill();
-  const frac = status === 'done' ? 1 : status === 'running' ? Math.max(0.06, pct / 100) : status === 'queued' ? 0.03 : 0;
-  if (frac > 0) { g.fillStyle = accent; roundRect(g, pad, by, (W - pad * 2) * frac, 12, 6); g.fill(); }
+  g.fillStyle = th.text; g.font = `400 ${fs}px ${MONO}`;
+  const lines = wrap(g, body || spec.title || '', W - pad * 2, Math.max(1, Math.floor((H - top - pad * 0.5) / lh)));
+  lines.forEach((l, i) => g.fillText(l, pad, top + fs + i * lh));
   return { bitmap: await createImageBitmap(c), width: W, height: H, duration: 0 };
 }
 
-async function cardSource(spec) {
-  const W = 768, H = Math.max(160, Math.min(2048, Math.round(W / Math.max(0.2, spec.aspect || 1.5))));
-  const c = canvas(W, H), g = c.getContext('2d');
-  const kind = spec.kind;
-  const note = kind === 'note';
-  const accent = ICON_COLORS[kind] || (kind.startsWith('style') ? '#f97316' : '#71717a');
-  g.fillStyle = note ? noteColor(spec.color) : '#1c1c21';
-  g.fillRect(0, 0, W, H);
-  if (!note) {
-    const grad = g.createLinearGradient(0, 0, W, H);
-    grad.addColorStop(0, accent + '30'); grad.addColorStop(1, accent + '00');
-    g.fillStyle = grad; g.fillRect(0, 0, W, H);
-    g.strokeStyle = 'rgba(255,255,255,0.08)'; g.lineWidth = 3; g.strokeRect(1.5, 1.5, W - 3, H - 3);
-  }
-  const pad = 40, icon = 88;
-  const ink = note ? '#3f3a1d' : '#f4f4f5';
-  const sub = note ? 'rgba(63,58,29,0.7)' : '#a1a1aa';
-  if (!note) {
-    g.fillStyle = accent; roundRect(g, pad, pad, icon, icon, 22); g.fill();
-    glyph(g, kind, pad, pad, icon);
-  }
-  const tx = note ? pad : pad + icon + 28;
-  g.fillStyle = ink; g.textBaseline = 'alphabetic';
-  g.font = `600 38px Inter, system-ui, -apple-system, sans-serif`;
-  const title = spec.title || kind;
-  let t = title; while (g.measureText(t).width > W - tx - pad && t.length > 4) t = t.slice(0, -2);
-  if (t !== title) t = t.slice(0, -1) + '…';
-  g.fillText(t, tx, note ? pad + 38 : pad + 44);
-  g.fillStyle = sub; g.font = `400 28px Inter, system-ui, -apple-system, sans-serif`;
-  if (!note) g.fillText(spec.subtitle || kind, tx, pad + 84);
-  const body = spec.body || '';
-  const top = note ? pad + 80 : pad + icon + 44;
-  if (body) {
-    g.fillStyle = note ? ink : '#d4d4d8'; g.font = `400 30px Inter, system-ui, -apple-system, sans-serif`;
-    const lines = wrap(g, body, W - pad * 2, Math.max(1, Math.floor((H - top - pad) / 42)));
-    lines.forEach((l, i) => g.fillText(l, pad, top + 30 + i * 42));
-  } else if (kind === 'audio') {
-    const n = 96, bw = (W - pad * 2) / n, mid = top + (H - top - pad) / 2, amp = (H - top - pad) / 2;
-    let h = hash(spec.title || 'a');
-    g.fillStyle = accent;
+// Failed generation: the tile with `failed` in dim mono (the error goes to the chat).
+async function generationSource(spec) {
+  const th = theme(spec);
+  const { c, g, W, H, k } = cardCanvas(spec, 64);
+  g.fillStyle = th.tile; g.fillRect(0, 0, W, H);
+  const pad = 10 * k, fs = 12 * k;
+  g.fillStyle = th.dim; g.font = `400 ${fs}px ${MONO}`; g.textBaseline = 'alphabetic';
+  g.fillText(spec.status === 'failed' ? 'failed' : String(spec.status || 'failed'), pad, pad + fs);
+  return { bitmap: await createImageBitmap(c), width: W, height: H, duration: 0 };
+}
+
+// Real waveform: decode the audio and draw min/max peaks per column.
+async function audioPeaks(spec, n) {
+  if (!spec.url) return null;
+  try {
+    const buf = await (await fetch(spec.url)).arrayBuffer();
+    if (buf.byteLength > 64 * 1024 * 1024) return null;
+    const AC = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+    const ctx = new AC(1, 1, 8000);
+    const audio = await ctx.decodeAudioData(buf);
+    const data = audio.getChannelData(0);
+    const step = Math.max(1, Math.floor(data.length / n));
+    const peaks = new Float32Array(n);
+    let max = 1e-6;
     for (let i = 0; i < n; i++) {
-      h = Math.imul(h ^ (h >>> 15), 2246822507) >>> 0;
-      const env = Math.sin(Math.PI * i / n) * 0.7 + 0.3;
-      const a = ((h % 1000) / 1000) * env * amp;
-      g.fillRect(pad + i * bw, mid - a, Math.max(2, bw * 0.6), a * 2);
+      let m = 0;
+      const end = Math.min(data.length, (i + 1) * step);
+      for (let j = i * step; j < end; j += 4) m = Math.max(m, Math.abs(data[j]));
+      peaks[i] = m; max = Math.max(max, m);
+    }
+    for (let i = 0; i < n; i++) peaks[i] /= max;
+    return peaks;
+  } catch (e) {
+    return null;
+  }
+}
+
+const TAGS = { model3d: '3d', document: 'pdf', vector: 'svg', audio: 'audio', embed: 'embed', timeline: 'timeline', stream: 'stream', image: 'img', video: 'video' };
+function tag(spec) {
+  if (spec.kind === 'document' && spec.mime && spec.mime !== 'application/pdf') return 'doc';
+  if (String(spec.kind).startsWith('style:')) return 'style';
+  return TAGS[spec.kind] || spec.kind;
+}
+
+// Everything else: `[3d] name` on the panel color; audio adds its waveform in dim.
+async function cardSource(spec) {
+  const th = theme(spec);
+  const { c, g, W, H, k } = cardCanvas(spec, 64);
+  g.fillStyle = th.panel; g.fillRect(0, 0, W, H);
+  const pad = 10 * k, fs = 12 * k;
+  g.textBaseline = 'alphabetic'; g.font = `400 ${fs}px ${MONO}`;
+  const label = `[${tag(spec)}] `;
+  g.fillStyle = th.dim; g.fillText(label, pad, pad + fs);
+  const lw = g.measureText(label).width;
+  g.fillStyle = th.text; g.fillText(clip(g, spec.title || '', W - pad * 2 - lw), pad + lw, pad + fs);
+  if (spec.missing) {
+    g.fillStyle = th.faint; g.fillText('missing file', pad, pad + fs * 2.6);
+  }
+  if (spec.kind === 'audio') {
+    const top = pad + fs * 2.2, bottom = H - pad, mid = (top + bottom) / 2, amp = (bottom - top) / 2;
+    const n = Math.max(32, Math.floor((W - pad * 2) / Math.max(2, 2 * k)));
+    const peaks = await audioPeaks(spec, n);
+    g.fillStyle = th.dim;
+    const bw = (W - pad * 2) / n;
+    if (peaks) {
+      for (let i = 0; i < n; i++) {
+        const a = Math.max(k * 0.5, peaks[i] * amp);
+        g.fillRect(pad + i * bw, mid - a, Math.max(1, bw - k * 0.6), a * 2);
+      }
+    } else {
+      g.fillRect(pad, mid - k * 0.5, W - pad * 2, Math.max(1, k));
     }
   }
-  const bitmap = await createImageBitmap(c);
-  return { bitmap, width: W, height: H, duration: 0 };
+  return { bitmap: await createImageBitmap(c), width: W, height: H, duration: 0 };
 }
 
 async function urlSource(url) {
@@ -262,7 +221,7 @@ function makeSource(spec) {
   if (spec.type === 'blob') return imageSource(spec.blob);
   if (spec.type === 'url') return urlSource(spec.url);
   if (spec.kind === 'generation') return generationSource(spec);
-  if (spec.kind === 'text') return textSource(spec);
+  if (spec.kind === 'text' || spec.kind === 'note') return textSource(spec);
   if (spec.type === 'video') return probe_video(spec.url);
   return cardSource(spec);
 }
@@ -393,8 +352,16 @@ impl MediaStore {
 pub enum Content {
     Image,
     Video,
+    /// Pixels drawn on a canvas (text, notes, audio, other types, failed generations).
     Card,
+    /// A generation in flight: the engine's generating tile (no pixels).
+    Generating,
     None,
+}
+
+/// Generation status (first field of [`SceneNode::card`]).
+pub fn gen_status(n: &SceneNode) -> &str {
+    n.card.split('\u{1}').next().unwrap_or("")
 }
 
 pub fn content_of(n: &SceneNode) -> Content {
@@ -402,24 +369,8 @@ pub fn content_of(n: &SceneNode) -> Content {
         NodeKind::Image if n.asset.is_some() => Content::Image,
         NodeKind::Video if n.asset.is_some() => Content::Video,
         NodeKind::Frame | NodeKind::Group | NodeKind::Connector => Content::None,
+        NodeKind::Generation if !matches!(gen_status(n), "failed" | "canceled" | "cancelled") => Content::Generating,
         _ => Content::Card,
-    }
-}
-
-pub fn kind_label(kind: NodeKind) -> String {
-    match kind {
-        NodeKind::Model3d => "3D model".into(),
-        NodeKind::Document => "Document".into(),
-        NodeKind::Audio => "Audio".into(),
-        NodeKind::Text => "Text".into(),
-        NodeKind::Note => "Note".into(),
-        NodeKind::Embed => "Embed".into(),
-        NodeKind::Generation => "Generation".into(),
-        other => {
-            let s = other.to_string();
-            let mut c = s.chars();
-            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
-        }
     }
 }
 
@@ -428,7 +379,8 @@ fn set(o: &Object, k: &str, v: impl Into<JsValue>) {
 }
 
 /// Source key + JS spec for a node's pixels, or `None` if its asset is not available yet.
-pub fn source_spec(n: &SceneNode, media: &MediaStore) -> Option<(String, JsValue)> {
+/// `light` selects the light theme's card colors.
+pub fn source_spec(n: &SceneNode, media: &MediaStore, light: bool) -> Option<(String, JsValue)> {
     let o = Object::new();
     let key = match content_of(n) {
         Content::Image => {
@@ -454,35 +406,32 @@ pub fn source_spec(n: &SceneNode, media: &MediaStore) -> Option<(String, JsValue
         Content::Card => {
             let aspect = n.rect[2] / n.rect[3].max(1.0);
             let asset = n.asset.as_deref().and_then(|a| media.get(a));
-            let mut subtitle = kind_label(n.kind);
-            if let Some(a) = asset {
-                let kb = a.size / 1024.0;
-                subtitle = if kb > 1024.0 { format!("{subtitle} · {:.1} MB", kb / 1024.0) } else { format!("{subtitle} · {kb:.0} KB") };
-            } else if n.asset.is_some() {
-                subtitle.push_str(" · missing file");
-            }
             let body = n.text.clone().unwrap_or_default();
-            let title = if n.name.is_empty() { kind_label(n.kind) } else { n.name.clone() };
+            let title = n.name.clone();
+            let theme = if light { "light" } else { "dark" };
             set(&o, "type", "card");
             set(&o, "kind", n.kind.to_string());
             set(&o, "title", title.clone());
-            set(&o, "subtitle", subtitle.clone());
             set(&o, "body", body.clone());
             set(&o, "aspect", aspect);
-            let mut card = n.card.split('\u{1}');
-            match n.kind {
-                NodeKind::Note => set(&o, "color", n.card.clone()),
-                NodeKind::Generation => {
-                    for k in ["status", "progress", "model", "error", "prompt"] {
-                        set(&o, k, card.next().unwrap_or("").to_string());
-                    }
+            set(&o, "w", n.rect[2]);
+            set(&o, "theme", theme);
+            if let Some(a) = asset {
+                set(&o, "mime", a.mime.clone());
+                if n.kind == NodeKind::Audio {
+                    set(&o, "url", a.url.clone());
                 }
-                _ => {}
+            } else if n.asset.is_some() && n.kind != NodeKind::Generation {
+                set(&o, "missing", true);
             }
-            let h = fnv(&format!("{title}\u{1}{subtitle}\u{1}{body}\u{1}{:.2}\u{1}{}", aspect, n.card));
+            if n.kind == NodeKind::Generation {
+                set(&o, "status", gen_status(n).to_string());
+            }
+            // Width is part of the key: text is laid out at 100% zoom of the node's width.
+            let h = fnv(&format!("{title}\u{1}{body}\u{1}{:.2}\u{1}{:.0}\u{1}{theme}\u{1}{}\u{1}{}", aspect, n.rect[2], n.card, asset.is_some()));
             format!("c:{}:{h:x}", n.id)
         }
-        Content::None => return None,
+        Content::Generating | Content::None => return None,
     };
     Some((key, o.into()))
 }

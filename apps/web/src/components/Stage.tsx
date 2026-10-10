@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { createCanvasApp } from '../wasm';
-import { getState, setState, useStore } from '../store';
-import { attach, CANVAS_ID, importFiles, loadSamples, restore } from '../controller';
-import { ME } from '../agents';
+import { setState, useStore } from '../store';
+import { addSelectionToChat, attach, CANVAS_ID, importFiles, restore } from '../controller';
 import { connectHost, hostSync } from '../sync';
 import { NodeOverlays } from './NodeOverlays';
-import { Composer } from './Composer';
 import { PresenceLayer } from './PresenceLayer';
-import { Toolbar } from './Toolbar';
 import { StatusBar } from './StatusBar';
-import { IconUpload } from '../icons';
+import { theme } from '../theme';
+
+/** The local user. The host suffixes the actor id if several browsers connect. */
+const ME = { id: 'you', name: 'you' };
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 
@@ -36,21 +36,18 @@ export function Stage() {
     const box = wrap.current!.getBoundingClientRect();
     el.width = Math.max(1, Math.round(box.width * devicePixelRatio));
     el.height = Math.max(1, Math.round(box.height * devicePixelRatio));
-    createCanvasApp(el, { actor: { id: ME.id, name: ME.name }, canvas: { id: CANVAS_ID, name: 'Untitled canvas' } })
+    createCanvasApp(el, { actor: ME, canvas: { id: CANVAS_ID, name: CANVAS_ID } })
       .then(async (a) => {
         if (disposed) return;
         created = a;
         attach(a);
+        a.setTheme(theme());
         a.resize(box.width, box.height, devicePixelRatio);
         setState({ app: a });
-        const hosted = await connectHost(a, CANVAS_ID, { id: ME.id, name: ME.name });
+        const hosted = await connectHost(a, CANVAS_ID, ME);
         await restore(a, hosted);
         a.start();
         setState({ loading: false });
-        // `?samples`: seed an empty canvas with the generated sample media (demos, shell probes).
-        if (new URLSearchParams(location.search).has('samples') && getState().nodes.length === 0) {
-          await loadSamples();
-        }
         (window as any).falos = a; // handy for debugging and agents driving the page
       })
       .catch((e) => setState({ error: String(e?.message ?? e), loading: false }));
@@ -145,6 +142,11 @@ export function Stage() {
     if (!app) return;
     const kd = (e: KeyboardEvent) => {
       if (editable(e.target)) return;
+      if ((isMac ? e.metaKey : e.ctrlKey) && (e.key === 'l' || e.key === 'L')) {
+        e.preventDefault();
+        addSelectionToChat();
+        return;
+      }
       if (app.keyDown(e.key, e.shiftKey, e.altKey, isMac ? e.metaKey : e.ctrlKey)) e.preventDefault();
     };
     const ku = (e: KeyboardEvent) => {
@@ -186,27 +188,9 @@ export function Stage() {
       <canvas ref={canvas} className="stage-canvas" />
       <NodeOverlays />
       <PresenceLayer />
-      <Composer />
-      {!loading && !error && empty && (
-        <div className="empty">
-          <div className="empty-card">
-            <div className="empty-icon"><IconUpload size={22} /></div>
-            <div className="empty-title">Drop media to start</div>
-            <div className="empty-sub">Images, video, audio, 3D, PDFs and text — or paste a link.</div>
-            <button className="btn" onClick={() => loadSamples()}>Load sample media</button>
-          </div>
-        </div>
-      )}
-      {error && (
-        <div className="empty">
-          <div className="empty-card">
-            <div className="empty-title">Can't start the canvas</div>
-            <div className="empty-sub">{error}</div>
-          </div>
-        </div>
-      )}
-      {dragging && <div className="drop-hint"><span>Drop to add to canvas</span></div>}
-      <Toolbar />
+      {!loading && !error && empty && <div className="empty faint">empty canvas · drop files to import</div>}
+      {error && <div className="empty">can't start the canvas: {error}</div>}
+      {dragging && <div className="drop-hint">drop to import</div>}
       <StatusBar />
     </div>
   );

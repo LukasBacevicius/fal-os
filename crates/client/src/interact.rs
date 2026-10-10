@@ -1,5 +1,5 @@
 //! Canvas input: tools, pointer/wheel/key handling, selection, move/resize/marquee and
-//! annotation drafting. Platform-free: takes screen points in physical pixels and returns
+//! Alt-click / Alt-drag context picks on media (chat context chips). Platform-free: takes screen points in physical pixels and returns
 //! [`Effect`]s that the app applies (renderer previews, doc commits, UI events).
 
 use falos_doc::{Command, NodeKind, Props};
@@ -14,7 +14,6 @@ use crate::scene::{Scene, SceneNode};
 pub enum Tool {
     Select,
     Hand,
-    Annotate,
 }
 
 impl Tool {
@@ -22,7 +21,6 @@ impl Tool {
         match s {
             "select" => Some(Tool::Select),
             "hand" => Some(Tool::Hand),
-            "annotate" => Some(Tool::Annotate),
             _ => None,
         }
     }
@@ -36,16 +34,10 @@ pub struct Mods {
     pub meta: bool,
 }
 
-/// An annotation pin as placed on screen by the app (world point of its anchor).
-#[derive(Clone, Debug)]
-pub struct Pin {
-    pub id: String,
-    pub world: [f32; 2],
-}
-
-/// A region drawn with the annotate tool, in node-local normalized coordinates (0..1).
+/// A spot or region picked on a media node (Alt-click / Alt-drag), in node-local normalized
+/// coordinates (0..1).
 #[derive(Clone, Debug, PartialEq)]
-pub enum DraftRegion {
+pub enum PickRegion {
     Point([f32; 2]),
     Box([f32; 4]),
 }
@@ -57,19 +49,16 @@ pub enum Effect {
     /// One doc transaction (one undo step).
     Commit(Vec<Command>),
     Select(Vec<String>),
-    Draft { node: String, region: DraftRegion },
-    CancelDraft,
-    OpenAnnotation(String),
-    /// Deselect the highlighted annotation (click on empty canvas, Escape).
-    CloseAnnotation,
-    Hover { node: Option<String>, annotation: Option<String> },
+    /// A spot / region picked on a media node (chat context).
+    Pick { node: String, region: PickRegion },
+    Hover { node: Option<String> },
     Camera,
     Cursor(&'static str),
     Tool(Tool),
     Undo,
     Redo,
     FitAll,
-    /// Overlay must be rebuilt (marquee, draft box, hover changed).
+    /// Overlay must be rebuilt (marquee, pick box, hover changed).
     Overlay,
 }
 
@@ -79,11 +68,10 @@ enum Drag {
     Move { start: [f32; 2], items: Vec<(String, [f32; 4])>, moved: bool },
     Resize { id: String, handle: usize, orig: [f32; 4], start: [f32; 2], keep_aspect: bool },
     Marquee { start: [f32; 2], cur: [f32; 2], base: Vec<String> },
-    Annotate { node: String, start: [f32; 2], cur: [f32; 2], start_px: [f32; 2] },
+    Pick { node: String, start: [f32; 2], cur: [f32; 2], start_px: [f32; 2] },
 }
 
-/// Pin hit radius and handle size, in CSS pixels.
-const PIN_PX: f32 = 26.0;
+/// Handle size, in CSS pixels.
 const HANDLE_PX: f32 = 8.0;
 const DRAG_SLOP_PX: f32 = 3.0;
 
@@ -91,21 +79,19 @@ pub struct Interaction {
     pub tool: Tool,
     pub selection: Vec<String>,
     pub hover: Option<String>,
-    pub hover_pin: Option<String>,
     pub space: bool,
     drag: Option<Drag>,
 }
 
 impl Default for Interaction {
     fn default() -> Self {
-        Self { tool: Tool::Select, selection: Vec::new(), hover: None, hover_pin: None, space: false, drag: None }
+        Self { tool: Tool::Select, selection: Vec::new(), hover: None, space: false, drag: None }
     }
 }
 
 pub struct Ctx<'a> {
     pub scene: &'a Scene,
     pub camera: &'a mut Camera,
-    pub pins: &'a [Pin],
     /// Device pixel ratio (screen points are physical pixels).
     pub dpr: f32,
 }
@@ -153,6 +139,11 @@ fn is_media(n: &SceneNode) -> bool {
     matches!(n.kind, NodeKind::Image | NodeKind::Video | NodeKind::Model3d | NodeKind::Vector | NodeKind::Document)
 }
 
+/// Nodes whose pixels can be pointed at (spot / region / frame chips).
+fn pickable(n: &SceneNode) -> bool {
+    matches!(n.kind, NodeKind::Image | NodeKind::Video | NodeKind::Vector) && n.asset.is_some()
+}
+
 impl Interaction {
     /// Marquee rect in world units while selecting by drag.
     pub fn marquee(&self) -> Option<[f32; 4]> {
@@ -162,26 +153,16 @@ impl Interaction {
         }
     }
 
-    /// Annotation box being drawn: node id and world rect.
-    pub fn annotate_box(&self) -> Option<(&str, [f32; 4])> {
+    /// Region being Alt-dragged on a media node: node id and world rect.
+    pub fn pick_box(&self) -> Option<(&str, [f32; 4])> {
         match &self.drag {
-            Some(Drag::Annotate { node, start, cur, .. }) => Some((node, norm_rect(*start, *cur))),
+            Some(Drag::Pick { node, start, cur, .. }) => Some((node, norm_rect(*start, *cur))),
             _ => None,
         }
     }
 
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
-    }
-
-    fn pin_at(&self, ctx: &Ctx, p: [f32; 2]) -> Option<String> {
-        let r = PIN_PX * ctx.dpr;
-        ctx.pins.iter().rev().find_map(|pin| {
-            let s = ctx.camera.world_to_screen(pin.world);
-            // Pins are drawn above-right of their anchor (see overlay).
-            let c = [s[0] + r * 0.5, s[1] - r * 0.5];
-            ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) <= (r * 0.6).powi(2)).then(|| pin.id.clone())
-        })
     }
 
     fn handle_at(&self, ctx: &Ctx, p: [f32; 2]) -> Option<(String, usize)> {
@@ -208,12 +189,14 @@ impl Interaction {
         if button != 0 {
             return fx;
         }
-        if let Some(id) = self.pin_at(ctx, p) {
-            fx.push(Effect::OpenAnnotation(id));
-            return fx;
-        }
         match self.tool {
             Tool::Select => {
+                if mods.alt
+                    && let Some(n) = ctx.scene.hit_test(w).filter(|n| pickable(n))
+                {
+                    self.drag = Some(Drag::Pick { node: n.id.clone(), start: w, cur: w, start_px: p });
+                    return fx;
+                }
                 if let Some((id, handle)) = self.handle_at(ctx, p) {
                     let n = ctx.scene.get(&id).expect("selected node");
                     let keep_aspect = is_media(n) != mods.shift;
@@ -245,7 +228,6 @@ impl Interaction {
                     }
                     None => {
                         let base = if mods.shift { self.selection.clone() } else { Vec::new() };
-                        fx.push(Effect::CloseAnnotation);
                         if !mods.shift && !self.selection.is_empty() {
                             self.selection.clear();
                             fx.push(Effect::Select(Vec::new()));
@@ -254,18 +236,12 @@ impl Interaction {
                     }
                 }
             }
-            Tool::Annotate => match ctx.scene.hit_test(w) {
-                Some(n) if n.kind != NodeKind::Frame => {
-                    self.drag = Some(Drag::Annotate { node: n.id.clone(), start: w, cur: w, start_px: p });
-                }
-                _ => fx.push(Effect::CancelDraft),
-            },
             Tool::Hand => {}
         }
         fx
     }
 
-    pub fn pointer_move(&mut self, ctx: &mut Ctx, p: [f32; 2], _mods: Mods) -> Vec<Effect> {
+    pub fn pointer_move(&mut self, ctx: &mut Ctx, p: [f32; 2], mods: Mods) -> Vec<Effect> {
         let mut fx = Vec::new();
         let w = ctx.camera.screen_to_world(p);
         match &mut self.drag {
@@ -302,36 +278,33 @@ impl Interaction {
                 }
                 fx.push(Effect::Overlay);
             }
-            Some(Drag::Annotate { cur, .. }) => {
+            Some(Drag::Pick { cur, .. }) => {
                 *cur = w;
                 fx.push(Effect::Overlay);
             }
-            None => fx.extend(self.update_hover(ctx, p)),
+            None => fx.extend(self.update_hover(ctx, p, mods)),
         }
         fx
     }
 
-    fn update_hover(&mut self, ctx: &Ctx, p: [f32; 2]) -> Vec<Effect> {
+    fn update_hover(&mut self, ctx: &Ctx, p: [f32; 2], mods: Mods) -> Vec<Effect> {
         let mut fx = Vec::new();
         let w = ctx.camera.screen_to_world(p);
-        let pin = self.pin_at(ctx, p);
-        let node = if pin.is_some() { None } else { ctx.scene.hit_test(w).map(|n| n.id.clone()) };
+        let hit = ctx.scene.hit_test(w);
+        let node = hit.map(|n| n.id.clone());
         let cursor = if self.space || self.tool == Tool::Hand {
             "grab"
-        } else if pin.is_some() {
-            "pointer"
         } else if let Some((_, i)) = self.handle_at(ctx, p) {
             HANDLE_CURSORS[i]
-        } else if self.tool == Tool::Annotate {
-            if node.is_some() { "crosshair" } else { "default" }
+        } else if mods.alt && hit.is_some_and(pickable) {
+            "crosshair"
         } else {
             "default"
         };
         fx.push(Effect::Cursor(cursor));
-        if node != self.hover || pin != self.hover_pin {
+        if node != self.hover {
             self.hover = node.clone();
-            self.hover_pin = pin.clone();
-            fx.push(Effect::Hover { node, annotation: pin });
+            fx.push(Effect::Hover { node });
             fx.push(Effect::Overlay);
         }
         fx
@@ -358,18 +331,18 @@ impl Interaction {
                 }
             }
             Some(Drag::Marquee { .. }) => fx.push(Effect::Overlay),
-            Some(Drag::Annotate { node, start, start_px, .. }) => {
+            Some(Drag::Pick { node, start, start_px, .. }) => {
                 if let Some(n) = ctx.scene.get(&node) {
                     let clamp = |l: [f32; 2]| [l[0].clamp(0.0, 1.0), l[1].clamp(0.0, 1.0)];
                     let a = clamp(n.to_local(start));
                     let b = clamp(n.to_local(w));
                     let far = (p[0] - start_px[0]).abs().max((p[1] - start_px[1]).abs()) > 4.0 * ctx.dpr;
                     let region = if far {
-                        DraftRegion::Box([a[0].min(b[0]), a[1].min(b[1]), (a[0] - b[0]).abs(), (a[1] - b[1]).abs()])
+                        PickRegion::Box([a[0].min(b[0]), a[1].min(b[1]), (a[0] - b[0]).abs(), (a[1] - b[1]).abs()])
                     } else {
-                        DraftRegion::Point(a)
+                        PickRegion::Point(a)
                     };
-                    fx.push(Effect::Draft { node, region });
+                    fx.push(Effect::Pick { node, region });
                 }
                 fx.push(Effect::Overlay);
             }
@@ -437,8 +410,6 @@ impl Interaction {
                     self.selection.clear();
                     fx.push(Effect::Select(Vec::new()));
                 }
-                fx.push(Effect::CloseAnnotation);
-                fx.push(Effect::CancelDraft);
                 if self.tool != Tool::Select {
                     fx.extend(self.set_tool(Tool::Select));
                 }
@@ -446,7 +417,6 @@ impl Interaction {
             }
             "v" | "V" if !mods.meta => fx.extend(self.set_tool(Tool::Select)),
             "h" | "H" if !mods.meta => fx.extend(self.set_tool(Tool::Hand)),
-            "c" | "C" if !mods.meta => fx.extend(self.set_tool(Tool::Annotate)),
             "!" | "1" if mods.shift => fx.push(Effect::FitAll),
             ")" | "0" if mods.shift => {
                 let f = ctx.dpr / ctx.camera.zoom;

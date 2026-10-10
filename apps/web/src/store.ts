@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react';
-import type { AnnotationView, CameraView, Draft, NodeView, Presence, Stats, Tool } from './types';
+import type { CameraView, NodeView, Presence, Stats, Tool } from './types';
 import type { CanvasApp } from './wasm';
+import type { ChatState } from './chat';
+import { emptyChat } from './chat';
 
 export interface AssetInfo { id: string; mime: string; name: string; size: number }
 
@@ -10,24 +12,24 @@ export interface State {
   loading: boolean;
   canvasName: string;
   nodes: NodeView[];
-  annotations: AnnotationView[];
-  assets: AssetInfo[];
   selection: string[];
-  selectedAnnotation: string | null;
   hoverNode: string | null;
-  hoverAnnotation: string | null;
   camera: CameraView;
   stats: Stats | null;
   tool: Tool;
-  draft: Draft | null;
   presence: Presence[];
   /** Host connection (`local` = no host found). */
-  conn: import("./sync").ConnState;
+  conn: import('./sync').ConnState;
   hostAddr: string | null;
+  /** Project folder name on the host, if known. */
+  project: string | null;
+  /** Signed-in fal account, if the host reports one. */
+  account: string | null;
   /** Other sessions (agents, other humans) on the host. */
-  sessions: import("./sync").SessionInfo[];
-  claims: { node: string; actor: string; color: string }[];
-  jobs: Record<string, import("./sync").JobInfo>;
+  sessions: import('./sync').SessionInfo[];
+  claims: { node: string; actor: string }[];
+  jobs: Record<string, import('./sync').JobInfo>;
+  chat: ChatState;
   toast: string | null;
   saved: 'idle' | 'saving' | 'saved';
 }
@@ -36,24 +38,22 @@ let state: State = {
   app: null,
   error: null,
   loading: true,
-  canvasName: 'Untitled',
+  canvasName: 'main',
   nodes: [],
-  annotations: [],
-  assets: [],
   selection: [],
-  selectedAnnotation: null,
   hoverNode: null,
-  hoverAnnotation: null,
   camera: { x: 0, y: 0, zoom: 1, width: 0, height: 0 },
   stats: null,
   tool: 'select',
-  draft: null,
   presence: [],
-  conn: "local",
+  conn: 'local',
   hostAddr: null,
+  project: null,
+  account: null,
   sessions: [],
   claims: [],
   jobs: {},
+  chat: emptyChat(),
   toast: null,
   saved: 'idle',
 };

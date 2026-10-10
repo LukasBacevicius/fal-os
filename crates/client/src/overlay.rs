@@ -1,6 +1,8 @@
-//! Builds the engine overlay (canvas-level UI) from client state: hover and selection
-//! outlines, resize handles, marquee, annotation pins/boxes, the annotation being drafted, and
-//! remote cursors. Rebuilt whenever that state changes; the engine skips identical uploads.
+//! Builds the engine overlay (canvas-level UI) from client state: 1 px outlines for frames and
+//! cards, hover and selection outlines, square resize handles, the marquee, the region being
+//! Alt-dragged for chat context, claims, and agent cursors. Monochrome (UI-SPEC.md): the only
+//! colors are the theme's ink, line and dim grays. Rebuilt whenever that state changes; the
+//! engine skips identical uploads.
 
 use falos_engine::OverlayPrim;
 
@@ -12,140 +14,118 @@ pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     r as u32 | (g as u32) << 8 | (b as u32) << 16 | (a as u32) << 24
 }
 
-pub const ACCENT: u32 = rgba(76, 141, 255, 255);
-const ACCENT_FILL: u32 = rgba(76, 141, 255, 28);
-const WHITE: u32 = rgba(255, 255, 255, 255);
-const SHADOW: u32 = rgba(0, 0, 0, 90);
-
-/// Parses `#rrggbb` (or `#rgb`) into the engine color format.
-pub fn parse_color(s: &str, alpha: u8) -> Option<u32> {
-    let h = s.strip_prefix('#')?;
-    let v = |i: usize, n: usize| u8::from_str_radix(&h[i..i + n], 16).ok();
-    match h.len() {
-        6 => Some(rgba(v(0, 2)?, v(2, 2)?, v(4, 2)?, alpha)),
-        3 => Some(rgba(v(0, 1)? * 17, v(1, 1)? * 17, v(2, 1)? * 17, alpha)),
-        _ => None,
-    }
+const fn gray(v: u8, a: u8) -> u32 {
+    rgba(v, v, v, a)
 }
 
-/// Pin color by annotation status.
-pub fn status_color(status: &str, alpha: u8) -> u32 {
-    match status {
-        "in_progress" => rgba(245, 165, 36, alpha),
-        "resolved" => rgba(63, 185, 80, alpha),
-        _ => rgba(139, 92, 246, alpha),
-    }
+/// Theme colors (mirrors the CSS variables in apps/web/src/styles.css).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    pub bg: [f64; 4],
+    /// `--panel`: card fill.
+    pub panel: u32,
+    /// `--line`: 1 px borders.
+    pub line: u32,
+    /// `--dim`: secondary marks (hover, claims).
+    pub dim: u32,
+    /// `--text`: selection, marquee.
+    pub ink: u32,
+    /// Generating tile fill.
+    pub tile: u32,
+    pub light: bool,
 }
 
-pub struct PinView {
-    pub world: [f32; 2],
-    /// Box anchor in world units, if any.
-    pub region: Option<[f32; 4]>,
-    pub status: String,
-    pub selected: bool,
-    pub hovered: bool,
-}
+pub const DARK: Palette = Palette {
+    bg: [10.0 / 255.0, 10.0 / 255.0, 10.0 / 255.0, 1.0],
+    panel: gray(15, 255),
+    line: gray(38, 255),
+    dim: gray(138, 255),
+    ink: gray(230, 255),
+    tile: rgba(26, 26, 28, 255),
+    light: false,
+};
+
+pub const LIGHT: Palette = Palette {
+    bg: [1.0, 1.0, 1.0, 1.0],
+    panel: gray(247, 255),
+    line: gray(217, 255),
+    dim: gray(110, 255),
+    ink: gray(10, 255),
+    tile: rgba(236, 236, 238, 255),
+    light: true,
+};
+
+const WHITE: u32 = gray(255, 255);
+const BLACK: u32 = gray(0, 255);
 
 pub struct CursorView {
     pub world: [f32; 2],
-    pub color: u32,
 }
 
 pub struct OverlayInput<'a> {
     pub scene: &'a Scene,
+    pub palette: &'a Palette,
     pub selection: &'a [String],
     pub hover: Option<&'a str>,
     pub show_handles: bool,
     pub marquee: Option<[f32; 4]>,
-    /// Annotation box being dragged out.
-    pub drawing: Option<[f32; 4]>,
-    pub pins: &'a [PinView],
-    /// The unsent annotation: anchor point and optional box (world).
-    pub draft: Option<([f32; 2], Option<[f32; 4]>)>,
+    /// Region being Alt-dragged on a media node (world).
+    pub pick: Option<[f32; 4]>,
+    /// World rects that get a plain 1 px line (frames, cards).
+    pub outlines: &'a [[f32; 4]],
+    /// World rects claimed by other sessions.
+    pub claims: &'a [[f32; 4]],
     pub cursors: &'a [CursorView],
     pub dpr: f32,
+    /// World units per physical pixel (1 / zoom).
+    pub px_world: f32,
 }
-
-pub const PIN_PX: f32 = 26.0;
 
 pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
     let d = i.dpr;
+    let p = i.palette;
     let mut out = Vec::new();
 
+    for r in i.outlines {
+        out.push(OverlayPrim::rect(*r, 0, p.line, d));
+    }
+    let pad = 3.0 * d * i.px_world;
+    for r in i.claims {
+        out.push(OverlayPrim::dashed([r[0] - pad, r[1] - pad, r[2] + 2.0 * pad, r[3] + 2.0 * pad], 0, p.dim, d));
+    }
     if let Some(h) = i.hover.and_then(|h| i.scene.get(h))
         && !i.selection.iter().any(|s| s == &h.id)
     {
-        out.push(OverlayPrim::rect(h.rect, 0, ACCENT, 1.5 * d));
+        out.push(OverlayPrim::rect(h.rect, 0, p.dim, d));
     }
     for s in i.selection.iter().filter_map(|id| i.scene.get(id)) {
-        out.push(OverlayPrim::rect(s.rect, 0, ACCENT, 1.5 * d));
+        out.push(OverlayPrim::rect(s.rect, 0, p.ink, d));
     }
     if i.selection.len() > 1
         && let Some(b) = i.scene.bounds_of(i.selection)
     {
-        out.push(OverlayPrim::rect(b, 0, ACCENT, 1.0 * d));
+        out.push(OverlayPrim::dashed(b, 0, p.dim, d));
     }
     if i.show_handles
         && i.selection.len() == 1
         && let Some(n) = i.scene.get(&i.selection[0])
     {
-        for p in handle_points(n.rect) {
-            out.push(OverlayPrim::handle(p, 8.0 * d, WHITE, ACCENT, 1.5 * d));
+        for hp in handle_points(n.rect) {
+            let mut h = OverlayPrim::handle(hp, 6.0 * d, WHITE, BLACK, d);
+            h.radius_px = 0.0;
+            out.push(h);
         }
     }
-
-    for p in i.pins {
-        if let Some(r) = p.region {
-            let strong = p.selected || p.hovered;
-            out.push(OverlayPrim::rect(
-                r,
-                status_color(&p.status, if strong { 36 } else { 0 }),
-                status_color(&p.status, if strong { 255 } else { 150 }),
-                (if strong { 2.0 } else { 1.25 }) * d,
-            ));
-        }
-    }
-    for p in i.pins.iter().filter(|p| !p.selected) {
-        push_pin(&mut out, p.world, &p.status, p.hovered, d);
-    }
-    // The selected pin draws last, on top.
-    for p in i.pins.iter().filter(|p| p.selected) {
-        push_pin(&mut out, p.world, &p.status, true, d);
-    }
-
     if let Some(r) = i.marquee {
-        out.push(OverlayPrim::dashed(r, ACCENT_FILL, ACCENT, 1.0 * d));
+        out.push(OverlayPrim::dashed(r, (p.ink & 0x00ff_ffff) | (12 << 24), p.ink, d));
     }
-    if let Some(r) = i.drawing {
-        out.push(OverlayPrim::dashed(r, rgba(139, 92, 246, 30), rgba(139, 92, 246, 255), 1.5 * d));
+    if let Some(r) = i.pick {
+        out.push(OverlayPrim::dashed(r, (p.ink & 0x00ff_ffff) | (20 << 24), p.ink, d));
     }
-    if let Some((p, region)) = i.draft {
-        if let Some(r) = region {
-            out.push(OverlayPrim::dashed(r, rgba(139, 92, 246, 30), rgba(139, 92, 246, 255), 1.5 * d));
-        }
-        let px = PIN_PX * d;
-        out.push(shadowed(OverlayPrim::pin(p, px, WHITE, rgba(139, 92, 246, 255), 2.5 * d), d));
-        out.push(OverlayPrim::pin(p, px, WHITE, rgba(139, 92, 246, 255), 2.5 * d));
-    }
-
     for c in i.cursors {
-        out.push(OverlayPrim::cursor(c.world, 20.0 * d, c.color, WHITE));
+        out.push(OverlayPrim::cursor(c.world, 13.0 * d, WHITE, BLACK));
     }
     out
-}
-
-fn shadowed(mut p: OverlayPrim, d: f32) -> OverlayPrim {
-    p.px_offset[1] += 1.5 * d;
-    p.fill = SHADOW;
-    p.stroke = SHADOW;
-    p
-}
-
-fn push_pin(out: &mut Vec<OverlayPrim>, world: [f32; 2], status: &str, big: bool, d: f32) {
-    let px = if big { PIN_PX + 4.0 } else { PIN_PX } * d;
-    let pin = OverlayPrim::pin(world, px, status_color(status, if status == "resolved" { 200 } else { 255 }), WHITE, 2.0 * d);
-    out.push(shadowed(pin, d));
-    out.push(pin);
 }
 
 #[cfg(test)]
@@ -153,9 +133,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn colors() {
-        assert_eq!(parse_color("#ff0000", 255), Some(rgba(255, 0, 0, 255)));
-        assert_eq!(parse_color("#0f0", 128), Some(rgba(0, 255, 0, 128)));
-        assert_eq!(parse_color("red", 255), None);
+    fn palette_is_monochrome() {
+        for p in [DARK, LIGHT] {
+            for c in [p.panel, p.line, p.dim, p.ink] {
+                let (r, g, b) = (c & 255, (c >> 8) & 255, (c >> 16) & 255);
+                assert!(r == g && g == b, "{c:x} is not gray");
+            }
+        }
     }
 }

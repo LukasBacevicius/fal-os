@@ -12,9 +12,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 
 use falos_doc::loro::VersionVector;
-use falos_doc::{Actor, Anchor, Annotation, Asset, Canvas, Command, NodeKind, Props, ReadOpts, Region, TxResult};
+use falos_doc::{Actor, Asset, Canvas, Command, NodeKind, Props, ReadOpts, TxResult};
 use falos_engine::web_video::{IngestMode, WebVideos};
-use falos_engine::{Camera, Content as EngineContent, Handle, Kind, NodeDesc, OverlayPrim, Pixels, Renderer, Tier};
+use falos_engine::{Camera, Content as EngineContent, GenTile, Handle, Kind, NodeDesc, OverlayPrim, Pixels, Renderer, Tier};
 use js_sys::{Reflect, Uint8Array};
 use serde_json::{Value as Json, json};
 use wasm_bindgen::JsCast;
@@ -22,16 +22,15 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::api;
-use crate::interact::{Ctx, DraftRegion, Effect, Interaction, Mods, Pin, Tool};
-use crate::overlay::{self, CursorView, OverlayInput, PinView, rgba};
+use crate::interact::{Ctx, Effect, Interaction, Mods, PickRegion, Tool};
+use crate::overlay::{self, CursorView, OverlayInput, Palette};
 use crate::scene::{ChangeFeed, RenderSink, Scene, SceneNode};
 use crate::sync::{Incoming, LocalOnly, Outgoing, Presence, SyncTransport};
 use media::{Content, MediaStore, classify, content_of, source_spec};
 
 const MAX_INFLIGHT: usize = 6;
-const BACKGROUND: [f64; 4] = [0.055, 0.055, 0.063, 1.0];
-const PLACEHOLDER: u32 = rgba(36, 36, 42, 255);
-const FRAME_FILL: u32 = rgba(24, 24, 28, 255);
+/// Generating tiles redraw at this interval (ms) while visible; their dots move slowly.
+const ANIM_MS: f64 = 33.0;
 
 type RafSlot = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
 
@@ -39,13 +38,6 @@ struct Gpu {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
-}
-
-struct Draft {
-    node: String,
-    region: DraftRegion,
-    /// Video playhead when the draft was placed (frame annotations).
-    time: Option<f64>,
 }
 
 struct App {
@@ -65,13 +57,19 @@ struct App {
     todo: VecDeque<(Handle, Tier)>,
     inflight: usize,
     failed: HashSet<String>,
-    annotations: Vec<Annotation>,
-    selected_annotation: Option<String>,
-    held_video: Option<Handle>,
-    draft: Option<Draft>,
     presence: Vec<Presence>,
-    /// Soft claims from the host: node id → actor color (outlined in the overlay).
-    claims: Vec<(String, u32)>,
+    /// Soft claims from the host: node ids (outlined in the overlay).
+    claims: Vec<String>,
+    palette: Palette,
+    /// Generation nodes removed recently (id → ms): when a media node with the same id
+    /// appears (the host converts a finished generation in place), it reveals with a crossfade.
+    gen_removed: HashMap<String, f64>,
+    /// Media nodes revealing from a generating tile.
+    reveal: HashSet<String>,
+    /// Animation clock (s): stands still during heavy gestures.
+    anim_time: f64,
+    last_tick: f64,
+    last_anim_frame: f64,
     transport: Box<dyn SyncTransport>,
     js_inbox: Rc<RefCell<Vec<Incoming>>>,
     sent_vv: VersionVector,
@@ -84,7 +82,6 @@ struct App {
     last_stats: f64,
     last_camera: Camera,
     stats: falos_engine::FrameStats,
-    started: f64,
     raf: Option<RafSlot>,
 }
 
@@ -131,37 +128,53 @@ struct EngineSink<'a> {
     videos: &'a WebVideos,
     handles: &'a mut HashMap<Handle, String>,
     todo: &'a mut VecDeque<(Handle, Tier)>,
+    palette: &'a Palette,
+    gen_removed: &'a mut HashMap<String, f64>,
+    reveal: &'a mut HashSet<String>,
 }
 
-fn desc_for(n: &SceneNode, media: &MediaStore) -> NodeDesc {
+/// Stable per-node seed for the generating tile's dots.
+fn seed_of(id: &str) -> u32 {
+    id.bytes().fold(2_166_136_261u32, |h, b| (h ^ b as u32).wrapping_mul(16_777_619))
+}
+
+fn desc_for(n: &SceneNode, media: &MediaStore, pal: &Palette, reveal: bool) -> NodeDesc {
     let mut d = NodeDesc {
         pos: [n.rect[0], n.rect[1]],
         size: [n.rect[2], n.rect[3]],
-        color: PLACEHOLDER,
-        radius: 3.0,
+        color: pal.panel,
+        radius: 0.0,
         ..Default::default()
     };
-    match content_of(n) {
-        Content::Image => {
-            d.kind = Kind::Image;
+    let content = content_of(n);
+    match content {
+        Content::Image | Content::Video => {
+            d.kind = if matches!(content, Content::Video) { Kind::Video } else { Kind::Image };
             d.content = EngineContent::External;
             d.aspect = n.asset.as_deref().and_then(|a| media.aspect(a)).unwrap_or(0.0);
-        }
-        Content::Video => {
-            d.kind = Kind::Video;
-            d.content = EngineContent::External;
-            d.aspect = n.asset.as_deref().and_then(|a| media.aspect(a)).unwrap_or(0.0);
+            if reveal {
+                d.color = pal.tile;
+                d.generating = Some(GenTile { seed: seed_of(&n.id), progress: -1.0, reveal: true });
+            }
         }
         Content::Card => {
             d.kind = Kind::Image;
             d.content = EngineContent::External;
-            d.radius = 12.0;
         }
-        Content::None => {
+        Content::Generating => {
             d.kind = Kind::Flat;
             d.content = EngineContent::None;
-            d.color = FRAME_FILL;
-            d.radius = 6.0;
+            d.color = pal.tile;
+            let mut f = n.card.split('\u{1}');
+            let status = f.next().unwrap_or("");
+            let progress = f.next().and_then(|p| p.parse::<f32>().ok()).filter(|_| status == "running").unwrap_or(-1.0);
+            d.generating = Some(GenTile { seed: seed_of(&n.id), progress: progress.clamp(-1.0, 1.0), reveal: false });
+        }
+        Content::None => {
+            // Frames: no fill; the overlay draws their 1 px outline.
+            d.kind = Kind::Flat;
+            d.content = EngineContent::None;
+            d.color = 0;
         }
     }
     d
@@ -175,19 +188,28 @@ impl EngineSink<'_> {
     }
 }
 
+impl EngineSink<'_> {
+    fn desc(&self, n: &SceneNode) -> NodeDesc {
+        desc_for(n, self.media, self.palette, self.reveal.contains(&n.id))
+    }
+}
+
 impl RenderSink for EngineSink<'_> {
     fn add(&mut self, n: &SceneNode) -> Handle {
-        let h = self.r.add(desc_for(n, self.media));
+        if self.gen_removed.remove(&n.id).is_some() && matches!(content_of(n), Content::Image | Content::Video) {
+            self.reveal.insert(n.id.clone());
+        }
+        let h = self.r.add(self.desc(n));
         self.handles.insert(h, n.id.clone());
         self.attach_video(h, n);
-        if !matches!(content_of(n), Content::None) {
+        if !matches!(content_of(n), Content::None | Content::Generating) {
             self.todo.push_front((h, Tier::Low));
         }
         h
     }
 
     fn update(&mut self, h: Handle, n: &SceneNode, mut content: bool) {
-        let d = desc_for(n, self.media);
+        let d = self.desc(n);
         if let (Content::Card, Some(old)) = (content_of(n), self.r.desc(h)) {
             let a0 = old.size[0] / old.size[1].max(1e-3);
             let a1 = d.size[0] / d.size[1].max(1e-3);
@@ -201,7 +223,13 @@ impl RenderSink for EngineSink<'_> {
         }
     }
 
-    fn remove(&mut self, h: Handle, _n: &SceneNode) {
+    fn remove(&mut self, h: Handle, n: &SceneNode) {
+        if n.kind == NodeKind::Generation {
+            let now = now_ms();
+            self.gen_removed.retain(|_, t| now - *t < 10_000.0);
+            self.gen_removed.insert(n.id.clone(), now);
+        }
+        self.reveal.remove(&n.id);
         self.r.remove(h);
         self.handles.remove(&h);
         self.videos.remove(h);
@@ -213,46 +241,14 @@ impl RenderSink for EngineSink<'_> {
     }
 }
 
-/// Normalized pin point and box of an anchor (node-local 0..1).
-fn anchor_geometry(a: &Anchor) -> ([f32; 2], Option<[f32; 4]>) {
-    fn region(r: &Region) -> ([f32; 2], Option<[f32; 4]>) {
-        match r {
-            Region::Point { x, y } => ([*x as f32, *y as f32], None),
-            Region::Box { x, y, w, h } => ([(*x + *w) as f32, *y as f32], Some([*x as f32, *y as f32, *w as f32, *h as f32])),
-            Region::Polygon { points } => (points.first().map_or([1.0, 0.0], |p| [p[0] as f32, p[1] as f32]), None),
-            Region::Mask { .. } => ([1.0, 0.0], None),
-        }
-    }
-    match a {
-        Anchor::Point { x, y } => region(&Region::Point { x: *x, y: *y }),
-        Anchor::Box { x, y, w, h } => region(&Region::Box { x: *x, y: *y, w: *w, h: *h }),
-        Anchor::Polygon { points } => region(&Region::Polygon { points: points.clone() }),
-        Anchor::Frame { region: Some(r), .. } | Anchor::Page { region: Some(r), .. } => region(r),
-        _ => ([1.0, 0.0], None),
-    }
-}
-
-fn draft_anchor(region: &DraftRegion, time: Option<f64>) -> Anchor {
-    let r = match *region {
-        DraftRegion::Point([x, y]) => Region::Point { x: round4(x), y: round4(y) },
-        DraftRegion::Box([x, y, w, h]) => Region::Box { x: round4(x), y: round4(y), w: round4(w), h: round4(h) },
-    };
-    match (time, r) {
-        (Some(t), r) => Anchor::Frame { t: (t * 1000.0).round() / 1000.0, region: Some(r) },
-        (None, Region::Point { x, y }) => Anchor::Point { x, y },
-        (None, Region::Box { x, y, w, h }) => Anchor::Box { x, y, w, h },
-        (None, _) => Anchor::Point { x: 0.5, y: 0.5 },
-    }
-}
-
 fn round4(v: f32) -> f64 {
     (v as f64 * 10_000.0).round() / 10_000.0
 }
 
-fn region_json(r: &DraftRegion) -> Json {
+fn region_json(r: &PickRegion) -> Json {
     match *r {
-        DraftRegion::Point([x, y]) => json!({"kind": "point", "x": round4(x), "y": round4(y)}),
-        DraftRegion::Box([x, y, w, h]) => json!({"kind": "box", "x": round4(x), "y": round4(y), "w": round4(w), "h": round4(h)}),
+        PickRegion::Point([x, y]) => json!({"kind": "point", "x": round4(x), "y": round4(y)}),
+        PickRegion::Box([x, y, w, h]) => json!({"kind": "box", "x": round4(x), "y": round4(y), "w": round4(w), "h": round4(h)}),
     }
 }
 
@@ -270,6 +266,9 @@ impl App {
             videos: &self.videos,
             handles: &mut self.handles,
             todo: &mut self.todo,
+            palette: &self.palette,
+            gen_removed: &mut self.gen_removed,
+            reveal: &mut self.reveal,
         };
         f(&mut self.scene, &self.doc, &mut sink);
     }
@@ -281,25 +280,12 @@ impl App {
             return;
         }
         self.sink_apply(|scene, doc, sink| scene.apply(doc, &ch, sink));
-        if ch.annotations || !ch.deleted.is_empty() || !self.annotations.is_empty() && !ch.dirty.is_empty() {
-            self.annotations = self.doc.annotations();
-            if let Some(id) = &self.selected_annotation
-                && !self.annotations.iter().any(|a| &a.id == id)
-            {
-                self.select_annotation(None);
-            }
-        }
         if self.ix.prune(&self.scene) {
             let sel = self.ix.selection.clone();
             self.emit("selection", json!(sel));
         }
-        if let Some(d) = &self.draft
-            && self.scene.get(&d.node).is_none()
-        {
-            self.cancel_draft();
-        }
         let nodes = ch.structure || !ch.dirty.is_empty() || !ch.deleted.is_empty();
-        self.emit("doc", json!({"version": self.doc.version().to_string(), "nodes": nodes, "annotations": ch.annotations, "assets": ch.assets}));
+        self.emit("doc", json!({"version": self.doc.version().to_string(), "nodes": nodes, "assets": ch.assets}));
         self.flush_transport();
         self.dirty = true;
     }
@@ -343,82 +329,39 @@ impl App {
         r
     }
 
-    fn pins(&self) -> Vec<(Pin, PinView)> {
-        self.annotations
-            .iter()
-            .filter_map(|a| {
-                let n = self.scene.get(&a.node_id)?;
-                n.handle?;
-                let (pt, region) = anchor_geometry(&a.anchor);
-                let world = n.to_world(pt);
-                let region = region.map(|r| {
-                    let p = n.to_world([r[0], r[1]]);
-                    [p[0], p[1], r[2] * n.rect[2], r[3] * n.rect[3]]
-                });
-                Some((
-                    Pin { id: a.id.clone(), world },
-                    PinView {
-                        world,
-                        region,
-                        status: a.status.as_str().to_string(),
-                        selected: self.selected_annotation.as_deref() == Some(a.id.as_str()),
-                        hovered: self.ix.hover_pin.as_deref() == Some(a.id.as_str()),
-                    },
-                ))
-            })
-            .collect()
-    }
-
     fn build_overlay(&self) -> Vec<OverlayPrim> {
-        let pins: Vec<PinView> = self.pins().into_iter().map(|p| p.1).collect();
-        let draft = self.draft.as_ref().and_then(|d| {
-            let n = self.scene.get(&d.node)?;
-            Some(match d.region {
-                DraftRegion::Point(p) => (n.to_world(p), None),
-                DraftRegion::Box([x, y, w, h]) => {
-                    let p = n.to_world([x, y]);
-                    (n.to_world([x + w, y]), Some([p[0], p[1], w * n.rect[2], h * n.rect[3]]))
-                }
-            })
-        });
         let cursors: Vec<CursorView> = self
             .presence
             .iter()
             .filter(|p| p.actor != self.actor.id)
-            .filter_map(|p| Some(CursorView { world: p.cursor?, color: overlay::parse_color(&p.color, 255).unwrap_or(overlay::ACCENT) }))
+            .filter_map(|p| Some(CursorView { world: p.cursor? }))
             .collect();
-        let dragging = self.ix.dragging();
-        let mut prims: Vec<OverlayPrim> = self
+        let outlines: Vec<[f32; 4]> = self
             .scene
             .iter()
-            .filter(|n| n.kind == NodeKind::Frame && n.handle.is_some())
-            .map(|n| OverlayPrim::rect(n.rect, 0, rgba(255, 255, 255, 22), self.dpr))
+            .filter(|n| n.handle.is_some() && n.kind != NodeKind::Generation && matches!(content_of(n), Content::None | Content::Card))
+            .map(|n| n.rect)
             .collect();
-        let pad = 4.0 * self.dpr / self.camera.zoom.max(1e-3);
-        for (node, color) in &self.claims {
-            if let Some(n) = self.scene.get(node) {
-                let r = n.rect;
-                prims.push(OverlayPrim::dashed([r[0] - pad, r[1] - pad, r[2] + 2.0 * pad, r[3] + 2.0 * pad], 0, *color, 2.0 * self.dpr));
-            }
-        }
-        prims.extend(overlay::build(&OverlayInput {
+        let claims: Vec<[f32; 4]> = self.claims.iter().filter_map(|id| self.scene.get(id)).map(|n| n.rect).collect();
+        let dragging = self.ix.dragging();
+        overlay::build(&OverlayInput {
             scene: &self.scene,
+            palette: &self.palette,
             selection: &self.ix.selection,
             hover: if dragging || self.ix.tool != Tool::Select { None } else { self.ix.hover.as_deref() },
             show_handles: self.ix.tool == Tool::Select,
             marquee: self.ix.marquee(),
-            drawing: self.ix.annotate_box().map(|b| b.1),
-            pins: &pins,
-            draft,
+            pick: self.ix.pick_box().map(|b| b.1),
+            outlines: &outlines,
+            claims: &claims,
             cursors: &cursors,
             dpr: self.dpr,
-        }));
-        prims
+            px_world: 1.0 / self.camera.zoom.max(1e-3),
+        })
     }
 
     fn with_ctx<R>(&mut self, f: impl FnOnce(&mut Interaction, &mut Ctx) -> R) -> R {
-        let pins: Vec<Pin> = self.pins().into_iter().map(|p| p.0).collect();
-        let mut ctx = Ctx { scene: &self.scene, camera: &mut self.camera, pins: &pins, dpr: self.dpr };
+        let mut ctx = Ctx { scene: &self.scene, camera: &mut self.camera, dpr: self.dpr };
         f(&mut self.ix, &mut ctx)
     }
 
@@ -450,11 +393,8 @@ impl App {
                     self.emit("selection", json!(ids));
                     self.dirty = true;
                 }
-                Effect::Draft { node, region } => self.start_draft(node, region),
-                Effect::CancelDraft => self.cancel_draft(),
-                Effect::OpenAnnotation(id) => self.select_annotation(Some(id)),
-                Effect::CloseAnnotation => self.select_annotation(None),
-                Effect::Hover { node, annotation } => self.emit("hover", json!({"node": node, "annotation": annotation})),
+                Effect::Pick { node, region } => self.pick(node, region),
+                Effect::Hover { node } => self.emit("hover", json!({"node": node})),
                 Effect::Camera | Effect::Overlay => self.dirty = true,
                 Effect::Cursor(c) => {
                     if c != self.cursor {
@@ -463,9 +403,6 @@ impl App {
                     }
                 }
                 Effect::Tool(t) => {
-                    if t != Tool::Annotate {
-                        self.cancel_draft();
-                    }
                     self.emit("tool", json!(t));
                     self.dirty = true;
                 }
@@ -511,79 +448,54 @@ impl App {
             .collect()
     }
 
-    fn start_draft(&mut self, node: String, region: DraftRegion) {
-        let mut time = None;
-        if let Some(n) = self.scene.get(&node)
-            && n.kind == NodeKind::Video
-            && let Some(h) = n.handle
-        {
-            let t = self.videos.current_time(h);
-            self.hold_video(Some((h, t)));
-            time = Some(t);
-        }
-        self.select_annotation_inner(None, false);
-        let (screen, rect) = self.draft_screen(&node, &region).unzip();
-        self.emit("draft", json!({"nodeId": node, "region": region_json(&region), "time": time, "screen": screen, "rect": rect}));
-        self.draft = Some(Draft { node, region, time });
+    /// A spot / region picked on a media node: becomes a chat context chip in the UI. On a
+    /// video it carries the current playhead (a frame chip).
+    fn pick(&mut self, node: String, region: PickRegion) {
+        let time = self
+            .scene
+            .get(&node)
+            .filter(|n| n.kind == NodeKind::Video)
+            .and_then(|n| n.handle)
+            .map(|h| (self.videos.current_time(h) * 100.0).round() / 100.0);
+        self.emit("pick", json!({"nodeId": node, "region": region_json(&region), "time": time}));
         self.dirty = true;
     }
 
-    /// Pin point and region rect of a draft, in CSS pixels (for placing the composer).
-    fn draft_screen(&self, node: &str, region: &DraftRegion) -> Option<([f32; 2], [f32; 4])> {
-        let n = self.scene.get(node)?;
-        let (pin, a, b) = match *region {
-            DraftRegion::Point(p) => (n.to_world(p), n.to_world(p), n.to_world(p)),
-            DraftRegion::Box([x, y, w, h]) => (n.to_world([x + w, y]), n.to_world([x, y]), n.to_world([x + w, y + h])),
-        };
-        let (a, b) = (self.css_point(a), self.css_point(b));
-        Some((self.css_point(pin), [a[0], a[1], b[0] - a[0], b[1] - a[1]]))
+    /// Videos play muted only while hovered or selected; the others show a still.
+    fn update_video_focus(&mut self) {
+        let focus: Vec<Handle> = self
+            .ix
+            .hover
+            .iter()
+            .chain(self.ix.selection.iter())
+            .filter_map(|id| self.scene.get(id))
+            .filter(|n| n.kind == NodeKind::Video)
+            .filter_map(|n| n.handle)
+            .collect();
+        self.gpu.renderer.set_video_focus(Some(&focus));
     }
 
-    fn cancel_draft(&mut self) {
-        if self.draft.take().is_some() {
-            if self.selected_annotation.is_none() {
-                self.hold_video(None);
-            }
-            self.emit("draft", Json::Null);
-            self.dirty = true;
+    fn set_palette(&mut self, palette: Palette) {
+        if self.palette == palette {
+            return;
         }
-    }
-
-    fn hold_video(&mut self, hold: Option<(Handle, f64)>) {
-        if let Some(h) = self.held_video.take()
-            && hold.is_none_or(|(n, _)| n != h)
-        {
-            self.videos.release(h);
-        }
-        if let Some((h, t)) = hold {
-            self.videos.hold(h, t);
-            self.held_video = Some(h);
-        }
-        self.dirty = true;
-    }
-
-    fn select_annotation(&mut self, id: Option<String>) {
-        self.select_annotation_inner(id, true);
-    }
-
-    fn select_annotation_inner(&mut self, id: Option<String>, cancel_draft: bool) {
-        if cancel_draft && id.is_some() {
-            self.cancel_draft();
-        }
-        let ann = id.as_ref().and_then(|id| self.annotations.iter().find(|a| &a.id == id)).cloned();
-        let hold = ann.as_ref().and_then(|a| {
-            let n = self.scene.get(&a.node_id)?;
-            match (&a.anchor, n.kind, n.handle) {
-                (Anchor::Frame { t, .. } | Anchor::Time { t }, NodeKind::Video, Some(h)) => Some((h, *t)),
-                _ => None,
-            }
-        });
-        if hold.is_some() || self.draft.is_none() {
-            self.hold_video(hold);
-        }
-        if self.selected_annotation != id {
-            self.selected_annotation = id.clone();
-            self.emit("annotation-select", json!({"id": id}));
+        self.palette = palette;
+        self.gpu.renderer.set_background(palette.bg);
+        // Cards are drawn in the theme's colors: redraw them; refresh every node's fill.
+        let all: Vec<(Handle, SceneNode)> = self.scene.iter().filter_map(|n| Some((n.handle?, n.clone()))).collect();
+        for (h, n) in all {
+            let card = matches!(content_of(&n), Content::Card);
+            let mut sink = EngineSink {
+                r: &mut self.gpu.renderer,
+                media: &self.media,
+                videos: &self.videos,
+                handles: &mut self.handles,
+                todo: &mut self.todo,
+                palette: &self.palette,
+                gen_removed: &mut self.gen_removed,
+                reveal: &mut self.reveal,
+            };
+            sink.update(h, &n, card);
         }
         self.dirty = true;
     }
@@ -624,7 +536,6 @@ impl App {
     fn rebuild_scene(&mut self) {
         self.sink_apply(|scene, doc, sink| scene.rebuild(doc, sink));
         let _ = self.feed.take();
-        self.annotations = self.doc.annotations();
         self.ix.prune(&self.scene);
         self.dirty = true;
     }
@@ -640,7 +551,7 @@ impl App {
             let Some((h, tier)) = self.todo.pop_front() else { break };
             let Some(id) = self.handles.get(&h) else { continue };
             let Some(n) = self.scene.get(id) else { continue };
-            let Some((key, spec)) = source_spec(n, &self.media) else {
+            let Some((key, spec)) = source_spec(n, &self.media, self.palette.light) else {
                 // Asset not available yet: `register_asset` re-queues it.
                 continue;
             };
@@ -674,7 +585,16 @@ impl App {
         }
         self.sync_doc();
         self.pump_media();
-        if self.dirty || self.gpu.renderer.needs_redraw() {
+        self.update_video_focus();
+        // The animation clock stands still during heavy gestures (drags, camera moves), so
+        // generating tiles don't add work to those frames.
+        let dt = if self.last_tick > 0.0 { (now - self.last_tick).clamp(0.0, 100.0) } else { 0.0 };
+        self.last_tick = now;
+        if !self.ix.dragging() && self.camera == self.last_camera {
+            self.anim_time += dt / 1000.0;
+        }
+        let animate = self.gpu.renderer.animating() && now - self.last_anim_frame >= ANIM_MS;
+        if self.dirty || self.gpu.renderer.needs_redraw() || animate {
             self.render(now);
         }
         if now - self.last_stats > 500.0 {
@@ -708,7 +628,9 @@ impl App {
             }
         };
         let view = frame.texture.create_view(&Default::default());
-        self.stats = self.gpu.renderer.render(&view, &self.camera, ((now - self.started) / 1000.0) as f32);
+        self.last_anim_frame = now;
+        self.gpu.renderer.set_pixel_ratio(self.dpr);
+        self.stats = self.gpu.renderer.render(&view, &self.camera, self.anim_time as f32);
         self.gpu.renderer.present(frame);
         if self.last_frame > 0.0 && now - self.last_frame < 250.0 {
             self.frame_times.push(now - self.last_frame);
@@ -717,9 +639,6 @@ impl App {
         if self.camera != self.last_camera {
             self.last_camera = self.camera;
             self.emit("camera", self.camera_json());
-            if let Some((screen, rect)) = self.draft.as_ref().and_then(|d| self.draft_screen(&d.node, &d.region)) {
-                self.emit("draft-move", json!({"screen": screen, "rect": rect}));
-            }
         }
     }
 
@@ -781,6 +700,9 @@ impl App {
                 videos: &self.videos,
                 handles: &mut self.handles,
                 todo: &mut self.todo,
+                palette: &self.palette,
+                gen_removed: &mut self.gen_removed,
+                reveal: &mut self.reveal,
             };
             sink.update(h, &n, true);
         }
@@ -801,7 +723,7 @@ impl App {
             let hs: Vec<(Handle, SceneNode)> =
                 self.scene.iter().filter(|n| n.asset.as_deref() == Some(asset.as_str())).filter_map(|n| Some((n.handle?, n.clone()))).collect();
             for (h, n) in hs {
-                let d = desc_for(&n, &self.media);
+                let d = desc_for(&n, &self.media, &self.palette, self.reveal.contains(&n.id));
                 self.gpu.renderer.update(h, d);
             }
         }
@@ -894,7 +816,7 @@ async fn fetch_tile(me: Weak<RefCell<App>>, h: Handle, tier: Tier, key: String, 
             let Ok(tile) = Reflect::get(&v, &"tile".into()).and_then(|t| t.dyn_into::<web_sys::ImageBitmap>()) else { return };
             let num = |k: &str| Reflect::get(&v, &k.into()).ok().and_then(|x| x.as_f64()).unwrap_or(0.0);
             // The node may have changed content while we decoded.
-            let current = a.handles.get(&h).and_then(|id| a.scene.get(id)).and_then(|n| source_spec(n, &a.media)).map(|s| s.0);
+            let current = a.handles.get(&h).and_then(|id| a.scene.get(id)).and_then(|n| source_spec(n, &a.media, a.palette.light)).map(|s| s.0);
             if current.as_deref() == Some(key.as_str()) {
                 a.gpu.renderer.provide(h, tier, Pixels::External(wgpu::ExternalImageSource::ImageBitmap(tile.clone())));
                 a.learn_dims(h, num("width") as u32, num("height") as u32, num("duration"));
@@ -990,12 +912,11 @@ impl CanvasApp {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
         let mut renderer = Renderer::new(device, queue, format, falos_engine::Budgets::default());
-        renderer.set_background(BACKGROUND);
+        renderer.set_background(overlay::DARK.bg);
         let videos = WebVideos::new(IngestMode::Import);
         renderer.set_video_source(Box::new(videos.clone()));
 
         let feed = ChangeFeed::new(&doc);
-        let now = now_ms();
         let app = Rc::new_cyclic(|me| {
             RefCell::new(App {
                 me: me.clone(),
@@ -1015,12 +936,14 @@ impl CanvasApp {
                 todo: VecDeque::new(),
                 inflight: 0,
                 failed: HashSet::new(),
-                annotations: Vec::new(),
-                selected_annotation: None,
-                held_video: None,
-                draft: None,
                 presence: Vec::new(),
                 claims: Vec::new(),
+                palette: overlay::DARK,
+                gen_removed: HashMap::new(),
+                reveal: HashSet::new(),
+                anim_time: 0.0,
+                last_tick: 0.0,
+                last_anim_frame: 0.0,
                 transport: Box::new(LocalOnly),
                 js_inbox: Rc::default(),
                 events: Vec::new(),
@@ -1032,7 +955,6 @@ impl CanvasApp {
                 last_stats: 0.0,
                 last_camera: Camera::default(),
                 stats: Default::default(),
-                started: now,
                 raf: None,
             })
         });
@@ -1040,8 +962,8 @@ impl CanvasApp {
         Ok(CanvasApp { app })
     }
 
-    /// Event listener `(type, payload) => void`. Types: selection, doc, hover, camera, draft,
-    /// draft-move, annotation-select, tool, asset, stats, error, claims, jobs.
+    /// Event listener `(type, payload) => void`. Types: selection, doc, hover, camera, pick,
+    /// tool, asset, stats, error, claims, jobs.
     pub fn on(&self, listener: js_sys::Function) {
         self.app.borrow_mut().listener = Some(listener);
     }
@@ -1120,10 +1042,9 @@ impl CanvasApp {
     #[wasm_bindgen(js_name = pointerLeave)]
     pub fn pointer_leave(&self) {
         let mut a = self.app.borrow_mut();
-        if a.ix.hover.is_some() || a.ix.hover_pin.is_some() {
+        if a.ix.hover.is_some() {
             a.ix.hover = None;
-            a.ix.hover_pin = None;
-            a.emit("hover", json!({"node": null, "annotation": null}));
+            a.emit("hover", json!({"node": null}));
             a.dirty = true;
         }
         drop(a);
@@ -1340,7 +1261,7 @@ impl CanvasApp {
         to_js(&api::nodes_json(&self.app.borrow().doc))
     }
 
-    /// One node with its asset (lineage) and annotations.
+    /// One node with its asset (lineage).
     pub fn node(&self, id: &str) -> JsValue {
         to_js(&api::node_detail_json(&self.app.borrow().doc, id))
     }
@@ -1384,109 +1305,11 @@ impl CanvasApp {
         to_js(&json!({"id": a.actor.id, "name": a.actor.name}))
     }
 
-    // ---- annotations ----
-
-    pub fn annotations(&self) -> JsValue {
-        to_js(&Json::Array(self.app.borrow().annotations.iter().map(api::annotation_json).collect()))
-    }
-
-    /// Posts the pending draft (placed with the annotate tool) with its first message.
-    #[wasm_bindgen(js_name = submitDraft)]
-    pub fn submit_draft(&self, text: String, assignee: Option<String>) -> Result<String, JsValue> {
-        let mut a = self.app.borrow_mut();
-        let Some(d) = a.draft.take() else { return Err(err("no draft")) };
-        let anchor = draft_anchor(&d.region, d.time);
-        let r = a.commit(&[Command::AddAnnotation {
-            id: None,
-            node_id: d.node,
-            anchor,
-            text: Some(text).filter(|t| !t.trim().is_empty()),
-            assignee: assignee.filter(|s| !s.is_empty()),
-        }]);
-        a.emit("draft", Json::Null);
-        let id = r.map_err(err)?.created.into_iter().next().unwrap_or_default();
-        a.select_annotation(Some(id.clone()));
-        drop(a);
-        dispatch(&self.app);
-        Ok(id)
-    }
-
-    #[wasm_bindgen(js_name = cancelDraft)]
-    pub fn cancel_draft(&self) {
-        self.app.borrow_mut().cancel_draft();
-        dispatch(&self.app);
-    }
-
-    /// Adds an annotation with an explicit anchor (`{kind: "point", x, y}` etc., normalized).
-    #[wasm_bindgen(js_name = addAnnotation)]
-    pub fn add_annotation(&self, node_id: String, anchor: JsValue, text: String, assignee: Option<String>) -> Result<String, JsValue> {
-        let anchor: Anchor = serde_json::from_value(from_js(&anchor)).map_err(err)?;
-        let r = self.app.borrow_mut().commit(&[Command::AddAnnotation {
-            id: None,
-            node_id,
-            anchor,
-            text: Some(text),
-            assignee: assignee.filter(|s| !s.is_empty()),
-        }]);
-        dispatch(&self.app);
-        Ok(r.map_err(err)?.created.into_iter().next().unwrap_or_default())
-    }
-
-    pub fn reply(&self, id: String, text: String) -> Result<(), JsValue> {
-        let r = self.app.borrow_mut().commit(&[Command::Reply { id, text }]);
-        dispatch(&self.app);
-        r.map(|_| ()).map_err(err)
-    }
-
-    /// Sets status (`open` | `in_progress` | `resolved`).
-    #[wasm_bindgen(js_name = setAnnotationStatus)]
-    pub fn set_annotation_status(&self, id: String, status: &str) -> Result<(), JsValue> {
-        let status = falos_doc::Status::parse(status).ok_or_else(|| err("bad status"))?;
-        let r = self.app.borrow_mut().commit(&[Command::UpdateAnnotation { id, status: Some(status), anchor: None, assignee: None, outcome: None }]);
-        dispatch(&self.app);
-        r.map(|_| ()).map_err(err)
-    }
-
-    /// Assigns to an actor id (`claude`, `codex`, `fal-agent`, …); empty/None unassigns.
-    #[wasm_bindgen(js_name = setAnnotationAssignee)]
-    pub fn set_annotation_assignee(&self, id: String, assignee: Option<String>) -> Result<(), JsValue> {
-        let r = self.app.borrow_mut().commit(&[Command::UpdateAnnotation {
-            id,
-            status: None,
-            anchor: None,
-            assignee: Some(assignee.filter(|s| !s.is_empty())),
-            outcome: None,
-        }]);
-        dispatch(&self.app);
-        r.map(|_| ()).map_err(err)
-    }
-
-    #[wasm_bindgen(js_name = deleteAnnotation)]
-    pub fn delete_annotation(&self, id: String) -> Result<(), JsValue> {
-        let r = self.app.borrow_mut().commit(&[Command::DeleteAnnotation { id }]);
-        dispatch(&self.app);
-        r.map(|_| ()).map_err(err)
-    }
-
-    /// Highlights an annotation (holds a video on its frame); `focus` pans it into view.
-    #[wasm_bindgen(js_name = selectAnnotation)]
-    pub fn select_annotation(&self, id: Option<String>, focus: bool) {
-        let mut a = self.app.borrow_mut();
-        a.select_annotation(id.clone());
-        if focus
-            && let Some(ann) = id.and_then(|id| a.annotations.iter().find(|x| x.id == id).cloned())
-            && let Some(n) = a.scene.get(&ann.node_id)
-        {
-            let r = n.rect;
-            a.focus_rect(r);
-        }
-        drop(a);
-        dispatch(&self.app);
-    }
-
-    #[wasm_bindgen(js_name = selectedAnnotation)]
-    pub fn selected_annotation(&self) -> Option<String> {
-        self.app.borrow().selected_annotation.clone()
+    /// `"dark"` (default) or `"light"`: canvas background, outlines and card colors.
+    #[wasm_bindgen(js_name = setTheme)]
+    pub fn set_theme(&self, theme: &str) {
+        let p = if theme == "light" { overlay::LIGHT } else { overlay::DARK };
+        self.app.borrow_mut().set_palette(p);
     }
 
     // ---- text projection ----
@@ -1532,8 +1355,6 @@ impl CanvasApp {
     pub fn load_snapshot(&self, bytes: &[u8], fit: Option<bool>) -> Result<(), JsValue> {
         let doc = Canvas::from_snapshot(bytes).map_err(err)?;
         let mut a = self.app.borrow_mut();
-        a.cancel_draft();
-        a.select_annotation(None);
         a.feed = ChangeFeed::new(&doc);
         a.sink_apply(|scene, _, sink| scene.clear(sink));
         a.doc = doc;
@@ -1543,7 +1364,7 @@ impl CanvasApp {
             a.fit_all();
         }
         let v = a.doc.version().to_string();
-        a.emit("doc", json!({"version": v, "nodes": true, "annotations": true, "assets": true}));
+        a.emit("doc", json!({"version": v, "nodes": true, "assets": true}));
         let sel = a.ix.selection.clone();
         a.emit("selection", json!(sel));
         drop(a);
@@ -1603,22 +1424,14 @@ impl CanvasApp {
         }
     }
 
-    /// Claim outlines: `[{node, color}]` (replaces the previous list).
+    /// Claim outlines: `[{node}]` (replaces the previous list).
     #[wasm_bindgen(js_name = setClaims)]
     pub fn set_claims(&self, claims: JsValue) {
         let v = from_js(&claims);
         let mut a = self.app.borrow_mut();
         a.claims = v
             .as_array()
-            .map(|l| {
-                l.iter()
-                    .filter_map(|c| {
-                        let node = c["node"].as_str()?.to_string();
-                        let color = c["color"].as_str().and_then(|s| overlay::parse_color(s, 255)).unwrap_or(overlay::ACCENT);
-                        Some((node, color))
-                    })
-                    .collect()
-            })
+            .map(|l| l.iter().filter_map(|c| Some(c["node"].as_str()?.to_string())).collect())
             .unwrap_or_default();
         a.dirty = true;
     }

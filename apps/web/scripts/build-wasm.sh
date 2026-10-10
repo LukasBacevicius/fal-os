@@ -23,5 +23,5 @@ fi
 
 cargo build -p falos-client --lib --target wasm32-unknown-unknown --profile "$profile"
 wasm-bindgen --target web --out-dir apps/web/src/wasm/pkg \
-  "target/wasm32-unknown-unknown/$profile/falos_client.wasm"
+  "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/$profile/falos_client.wasm"
 ls -la apps/web/src/wasm/pkg/falos_client_bg.wasm

@@ -6,7 +6,8 @@ struct Camera {
     viewport: vec2<f32>, // physical pixels
     zoom: f32,           // physical pixels per world unit
     time: f32,
-    _pad: vec2<f32>,
+    dpr: f32,
+    _pad: f32,
 };
 
 struct Instance {
@@ -20,6 +21,7 @@ struct Instance {
     @location(7) aspect: f32, // content w/h; 0 = node's own aspect (no crop)
     @location(8) radius: f32, // max corner radius, screen px
     @location(9) hires_layer: i32, // hires tier layer, -1 = none
+    @location(10) gen: vec4<f32>,  // generating tile: seed, progress, mode, fade start
 };
 
 struct VsOut {
@@ -34,6 +36,7 @@ struct VsOut {
     @location(7) @interpolate(flat) crop: vec2<f32>, // uv scale around the center (cover crop)
     @location(8) @interpolate(flat) radius: f32,
     @location(9) @interpolate(flat) hires: i32,
+    @location(10) @interpolate(flat) gen: vec4<f32>,
 };
 
 const FLAG_LOW_READY: u32 = 4u;
@@ -88,12 +91,58 @@ fn vs(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.crop = crop;
     out.radius = inst.radius;
     out.hires = inst.hires_layer;
+    out.gen = inst.gen;
     return out;
 }
 
 fn rounded_box_sdf(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - half + vec2(r);
     return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+fn hash_u(n: u32) -> f32 {
+    var x = n;
+    x = (x ^ 61u) ^ (x >> 16u);
+    x = x * 9u;
+    x = x ^ (x >> 4u);
+    x = x * 0x27d4eb2du;
+    x = x ^ (x >> 15u);
+    return f32(x) / 4294967295.0;
+}
+
+// Generating tile: 6–20 sparse square dots (2–3 CSS px, pixel-snapped) that drift slowly and
+// twinkle at random. Everything derives from the node seed and the time uniform.
+// Returns the dot coverage (0..1).
+fn gen_dots(local: vec2<f32>, screen_size: vec2<f32>, seed_f: f32) -> f32 {
+    if min(screen_size.x, screen_size.y) < 24.0 * cam.dpr {
+        return 0.0;
+    }
+    let seed = u32(seed_f);
+    let px = floor(local * screen_size);
+    let t = cam.time;
+    let count = 6u + u32(hash_u(seed * 7919u + 17u) * 14.99);
+    var a = 0.0;
+    for (var i = 0u; i < 20u; i = i + 1u) {
+        if i >= count { break; }
+        let k = seed * 131u + i * 5u + 1u;
+        let r0 = hash_u(k);
+        let r1 = hash_u(k + 1u);
+        let r2 = hash_u(k + 2u);
+        let r3 = hash_u(k + 3u);
+        let r4 = hash_u(k + 4u);
+        // Slow wander: a few percent of the tile over 10–30 s.
+        let sp = 0.2 + 0.4 * r2;
+        let drift = vec2(sin(t * sp + r3 * 6.2832), cos(t * sp * 0.73 + r4 * 6.2832)) * 0.04;
+        let c = clamp(vec2(r0, r1) * 0.88 + 0.06 + drift, vec2(0.02), vec2(0.98));
+        let size = (2.0 + step(0.6, r4)) * cam.dpr;
+        let q = px - floor(c * screen_size);
+        if q.x >= 0.0 && q.y >= 0.0 && q.x < size && q.y < size {
+            // Twinkle: each dot fades in and out on its own period.
+            let tw = 0.5 + 0.5 * sin(t * (0.6 + 1.6 * r3) + r2 * 40.0);
+            a = max(a, smoothstep(0.2, 0.8, tw));
+        }
+    }
+    return a;
 }
 
 @fragment
@@ -126,6 +175,27 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (in.flags & FLAG_FLAT) != 0u {
         rgb = in.color.rgb * in.color.a;
         a = in.color.a;
+    }
+    // Generating tiles (mode 1: dots; mode 2: dots until the media is resident, then a
+    // crossfade to it).
+    let mode = in.gen.z;
+    if mode > 0.5 {
+        var fade = 0.0;
+        if mode > 1.5 && in.gen.w >= 0.0 {
+            fade = clamp((cam.time - in.gen.w) / 0.2, 0.0, 1.0);
+        }
+        if fade < 1.0 {
+            let dot = vec3(0.54);
+            var tile = in.color.rgb;
+            tile = mix(tile, dot, gen_dots(in.local, in.screen_size, in.gen.x) * 0.85);
+            // 1 px progress bar along the bottom edge.
+            let p = in.local * in.screen_size;
+            if in.gen.y >= 0.0 && p.y >= in.screen_size.y - cam.dpr && in.local.x <= in.gen.y {
+                tile = dot;
+            }
+            rgb = mix(tile, rgb, fade);
+            a = 1.0;
+        }
     }
     return vec4(rgb * coverage, a * coverage);
 }

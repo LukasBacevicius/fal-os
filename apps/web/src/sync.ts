@@ -2,12 +2,17 @@
 //   ws://<host>/sync/<canvas>?token=…&actor=…&name=…
 // Binary frames are Loro bytes both ways (first one = full snapshot), text frames are JSON
 // events. Also: agent presence (smoothed cursors that fade when idle), claims, job progress,
-// toasts for claim revocations and assignments, and asset upload/download over /assets.
+// chat (docs/CHAT-PROTOCOL.md: chat.send / chat.stop out, chat.history / chat.event in), and
+// asset upload/download over /assets.
 
 import { discoverHost, explicitHost, type HostInfo } from './host';
 import { getState, setState, toast } from './store';
 import type { CanvasApp } from './wasm';
 import type { NodeView, Presence } from './types';
+import { applyEvent, applyHistory, type Chip } from './chat';
+
+/** A send that gets no chat event back within this time means no agent runtime is attached. */
+const RUNTIME_TIMEOUT_MS = 8_000;
 
 export type ConnState = 'local' | 'connecting' | 'connected' | 'reconnecting';
 
@@ -16,7 +21,7 @@ export interface SessionInfo {
   agentName: string;
   actor: string;
   kind: 'human' | 'agent';
-  color: string;
+  color?: string;
   presence: { status: string; canvas?: string; cursor?: [number, number]; viewport?: [number, number, number, number]; last_activity: number };
 }
 
@@ -139,11 +144,21 @@ export class HostSync {
 
   private onEvent(m: any) {
     switch (m.type) {
-      case 'hello':
+      case 'hello': {
         this.me = m.session;
         this.sessions = new Map((m.sessions as SessionInfo[]).map((s) => [s.id, s]));
         this.onClaims(m.claims ?? []);
         this.publishPresence();
+        // The signed-in fal account, when the host reports one.
+        const account = m.account?.email ?? m.account ?? m.user?.email ?? null;
+        if (typeof account === 'string') setState({ account });
+        break;
+      }
+      case 'chat.history':
+        setState((s) => ({ chat: applyHistory(s.chat, m.chats ?? []) }));
+        break;
+      case 'chat.event':
+        if (typeof m.chat === 'string' && m.event) setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event) }));
         break;
       case 'presence':
         this.sessions.set(m.session.id, m.session);
@@ -160,24 +175,47 @@ export class HostSync {
       case 'claim_revoked':
         toast(`@${m.by} took over ${m.node} from @${m.actor}`);
         break;
-      case 'annotation_assigned':
-        toast(`@${m.by} assigned feedback on ${m.node} to @${m.assignee}`);
-        break;
       case 'job':
         setState((s) => ({ jobs: { ...s.jobs, [m.node]: m as JobInfo } }));
-        if (m.status === 'failed') toast(`Generation failed: ${m.error ?? m.model}`);
         break;
-      case 'error':
-        toast(`Host: ${m.message}`);
+      case 'error': {
+        const msg = String(m.message ?? '');
+        // A host without chat routing rejects chat frames: no agent runtime to talk to.
+        if (/chat/i.test(msg) && getState().chat.pending) {
+          setState((s) => ({ chat: { ...s.chat, runtime: 'missing' } }));
+        } else {
+          toast(`host: ${msg}`);
+        }
         break;
+      }
     }
   }
 
   private onClaims(claims: { node: string; session: string; actor: string }[]) {
-    const color = (session: string) => this.sessions.get(session)?.color ?? '#8b5cf6';
-    const list = claims.map((c) => ({ node: c.node, actor: c.actor, color: color(c.session) }));
+    const list = claims.map((c) => ({ node: c.node, actor: c.actor }));
     this.app.setClaims(list);
     setState({ claims: list });
+  }
+
+  // ---- chat ----------------------------------------------------------------------------
+
+  /** Sends a chat message (`chat` omitted starts a new chat). Returns false when offline. */
+  sendChat(text: string, context: Chip[], chat: string | null): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    const msg: Record<string, unknown> = { type: 'chat.send', text, context };
+    if (chat) msg.chat = chat;
+    this.ws.send(JSON.stringify(msg));
+    const at = Date.now();
+    setState((s) => ({ chat: { ...s.chat, pending: { text, context, at, chat } } }));
+    window.setTimeout(() => {
+      const p = getState().chat.pending;
+      if (p && p.at === at) setState((s) => ({ chat: { ...s.chat, runtime: 'missing' } }));
+    }, RUNTIME_TIMEOUT_MS);
+    return true;
+  }
+
+  stopChat(chat: string) {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'chat.stop', chat }));
   }
 
   // ---- presence ----------------------------------------------------------------------
@@ -189,9 +227,12 @@ export class HostSync {
     setState({ sessions: others });
     for (const s of others) {
       const c = s.presence.cursor;
-      if (!c || (s.presence.canvas && s.presence.canvas !== this.canvas)) continue;
+      // Only agents get cursors (UI-SPEC: real agent sessions with recent activity).
+      if (!c || s.kind !== 'agent' || (s.presence.canvas && s.presence.canvas !== this.canvas)) continue;
       const cur = this.cursors.get(s.id);
-      if (!cur) this.cursors.set(s.id, { x: c[0], y: c[1], tx: c[0], ty: c[1], seen: now });
+      // A cursor first seen on (re)connect is as old as the session's last activity.
+      const age = s.id === changed ? 0 : Math.max(0, Date.now() - (s.presence.last_activity || 0));
+      if (!cur) this.cursors.set(s.id, { x: c[0], y: c[1], tx: c[0], ty: c[1], seen: now - age });
       else if (s.id === changed || cur.tx !== c[0] || cur.ty !== c[1]) {
         cur.tx = c[0];
         cur.ty = c[1];
@@ -222,7 +263,7 @@ export class HostSync {
       else { c.x = c.tx; c.y = c.ty; }
       const opacity = idle < IDLE_MS ? 1 : Math.max(0, 1 - (idle - IDLE_MS) / 600);
       list.push({
-        actor: s.actor, name: s.agentName, kind: s.kind, color: s.color,
+        actor: s.actor, name: s.agentName, kind: s.kind,
         cursor: [c.x, c.y], status: s.presence.status || null, opacity,
       });
     }
@@ -340,7 +381,7 @@ export async function connectHost(app: CanvasApp, canvas: string, actor: { id: s
   }
   current?.stop();
   current = new HostSync(app, host, canvas, actor);
-  setState({ hostAddr: host.addr });
+  setState({ hostAddr: host.addr, project: host.project ? host.project.split('/').filter(Boolean).pop() ?? null : null });
   current.start();
   return true;
 }
