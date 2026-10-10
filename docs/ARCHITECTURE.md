@@ -1,100 +1,165 @@
-# fal-os — architecture proposal (v0)
+# fal-os — architecture (v1)
 
-> Status: draft for discussion, 2026-10-10. Built on the Brilliant teardown and options research in [`research/`](research/).
+> Status: v1 direction, 2026-10-10. Background: [`research/`](research/).
 
-## Product in one paragraph
-fal-os is the hub for creative work. A **project** holds one or more **infinite canvases** of media — images, video, audio, 3D, text, references — along with each item's generation lineage. Humans and **many agents at once** work on the same canvas: fal's own agents, the user's Claude Code, Codex, Gemini or Cursor, and internal agents that drive Premiere, Resolve, Blender and other apps via scripting bridges or computer use. Desktop app first, with a web build of the same canvas that doubles as the website.
+## What v1 is
+**A collaboration canvas: the central place in fal where you and your agents get creative work done, and where you can see all of it at once.**
 
-## What we take from Brilliant, and where we diverge
-| Brilliant does | We do |
-|---|---|
-| Native Rust/wgpu engine behind a narrow, versioned delta protocol; UI toolkit draws only chrome | **Same principle.** Engine is a separate package behind a binary delta API. v0 is TypeScript + WebGPU (our canvas is mostly textured quads and video, not vector editing); Rust/wasm is possible later behind the same protocol |
-| Engine owns the camera; pan/zoom only updates a uniform; budgets everywhere; image LRU; progressive open | **Copy all of it** — essential for thousands of generated assets |
-| Document is id-keyed text rows (file = API = diff = merge unit) | Source of truth is a **Loro CRDT doc**. A **line-oriented text projection** of it is the agent read/write format (Brilliant's best idea, kept) |
-| Images are paints; no video node | **Media-first nodes**: image, video, audio, 3D, text, note, frame, group, connector, **generation (live job)** |
-| One MCP server, `edit` + `read` in one format, knowledge on demand, session ids, agent cursors, staleness reports, per-agent undo, idempotency, spend breakers, untrusted-content taint | **Copy**, and add what they lack: auth token on localhost, **async jobs (MCP Tasks)** for generations, MCP annotations, claims, proposal/review mode |
-| Drives Claude CLI (stream-json), Codex app-server, Cursor ACP, HTTP providers | Same multi-door idea, but standardized: **ACP client + Codex app-server**, plus our own fal agent; no home-grown coding harness |
-| No computer use | **App Bridges + computer-use fallback**, and fal-os itself is built to be easy for agents to drive |
-| Two sync lanes (file git-store + live rooms) with cutover | **One authority**: the Canvas Host (local, or as a cloud room); files and snapshots are projections |
+- **Projects** contain infinite **canvases** of media in every modality.
+- Humans and **many agents at once** work on the same canvas: fal Agent, the user's Claude Code, Codex, Gemini and Cursor, and anything that speaks MCP.
+- **Precise annotation**: pin a comment to a region of an image, a single video frame, an audio range or a point on a 3D model, then hand it to an agent.
+- **Central overview**: who is working on what, live jobs and spend, and an activity history of every change.
+- Internal experiment: no marketing site. Performance and RAM come first.
 
-## System diagram
+**Not in v1:** our own bridges into Premiere, Resolve and other apps. If you want an agent to work across fal-os and another app, your own agent (e.g. Codex with computer use) does it. We make fal-os easy for such agents to use: MCP first, an accessible UI second.
+
+## Platform strategy
+**Rust core, shared by every platform.** No Flutter and no Electron.
+
 ```
-┌──────────────────────────── fal cloud ────────────────────────────┐
-│ Model APIs (queue/realtime) · Assets/Collections · Canvas rooms   │
-│ (same Host code) · Remote MCP (OAuth) · fal agent runtime         │
-└──────────────▲──────────────────────────────▲─────────────────────┘
-               │ Loro sync                    │ fal APIs
-┌──────────────┴──────── fal-os desktop (Electron) ─────────────────┐
-│ Renderer process (shared with web)                                │
-│   React UI · WebGPU canvas engine (worker, OffscreenCanvas)       │
-│   agent cursors/presence · proposal layer · comments · a11y mirror│
-│ Host (Node utility process; same code runs in the cloud)          │
-│   Canvas Host: Loro doc · Command API (tx, actor, claims,         │
-│     expectedVersion) · per-actor undo · permissions/budgets · bus │
-│   Adapters: MCP (localhost Streamable HTTP + stdio shim) ·        │
-│     CLI socket · text projection (read/edit) · render/export      │
-│   Agent Supervisor: fal agent · ACP client · Codex app-server     │
-│   App Bridges: UXP · ExtendScript · Resolve py · Blender · CU     │
-│   Media: content-addressed store, ffmpeg thumbs/proxies/waveforms │
-└──────────────▲────────────────────────────────────────────────────┘
-               │ MCP / fal-os CLI + SKILL.md
-     User's own agents: Claude Code · Codex · Cursor · Gemini · …
+crates/
+  engine     wgpu renderer: Metal natively, WebGPU in wasm (WebGL2 fallback)
+  doc        Loro document, node schema, command API, text projection, annotations
+  media      media pipeline interfaces: decode sources, thumbnails, waveforms, mips
+  host       canvas authority: actors, claims, undo, jobs, MCP server, agent supervisor
+             (runs native in the app, and as the cloud room server)
+  ffi        C ABI / UniFFI for the native shells; wasm-bindgen for web
 ```
 
-## Key decisions (proposed)
-1. **Shell: Electron.** Bundled Chromium gives consistent WebGPU, WebCodecs and codecs on every OS, and the same runtime as the web build. Tauri's WKWebView only has WebGPU on macOS 26+, and its Linux codec support is weak.
-2. **Language: TypeScript monorepo** (pnpm + turbo). One language across engine, host, MCP (official SDK), CLI and web. Rust only when profiling demands it, behind the engine protocol.
-3. **Canvas engine: custom WebGPU** in a worker with OffscreenCanvas, plus a WebGL2 fallback later.
-   - Instanced quads, SDF shapes, mipmapped/virtual textures picked by zoom level.
-   - Video via WebCodecs `VideoFrame` → `importExternalTexture`; cap active decoders; poster frames when idle.
-   - Brilliant's performance list as the checklist: uniform-only camera, retained frame, idle skip, budgets, LRU, progressive open, half-res during gestures, a kill switch per optimization.
-   - Text and chrome start as a DOM overlay.
-4. **Data: Loro doc per canvas.** It gives us a movable tree for z-order, per-peer undo, version checkout and a Rust core for later. Media is content-addressed (local cache + fal CDN); the doc holds only references, metadata and lineage. One Canvas Host is the authority, locally or as a cloud room.
-5. **Agents are actors.** Every transaction carries `actor`. Agents get presence (cursor, viewport, working box, status line), soft leased claims, per-actor undo/revert, and a review mode per agent (direct / proposal / sandbox frame). Spend is gated by budgets.
-6. **Agent interface: three tiers.**
-   - (a) Semantic tools: `generate`, `place`, `arrange`, `find_free_space`, `comment`.
-   - (b) `read`/`edit` on the canvas text projection, symmetric like Brilliant's.
-   - (c) Later: sandboxed code mode against a `@fal-os/canvas` API.
+- **Engine:** follows Brilliant's design.
+  - The engine owns the camera, so pan and zoom only update a uniform.
+  - One instanced draw for the whole scene, with SDF shapes and mip levels chosen by zoom.
+  - A retained frame where only damaged areas are redrawn.
+  - Budgets for everything, an image LRU, and progressive open.
+  - Half resolution while you're gesturing, and a kill switch for each optimization.
+  - Canvas-level UI (selection, handles, cursors, annotation pins, labels) is drawn by the engine, so it stays native-fast on every platform.
+- **Media decode is platform-native and zero-copy**, behind one engine trait.
 
-   Reads come in two depths: `blurry` (bounds, type, label) and `full`, plus `render_viewport` for vision. Generations are MCP Tasks that create a placeholder node immediately and stream progress. A requestId provides idempotency. Knowledge is loaded on demand.
-7. **Integration priority.**
-   - P0: localhost MCP with token auth + `fal-os` CLI/skill + auto-registration into Claude Code/Codex/Cursor/Gemini configs + our fal agent.
-   - P1: ACP client and Codex app-server so external agents run inside our UI, remote MCP for claude.ai/ChatGPT, Photoshop/Premiere/Blender/Resolve bridges, computer-use fallback.
-   - P2: After Effects/Final Cut/Figma depth, learned bridges.
-8. **Billing.** Bring-your-own-agent first: the agent runs on the user's subscription and fal bills only generations. Codex via "Sign in with ChatGPT"; Claude via API key unless Anthropic approves claude.ai login; Gemini via API key.
-9. **Built for computer use:** ARIA mirror of canvas objects, stable labels, command palette for everything, coordinate/zoom/selection status bar, `falos://` deep links, and a discoverable MCP endpoint (agents prefer it to clicking).
+  | | Native (macOS / iPadOS) | Web |
+  |---|---|---|
+  | Video | AVFoundation / VideoToolbox → IOSurface → Metal texture | WebCodecs `VideoFrame` → `importExternalTexture` |
+  | Audio | AVAudioEngine | WebAudio |
+  | Images | ImageIO, including HDR/EXR | `createImageBitmap` |
 
-## Canvas node model (first cut)
+- **Shell:** see [Decision 1](#decision-1-shell) below.
+
+## Modalities — every node type
+Every media node has an asset (content-addressed, stored in the local cache and on the fal CDN) and optional **lineage** (model, params, seed, parent assets, fal request id, cost, actor).
+
+| Modality | Node | Rendering / interaction | Annotation anchor |
+|---|---|---|---|
+| Image | `image` (alpha, HDR/EXR, layers as stacked children) | mipmapped / virtual texture | point, box, polygon, brush mask |
+| Video | `video` | GPU frames, hover-scrub, poster when idle, in/out, loop | frame or time range, plus a region on that frame |
+| Audio | `audio` (music, voice, SFX) | waveform / spectrogram tile, playhead | time range (optionally a frequency band) |
+| Text | `text` (rich text / markdown docs, prompts, scripts) | engine text (cosmic-text) | text range |
+| 3D | `model3d` (glTF/GLB, USDZ, Gaussian splats, point clouds) | turntable thumbnail; live orbit viewport when focused | 3D point plus camera |
+| Vector | `vector` (SVG, logos, icons) | lyon tessellation | point, box |
+| Document | `document` (PDF, slides) | per-page textures | page plus region |
+| Web / code | `embed` (generated HTML apps, URLs, live prototypes) | snapshot texture; live webview when focused | point, box |
+| Sequence | `timeline` (clips and audio layers, matching fal Agent's timeline) | strip view, scrubbable | time range on a track |
+| Live stream | `stream` (fal realtime models, webcam) | streamed frames to texture | frame or time |
+| Generation | `generation` (a live fal job) | placeholder with progress → becomes the media node | — |
+| Data / styling | `palette`, `lut`, `font`, `character`, `style_ref`, `lora` | swatch / card | — |
+| Structure | `frame`, `group`, `note` (sticky), `connector` (lineage / reference / flow) | engine | — |
+
+Image derivatives (depth, normals, masks, segmentation) are attached as **layers** of the image node, not separate nodes.
+
+## Annotations & comments
+The killer feature. A first-class part of the doc model, not an overlay.
+
 ```
-Project { id, name, canvases[], assets[] }
-Canvas  { id, name, root: Tree<Node> }          // Loro movable tree
-Node    { id, type, x, y, w, h, rot, z, locked, name, createdBy, updatedBy }
-  image | video | audio | model3d   → assetId, crop, playback{in,out,loop,muted}
-  text | note                        → richtext (Loro text)
-  frame | group                      → children
-  connector                          → from, to, kind (lineage | reference | flow)
-  generation                         → status, jobId, model, params, progress → becomes media node
-Asset   { id (content hash), mime, w, h, duration, url, thumbs, lineage{model, params, seed,
-          parents[], falRequestId, cost, actor} }
-```
-Example text projection (agent read/edit format, illustrative):
-```
-fal:v0 canvas "Moodboard"
-a1b2 frame "Hero shots" p(0,0) s(2400,1400)
-  c3d4 image asset(sha:9f…) p(40,80) s(1024,1024) "red car v3" by(@claude)
-  e5f6 gen flux-pro "red car, dusk, 35mm" p(1100,80) s(1024,1024) status(running 40%)
+Annotation {
+  id, nodeId, author (human | agent), createdAt, status (open | in_progress | resolved),
+  anchor: point | box | polygon | mask(assetId)
+        | time(t) | range(t0,t1) | frame(t) + region
+        | textRange(start,end) | page(n) + region | point3d(xyz, camera)
+  thread: Message[]            // humans and agents reply in place
+  assignee?: actor             // "@codex", "@fal-agent", "@claude"
+  outcome?: { nodeIds[] }      // what the agent produced in response
+}
 ```
 
-## MVP (phase 1) — "canvas + agents can play"
-1. Monorepo scaffold: `apps/desktop` (Electron), `apps/web`, `packages/engine`, `packages/doc`, `packages/host`, `packages/mcp`, `packages/cli`.
-2. Engine: pan/zoom at 120fps with 5k images and 50 videos (poster + hover play); select/move/resize; drop files.
-3. Doc + Host: Loro canvas, local project folders, undo, actors.
-4. fal generation node: prompt → placeholder → result, with lineage.
-5. Localhost MCP (`session`, `read`, `edit`, `generate`, `render_viewport`, `get_selection`) + auto-register into Claude Code/Codex. Agent cursors and attribution on the canvas.
-6. Demo: Claude Code and Codex building a moodboard together, while the user drags things around.
+- **Tools:** pin, box, lasso, brush over images; scrub to a frame and draw on a video; select a range on an audio waveform; click a point on a 3D model; highlight text.
+- **Forwarding to agents:**
+  - Assigning an annotation, or typing `@agent` in a thread, creates a task for that agent.
+  - The agent receives it as an MCP event or a hosted-agent prompt.
+  - It gets a context bundle via `get_annotation`: the crop, the exact frame, or the audio clip, rendered on demand, plus coordinates, the thread and lineage.
+- **Agents annotate back** ("changed this region", "v2 here"), and their results link to the thread through `outcome`.
+- **Review loop:** resolve, reopen, or "try again" on the same anchor.
 
-## Open questions
-- Is there an internal "fal agent SDK" we should build on? Public research found the MCP server, genmedia CLI, clients and Platform APIs, but no product with that name.
-- Website scope: marketing site only, or the full web canvas at launch?
-- Do we accept Loro, or start with a simpler server-sequenced op log like Brilliant's? (I lean Loro: multi-agent is core, and per-peer undo and versioning come free.)
-- Auth: fal account OAuth everywhere (app, remote MCP, CLI)?
+## Agents as collaborators
+- **Actor** on every transaction. Everything is attributed: "created by @claude via flux-2 · $0.04".
+- **Presence:** cursor, viewport, working box, and a status line (e.g. "generating 4 variations…"), with an optional live snippet of the agent's thinking.
+- **Soft leased claims** on nodes or regions. Humans can always override them, and the agent receives a `claim_revoked` event.
+- **Undo per actor:** "undo Claude's last change" or "revert everything Codex did this session". One tool call is one transaction and one undo step.
+- **Review mode per agent:**
+  - direct: changes apply immediately
+  - proposal: changes appear as a ghost layer you accept or reject
+  - sandbox frame: the agent works in its own area
+- **Spend:** budgets per agent and per project, with approval required above a threshold.
+- **Overview panel:** agent roster, active claims, a job queue with progress and cost, and an activity feed you can filter by actor, linked to canvas locations.
+- **Safety:** canvas text and comments are passed to agents as untrusted data. Circuit breakers stop no-progress loops.
+
+## How agents connect (v1)
+1. **Localhost MCP server** in the app.
+   - Streamable HTTP, with a per-install token and Origin/Host checks; plus a stdio shim.
+   - The app auto-registers itself in Claude Code, Codex, Cursor and Gemini configs, treating each config file as the source of truth.
+   - Tools:
+     - `session(agentName)` → session id plus cursor
+     - `read` / `edit` (symmetric text projection)
+     - `generate` (async MCP Task; creates a placeholder node immediately)
+     - `render_viewport` / `export` (vision)
+     - `get_selection`
+     - `list_annotations` / `get_annotation` / `reply` / `resolve`
+     - `claim` / `release`
+     - `search_assets`
+   - `subscriptions/listen` pushes annotation assignments and changes.
+   - Reference docs are loaded on demand rather than packed into tool descriptions; edits are idempotent via `requestId`.
+2. **`fal-os` CLI + SKILL.md:** a thin client over the same API, for any shell agent.
+3. **fal Agent (hosted)** as a built-in collaborator, via the [Agent SDK](https://fal.ai/docs/documentation/agent/sdk):
+   - Selected nodes and annotations are passed in as task context.
+   - Its plan renders as a card on the canvas.
+   - `fal.activities` drive its presence and status line.
+   - `artifacts` land as nodes with lineage.
+   - `pending_inputs` (questions and approvals) appear as approval cards.
+   - Its projects, characters and skills map onto ours.
+   - Caveats: the SDK is JS-only (Node ≥ 22), alpha, and needs an AGENT-scoped key kept server-side. Its REST surface isn't documented, so ask the fal team, or run the SDK in a small Node sidecar or web worker behind the host.
+4. **Later:** ACP client and Codex app-server so external agents run inside our UI; remote MCP with OAuth for claude.ai and ChatGPT; MCP Apps views.
+
+**Easy for computer-use agents to drive:** an accessibility mirror of canvas nodes with semantic labels, a command palette for everything, a status bar showing coordinates, zoom and selection, `falos://` deep links, and an MCP endpoint they can discover.
+
+## Data & performance
+- **Loro, one doc per canvas.**
+  - Rust-native, with a movable tree for z-order, per-peer undo, version checkout, shallow snapshots and fast import.
+  - The doc holds only metadata. A canvas with 10k nodes is a few MB, so **the CRDT is not where RAM goes**.
+  - We revisit only if profiling says so; the fallback is a server-sequenced op log like Brilliant's.
+- **RAM goes to pixels, so that is where the budget lives:**
+  - Thumbnail tiers (64 / 256 / 1024 / full), with mip level chosen by zoom.
+  - Virtual textures for huge images, and a global GPU texture budget with LRU.
+  - Cap on simultaneously active video decoders; poster frames otherwise.
+  - Audio stays compressed; waveforms are precomputed.
+  - 3D shows a thumbnail until focused, then uses one live viewport at a time.
+  - Media is decoded lazily, ranked by distance from the viewport.
+- **Targets:**
+  - 120 fps pan/zoom with 10k image nodes and 50 videos on canvas.
+  - Under 2 s cold open of a large canvas.
+  - Under 500 MB RSS for that scene on the native shell.
+- **One authority:** the host (local or a cloud room). Files and snapshots are projections of it; no dual sync lanes.
+
+## Decision 1: shell
+| Option | How | Pros | Cons |
+|---|---|---|---|
+| **A. Native shells** | SwiftUI (macOS + iPadOS) hosts the native engine in a `CAMetalLayer` (Brilliant's direct present). The web build is a separate thin TS UI over the wasm engine. | Best performance, RAM and feel. Zero-copy video. iPad comes free with SwiftUI. | Two chrome UIs (Swift and web) |
+| **B. One web UI everywhere** | Tauri v2 (WKWebView on macOS/iPadOS) + Rust host natively; engine as wasm/WebGPU inside the webview. Same UI in the browser. | One UI codebase, fastest iteration, Tauri has iOS support, far lighter than Electron. | Engine runs as wasm in the app. WebGPU/WebCodecs inside WKWebView needs macOS/iPadOS 26 and must be verified. Video less zero-copy. |
+| C. Hybrid | Native Metal engine layer under a transparent web chrome webview | Native engine, single UI | Messy input and compositing; not worth it |
+
+Either way, the engine, doc and host crates are identical. Only the chrome differs, and the canvas-level UI is drawn by the engine in both, so the chrome stays thin.
+
+## v1 milestones
+1. **Spike (week 1):** engine renders 10k image quads plus video in both native Metal and wasm/WebGPU (inside WKWebView and Chrome). Measure fps and RAM to settle Decision 1 with data.
+2. **Canvas core:** projects and canvases, drag and drop import of all modalities, select/move/resize, frames, connectors, Loro doc, undo, local project folder.
+3. **Generation:** `generation` nodes via the fal queue/realtime, with lineage and spend.
+4. **Agents:** localhost MCP, auto-registration, presence, attribution, claims, per-actor undo, overview panel.
+5. **Annotations:** anchors for every modality, threads, assignment to agents, context bundles, review loop.
+6. **fal Agent** as a built-in collaborator.
+7. **Demo:** you annotate frame 112 of a video ("make the sky stormier"), assign it to Codex. Meanwhile fal Agent builds a moodboard and Claude Code writes the script into a text node. All of it is visible live with costs.
