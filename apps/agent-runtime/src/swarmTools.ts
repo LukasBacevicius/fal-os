@@ -369,7 +369,9 @@ export function createSwarmTools(ctx: ToolCtx) {
           else if (ev.type === "error") throw new Error(ev.message);
         }
         await status(sid, "Codex: done");
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "codex", summary: `changed ${changed.size} file(s)`, state: "done" });
+        // Codex may also write files from shell commands, so patch count isn't the whole story.
+        const summary = changed.size ? `edited ${[...changed].map((p) => p.split("/").pop()).join(", ")}` : final.replace(/\s+/g, " ").slice(0, 120) || "done";
+        ctx.emit({ kind: "tool", agent, id: toolId, name: "codex", summary, state: "done" });
         ctx.emit({ kind: "agent", agent, state: "done", status: final.slice(0, 120) });
         return ok({ summary: final, changedFiles: [...changed] });
       } catch (e: any) {
