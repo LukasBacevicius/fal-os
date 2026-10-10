@@ -227,6 +227,12 @@ impl ChatHub {
                     created: ts(log.first()),
                     updated: ts(log.last()),
                     state: "idle".into(),
+                    cost: log
+                        .iter()
+                        .rev()
+                        .find(|l| l["event"]["kind"] == "cost")
+                        .and_then(|l| l["event"]["usd"].as_f64())
+                        .unwrap_or(0.0),
                     ..Default::default()
                 };
                 let seq = log
