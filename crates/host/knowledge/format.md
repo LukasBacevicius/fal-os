@@ -6,14 +6,14 @@ sibling order is z-order (first row = bottom).
 ```
 jbuzws frame "Moodboard" s(2000,1200) by(@lukas)
   881s9r image "red car v3" p(40,80) s(1024,1024) asset(sha:9f86) by(@claude)
-    ! yflw1y open box(10,20,200,100) to(@codex) by(@lukas)
+    ! yflw1y open box(0.1,0.2,0.4,0.3) to(@codex) by(@lukas)
       > @lukas "make the sky stormier"
   b59dlc generation "variation" status(running) model(fal-ai/flux/dev) by(@claude)
 ```
 
 Node row: `<id> <type> "<name>" <props…>`. Types: `image video audio text model3d vector
 document embed timeline stream generation frame group note connector style:<palette|lut|font|character|style_ref|lora>`.
-Common props: `p(x,y) s(w,h) r(deg) locked`. Text/notes: `text("…")`; notes also `color(#hex)`.
+Common props: `p(x,y) s(w,h) r(deg) locked`. `p` is relative to the parent row (a child at `p(40,80)` sits 40,80 inside its frame); top-level rows use canvas coordinates. Text/notes: `text("…")`; notes also `color(#hex)`.
 Connectors: `from(id) to(id) kind(lineage|reference|flow) label("…")`.
 `by()`, `upd()`, `more(n)` are read-only.
 

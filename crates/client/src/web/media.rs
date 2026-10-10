@@ -81,6 +81,13 @@ const ICON_COLORS = {
   embed: '#14b8a6', timeline: '#a855f7', stream: '#f43f5e', generation: '#8b5cf6', note: '#eab308',
 };
 
+const NOTE_COLORS = { yellow: '#fde68a', orange: '#fdba74', red: '#fca5a5', pink: '#f9a8d4', purple: '#d8b4fe', blue: '#93c5fd', green: '#86efac', gray: '#d4d4d8', grey: '#d4d4d8', white: '#fafafa' };
+function noteColor(c) {
+  if (!c) return '#fde68a';
+  if (NOTE_COLORS[c]) return NOTE_COLORS[c];
+  return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c) ? c : '#fde68a';
+}
+
 function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
 
 function roundRect(g, x, y, w, h, r) { g.beginPath(); g.roundRect ? g.roundRect(x, y, w, h, r) : g.rect(x, y, w, h); }
@@ -131,13 +138,76 @@ function wrap(g, text, maxW, maxLines) {
   return out;
 }
 
+// Text card: the body is the content; the name is a small caption.
+async function textSource(spec) {
+  const W = 768, H = Math.max(120, Math.min(2048, Math.round(W / Math.max(0.2, spec.aspect || 1.5))));
+  const c = canvas(W, H), g = c.getContext('2d');
+  g.fillStyle = '#18181c'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = 'rgba(255,255,255,0.10)'; g.lineWidth = 3; g.strokeRect(1.5, 1.5, W - 3, H - 3);
+  const pad = 36;
+  let top = pad;
+  if (spec.title && spec.title !== 'Text') {
+    g.fillStyle = '#8b8b94'; g.font = `500 24px Inter, system-ui, -apple-system, sans-serif`; g.textBaseline = 'alphabetic';
+    g.fillText(spec.title.slice(0, 60), pad, top + 22);
+    top += 44;
+  }
+  const body = spec.body || '';
+  const size = body.length < 80 ? 44 : body.length < 400 ? 34 : 28;
+  g.fillStyle = '#f4f4f5'; g.font = `400 ${size}px Inter, system-ui, -apple-system, sans-serif`;
+  const lh = Math.round(size * 1.35);
+  const lines = wrap(g, body, W - pad * 2, Math.max(1, Math.floor((H - top - pad) / lh)));
+  lines.forEach((l, i) => g.fillText(l, pad, top + size + i * lh));
+  return { bitmap: await createImageBitmap(c), width: W, height: H, duration: 0 };
+}
+
+// Generation placeholder: model, prompt snippet, status and a progress bar. The page adds an
+// animated shimmer on top while it runs; this bitmap is re-rendered when status/progress change.
+async function generationSource(spec) {
+  const W = 768, H = Math.max(200, Math.min(2048, Math.round(W / Math.max(0.2, spec.aspect || 1))));
+  const c = canvas(W, H), g = c.getContext('2d');
+  const status = spec.status || 'queued';
+  const failed = status === 'failed' || status === 'canceled';
+  const accent = failed ? '#ef4444' : status === 'done' ? '#22c55e' : '#8b5cf6';
+  const grad = g.createLinearGradient(0, 0, W, H);
+  grad.addColorStop(0, '#1d1830'); grad.addColorStop(1, '#141418');
+  g.fillStyle = grad; g.fillRect(0, 0, W, H);
+  g.strokeStyle = accent + '66'; g.lineWidth = 4; g.strokeRect(2, 2, W - 4, H - 4);
+  const pad = 40;
+  // Header: sparkle glyph + model.
+  g.fillStyle = accent; roundRect(g, pad, pad, 64, 64, 16); g.fill();
+  glyph(g, 'generation', pad, pad, 64);
+  g.textBaseline = 'alphabetic';
+  g.fillStyle = '#f4f4f5'; g.font = `600 30px Inter, system-ui, -apple-system, sans-serif`;
+  let model = spec.model || 'generation';
+  while (g.measureText(model).width > W - pad * 2 - 88 && model.length > 6) model = model.slice(1);
+  g.fillText(model === (spec.model || 'generation') ? model : '…' + model, pad + 88, pad + 30);
+  g.fillStyle = failed ? '#fca5a5' : '#a1a1aa'; g.font = `500 24px Inter, system-ui, -apple-system, sans-serif`;
+  const pct = Math.round(Math.max(0, Math.min(1, Number(spec.progress) || 0)) * 100);
+  const label = failed ? (status === 'failed' ? 'Failed' : 'Canceled') : status === 'running' ? `Generating… ${pct ? pct + '%' : ''}` : status === 'done' ? 'Done' : 'Queued';
+  g.fillText(label, pad + 88, pad + 62);
+  // Prompt snippet.
+  const body = failed && spec.error ? spec.error : spec.prompt || '';
+  if (body) {
+    g.fillStyle = failed ? '#fecaca' : '#d4d4d8'; g.font = `400 30px Inter, system-ui, -apple-system, sans-serif`;
+    const top = pad + 120;
+    const lines = wrap(g, (failed ? '' : '“') + body + (failed ? '' : '”'), W - pad * 2, Math.max(1, Math.floor((H - top - pad - 40) / 42)));
+    lines.forEach((l, i) => g.fillText(l, pad, top + i * 42));
+  }
+  // Progress bar.
+  const by = H - pad - 12;
+  g.fillStyle = 'rgba(255,255,255,0.10)'; roundRect(g, pad, by, W - pad * 2, 12, 6); g.fill();
+  const frac = status === 'done' ? 1 : status === 'running' ? Math.max(0.06, pct / 100) : status === 'queued' ? 0.03 : 0;
+  if (frac > 0) { g.fillStyle = accent; roundRect(g, pad, by, (W - pad * 2) * frac, 12, 6); g.fill(); }
+  return { bitmap: await createImageBitmap(c), width: W, height: H, duration: 0 };
+}
+
 async function cardSource(spec) {
   const W = 768, H = Math.max(160, Math.min(2048, Math.round(W / Math.max(0.2, spec.aspect || 1.5))));
   const c = canvas(W, H), g = c.getContext('2d');
   const kind = spec.kind;
   const note = kind === 'note';
   const accent = ICON_COLORS[kind] || (kind.startsWith('style') ? '#f97316' : '#71717a');
-  g.fillStyle = note ? (spec.color || '#fde68a') : '#1c1c21';
+  g.fillStyle = note ? noteColor(spec.color) : '#1c1c21';
   g.fillRect(0, 0, W, H);
   if (!note) {
     const grad = g.createLinearGradient(0, 0, W, H);
@@ -182,8 +252,17 @@ async function cardSource(spec) {
   return { bitmap, width: W, height: H, duration: 0 };
 }
 
+async function urlSource(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch ${r.status}`);
+  return imageSource(await r.blob());
+}
+
 function makeSource(spec) {
   if (spec.type === 'blob') return imageSource(spec.blob);
+  if (spec.type === 'url') return urlSource(spec.url);
+  if (spec.kind === 'generation') return generationSource(spec);
+  if (spec.kind === 'text') return textSource(spec);
   if (spec.type === 'video') return probe_video(spec.url);
   return cardSource(spec);
 }
@@ -259,8 +338,10 @@ extern "C" {
 
 /// A locally available asset (content-addressed blob).
 pub struct AssetEntry {
-    pub blob: web_sys::Blob,
+    /// Local bytes; `None` for assets streamed from the host by URL.
+    pub blob: Option<web_sys::Blob>,
     pub url: String,
+    pub size: f64,
     pub mime: String,
     pub name: String,
     /// Natural media size, once known.
@@ -279,10 +360,22 @@ impl MediaStore {
             let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap_or_default();
             self.assets.insert(
                 id.to_string(),
-                AssetEntry { blob, url, mime: mime.to_string(), name: name.to_string(), dims: None, duration: 0.0 },
+                AssetEntry { size: blob.size(), blob: Some(blob), url, mime: mime.to_string(), name: name.to_string(), dims: None, duration: 0.0 },
             );
         }
         self.assets.get_mut(id).expect("inserted")
+    }
+
+    pub fn insert_remote(&mut self, id: &str, url: &str, mime: &str, name: &str, size: f64) {
+        self.assets.entry(id.to_string()).or_insert_with(|| AssetEntry {
+            blob: None,
+            url: url.to_string(),
+            size,
+            mime: mime.to_string(),
+            name: name.to_string(),
+            dims: None,
+            duration: 0.0,
+        });
     }
 
     pub fn get(&self, id: &str) -> Option<&AssetEntry> {
@@ -340,8 +433,16 @@ pub fn source_spec(n: &SceneNode, media: &MediaStore) -> Option<(String, JsValue
     let key = match content_of(n) {
         Content::Image => {
             let a = media.get(n.asset.as_deref()?)?;
-            set(&o, "type", "blob");
-            set(&o, "blob", a.blob.clone());
+            match &a.blob {
+                Some(b) => {
+                    set(&o, "type", "blob");
+                    set(&o, "blob", b.clone());
+                }
+                None => {
+                    set(&o, "type", "url");
+                    set(&o, "url", a.url.clone());
+                }
+            }
             format!("a:{}", n.asset.as_deref()?)
         }
         Content::Video => {
@@ -355,7 +456,7 @@ pub fn source_spec(n: &SceneNode, media: &MediaStore) -> Option<(String, JsValue
             let asset = n.asset.as_deref().and_then(|a| media.get(a));
             let mut subtitle = kind_label(n.kind);
             if let Some(a) = asset {
-                let kb = a.blob.size() / 1024.0;
+                let kb = a.size / 1024.0;
                 subtitle = if kb > 1024.0 { format!("{subtitle} · {:.1} MB", kb / 1024.0) } else { format!("{subtitle} · {kb:.0} KB") };
             } else if n.asset.is_some() {
                 subtitle.push_str(" · missing file");
@@ -368,7 +469,17 @@ pub fn source_spec(n: &SceneNode, media: &MediaStore) -> Option<(String, JsValue
             set(&o, "subtitle", subtitle.clone());
             set(&o, "body", body.clone());
             set(&o, "aspect", aspect);
-            let h = fnv(&format!("{title}\u{1}{subtitle}\u{1}{body}\u{1}{:.2}", aspect));
+            let mut card = n.card.split('\u{1}');
+            match n.kind {
+                NodeKind::Note => set(&o, "color", n.card.clone()),
+                NodeKind::Generation => {
+                    for k in ["status", "progress", "model", "error", "prompt"] {
+                        set(&o, k, card.next().unwrap_or("").to_string());
+                    }
+                }
+                _ => {}
+            }
+            let h = fnv(&format!("{title}\u{1}{subtitle}\u{1}{body}\u{1}{:.2}\u{1}{}", aspect, n.card));
             format!("c:{}:{h:x}", n.id)
         }
         Content::None => return None,

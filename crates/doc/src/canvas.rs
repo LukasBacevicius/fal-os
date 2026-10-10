@@ -1147,12 +1147,27 @@ impl<'a> Tx<'a> {
         if a.id.is_empty() {
             return Err(Error::Invalid("asset id is empty".into()));
         }
-        // Content-addressed and immutable: the first record wins.
+        // Content-addressed and immutable: the first record wins. The one exception is a
+        // missing `uri` (where the same bytes live remotely, e.g. after a fal storage
+        // upload), which a later record may fill in.
         let assets = self.doc.get_map(ASSETS);
-        if assets.get(&a.id).is_none() {
+        let record = match assets.get(&a.id) {
+            None => Some(a.clone()),
+            Some(ValueOrContainer::Value(v)) if a.uri.is_some() => {
+                match serde_json::from_value::<Asset>(to_json(&v)) {
+                    Ok(mut cur) if cur.uri.is_none() => {
+                        cur.uri = a.uri.clone();
+                        Some(cur)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(rec) = record {
             self.touched.insert(a.id.clone());
             if !self.dry {
-                assets.insert(&a.id, to_loro(&serde_json::to_value(a)?))?;
+                assets.insert(&a.id, to_loro(&serde_json::to_value(&rec)?))?;
             }
         }
         Ok(())

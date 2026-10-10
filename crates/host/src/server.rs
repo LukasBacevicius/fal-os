@@ -166,7 +166,28 @@ struct Guard {
     token: Arc<str>,
 }
 
+/// CORS for the canvas UI (a loopback dev server or the Tauri webview fetching `/assets`).
+/// Only origins that already pass `is_allowed_origin` get these headers.
+fn add_cors(resp: &mut Response, origin: &header::HeaderValue) {
+    let h = resp.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
+    h.insert(header::VARY, header::HeaderValue::from_static("Origin"));
+    h.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        header::HeaderValue::from_static("content-range, content-length, accept-ranges, etag"),
+    );
+}
+
 async fn guard(State(g): State<Guard>, req: Request, next: Next) -> Response {
+    let origin = req.headers().get(header::ORIGIN).cloned();
+    let mut resp = guard_inner(g, req, next).await;
+    if let Some(o) = origin.filter(|o| o.to_str().is_ok_and(is_allowed_origin)) {
+        add_cors(&mut resp, &o);
+    }
+    resp
+}
+
+async fn guard_inner(g: Guard, req: Request, next: Next) -> Response {
     let headers = req.headers();
     let host_ok = headers
         .get(header::HOST)
@@ -180,13 +201,39 @@ async fn guard(State(g): State<Guard>, req: Request, next: Next) -> Response {
     {
         return (StatusCode::FORBIDDEN, "fal-os host: origin not allowed").into_response();
     }
+    // CORS preflight (no credentials on it by spec) for the asset routes.
+    if req.method() == axum::http::Method::OPTIONS && req.uri().path().starts_with("/assets/") {
+        return (
+            StatusCode::NO_CONTENT,
+            [
+                (
+                    header::ACCESS_CONTROL_ALLOW_METHODS,
+                    "GET, HEAD, PUT, OPTIONS",
+                ),
+                (
+                    header::ACCESS_CONTROL_ALLOW_HEADERS,
+                    "authorization, content-type, range",
+                ),
+                (header::ACCESS_CONTROL_MAX_AGE, "600"),
+            ],
+        )
+            .into_response();
+    }
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(str::trim);
-    // Browsers can't set headers on WebSocket upgrades, so /sync also takes ?token=.
-    let query = (req.uri().path().starts_with("/sync/"))
+    // Browsers can't set headers on WebSocket upgrades or `<video src>`, so /sync and asset
+    // reads also take ?token=.
+    let path = req.uri().path();
+    let query_ok = path.starts_with("/sync/")
+        || (path.starts_with("/assets/")
+            && matches!(
+                *req.method(),
+                axum::http::Method::GET | axum::http::Method::HEAD
+            ));
+    let query = query_ok
         .then(|| req.uri().query())
         .flatten()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")));
@@ -213,6 +260,12 @@ pub fn router(host: Arc<Host>, token: &str, ct: CancellationToken) -> Router {
     );
     Router::new()
         .route("/sync/{canvas}", get(crate::sync::handler))
+        .route(
+            "/assets/{id}",
+            get(crate::assets::get)
+                .head(crate::assets::get)
+                .put(crate::assets::put),
+        )
         .merge(crate::runtime::routes())
         .with_state(host)
         .nest_service("/mcp", mcp)

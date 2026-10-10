@@ -2,6 +2,7 @@
 //! (actors with presence), soft claims and an event bus; serves the canvas MCP server and
 //! the client sync WebSocket on one loopback HTTP server.
 
+pub mod assets;
 pub mod auth;
 pub mod chat;
 pub mod context;
@@ -10,6 +11,7 @@ pub mod fal_relay;
 pub mod host;
 pub mod knowledge;
 pub mod mcp;
+pub mod presence;
 pub mod register;
 pub mod runtime;
 pub mod server;

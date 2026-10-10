@@ -421,15 +421,7 @@ pub fn history(host: &Host, canvas: &str) -> Json {
 
 /// Local file of a content-addressed asset (`sha256:<hex>` → `<project>/assets/<hex>.*`).
 pub fn asset_file(host: &Host, asset: &str) -> Option<PathBuf> {
-    let hex = asset.strip_prefix("sha256:").unwrap_or(asset);
-    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    std::fs::read_dir(host.dir().join("assets"))
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == hex))
+    crate::assets::find(&host.dir().join("assets"), &crate::assets::parse_id(asset)?)
 }
 
 fn lineage_lines(c: &Canvas, asset: Option<String>) -> Vec<String> {
@@ -486,7 +478,13 @@ pub async fn resolve_chip(host: &Host, canvas: &str, chip: &Json) -> Result<Json
             .get("asset")
             .and_then(Json::as_str)
             .map(String::from);
-        let asset = asset_id.as_deref().and_then(|a| c.asset(a));
+        // User uploads (PUT /assets) may have a file but no asset record yet.
+        let asset = asset_id.as_deref().map(|a| {
+            c.asset(a).unwrap_or_else(|| falos_doc::Asset {
+                id: a.to_string(),
+                ..Default::default()
+            })
+        });
         let lineage = lineage_lines(c, asset_id);
         Ok((n, row, asset, lineage))
     })??;
@@ -509,6 +507,11 @@ pub async fn resolve_chip(host: &Host, canvas: &str, chip: &Json) -> Result<Json
         return Ok(out);
     };
     out["file"] = json!(file.display().to_string());
+    if out["mime"].is_null()
+        && let Some(ext) = file.extension()
+    {
+        out["mime"] = json!(crate::assets::mime_of_ext(&ext.to_string_lossy()));
+    }
     let probe = probe(&file).await.unwrap_or_default();
     out["media"] =
         json!({"width": probe.width, "height": probe.height, "duration": probe.duration});
@@ -890,8 +893,67 @@ pub struct GetContextArgs {
     pub chips: Vec<Json>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAssetUriArgs {
+    pub session_id: String,
+    pub canvas: String,
+    /// Asset id (sha256:…).
+    pub asset: String,
+    /// Public https URL of the same bytes (e.g. after a fal storage upload).
+    pub uri: String,
+}
+
+/// Record a remote URL for an asset (keeps mime/lineage), so it's uploaded only once.
+pub fn set_asset_uri(
+    host: &Host,
+    actor: &Actor,
+    canvas: &str,
+    asset: &str,
+    uri: &str,
+) -> Result<()> {
+    if !uri.starts_with("https://") {
+        bail!("uri must be https");
+    }
+    let canvas = host.resolve_canvas(canvas)?;
+    let file = asset_file(host, asset);
+    host.mutate(&canvas, &actor.id, None, |c| {
+        let mut rec = c.asset(asset).unwrap_or_else(|| Asset {
+            id: asset.to_string(),
+            mime: file
+                .as_ref()
+                .and_then(|f| f.extension())
+                .map(|e| crate::assets::mime_of_ext(&e.to_string_lossy()).to_string()),
+            ..Default::default()
+        });
+        rec.uri = Some(uri.to_string());
+        c.apply(actor, None, &[Command::PutAsset(rec)])
+    })?;
+    Ok(())
+}
+
 #[tool_router(router = chat_tools, vis = "pub(crate)")]
 impl CanvasMcp {
+    #[tool(
+        description = "Record the public https URL of an asset's bytes (e.g. after uploading user media to fal storage) so tools can pass it to models without re-uploading.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_asset_uri(&self, Parameters(a): Parameters<SetAssetUriArgs>) -> CallToolResult {
+        let host = self.host().clone();
+        let r = (|| {
+            let actor = host.actor(&a.session_id)?;
+            crate::assets::parse_id(&a.asset).context("asset must be sha256:<hex>")?;
+            set_asset_uri(&host, &actor, &a.canvas, &a.asset, &a.uri)?;
+            Ok("ok".to_string())
+        })();
+        self.finish(Some(&a.session_id), r)
+    }
+
     #[tool(
         description = "Import a local image/video/audio file (e.g. a Remotion render or a downloaded fal Agent artifact) into the project: copies it into assets by sha256 and creates the media node sized from the file (or converts the `replace` generation placeholder in place), with optional lineage. Returns the node id.",
         annotations(

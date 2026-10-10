@@ -91,6 +91,11 @@ impl ChangeFeed {
     }
 }
 
+/// A prop value as plain text (strings unquoted).
+fn json_str(v: &serde_json::Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), String::from)
+}
+
 /// The render-relevant view of one doc node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneNode {
@@ -104,13 +109,28 @@ pub struct SceneNode {
     pub parent: Option<String>,
     /// Text content (text / note nodes).
     pub text: Option<String>,
+    /// Props that change how a card is drawn (note color, generation status/progress/model/
+    /// prompt/error), as a compact string. A change refetches the card's pixels.
+    pub card: String,
     /// Engine handle, `None` for nodes that are not drawn (groups, connectors, empty rects).
     pub handle: Option<Handle>,
 }
 
 impl SceneNode {
+    /// `rect` is in the node's parent space; [`Scene::apply`] offsets it to world space.
     pub fn from_doc(n: &Node, tree: TreeID) -> Self {
+        let card = match n.kind {
+            NodeKind::Note => n.props.get("color").map(json_str).unwrap_or_default(),
+            NodeKind::Generation => {
+                let p = |k: &str| n.props.get(k).map(json_str).unwrap_or_default();
+                let prompt = n.props.get("params").and_then(|v| v.get("prompt")).and_then(|v| v.as_str()).unwrap_or("");
+                let prompt: String = prompt.chars().take(400).collect();
+                format!("{}\u{1}{}\u{1}{}\u{1}{}\u{1}{prompt}", p("status"), p("progress"), p("model"), p("error"))
+            }
+            _ => String::new(),
+        };
         Self {
+            card,
             id: n.id.clone(),
             tree,
             kind: n.kind,
@@ -249,7 +269,36 @@ impl Scene {
         self.apply(canvas, &changes, sink);
     }
 
+    /// Ids of `id`'s descendants currently in the scene (draw order is depth-first, so the
+    /// subtree follows the node contiguously).
+    pub fn descendants(&self, id: &str) -> Vec<String> {
+        let Some(i) = self.order.iter().position(|o| o == id) else { return Vec::new() };
+        let mut inside: HashSet<&str> = HashSet::from([id]);
+        let mut out = Vec::new();
+        for o in &self.order[i + 1..] {
+            match self.nodes.get(o).and_then(|n| n.parent.as_deref()) {
+                Some(p) if inside.contains(p) => {
+                    inside.insert(o);
+                    out.push(o.clone());
+                }
+                _ => break,
+            }
+        }
+        out
+    }
+
+    /// World position of a node's parent (its origin); `[0, 0]` for top-level nodes.
+    pub fn parent_origin(&self, id: &str) -> [f32; 2] {
+        self.nodes
+            .get(id)
+            .and_then(|n| n.parent.as_deref())
+            .and_then(|p| self.nodes.get(p))
+            .map_or([0.0, 0.0], |p| [p.rect[0], p.rect[1]])
+    }
+
     /// Applies recorded changes: re-reads only touched nodes and emits minimal sink ops.
+    /// Doc positions are parent-relative; scene rects are world rects, so a moved node's
+    /// descendants are refreshed too, parents before children.
     pub fn apply(&mut self, canvas: &Canvas, ch: &DocChanges, sink: &mut impl RenderSink) {
         let tree = canvas.tree();
         let mut gone: Vec<TreeID> = ch.deleted.iter().copied().collect();
@@ -260,13 +309,43 @@ impl Scene {
         for t in gone {
             self.remove_tree(t, sink);
         }
+        let mut todo: HashSet<TreeID> = HashSet::new();
+        let mut stack: Vec<TreeID> = Vec::new();
         for &t in &ch.dirty {
             if tree.is_node_deleted(&t).unwrap_or(true) {
                 self.remove_tree(t, sink);
                 continue;
             }
+            stack.push(t);
+        }
+        while let Some(t) = stack.pop() {
+            if todo.insert(t) {
+                stack.extend(tree.children(TreeParentId::Node(t)).unwrap_or_default());
+            }
+        }
+        let depth = |t: TreeID| {
+            let (mut d, mut cur) = (0usize, t);
+            while let Some(TreeParentId::Node(p)) = tree.parent(cur) {
+                d += 1;
+                cur = p;
+                if d > 256 {
+                    break;
+                }
+            }
+            d
+        };
+        let mut todo: Vec<(usize, TreeID)> = todo.into_iter().map(|t| (depth(t), t)).collect();
+        todo.sort_by_key(|(d, _)| *d);
+        for (_, t) in todo {
             match canvas.node_by_tree(t) {
-                Some(n) => self.upsert(SceneNode::from_doc(&n, t), sink),
+                Some(n) => {
+                    let mut sn = SceneNode::from_doc(&n, t);
+                    if let Some(p) = sn.parent.as_deref().and_then(|p| self.nodes.get(p)) {
+                        sn.rect[0] += p.rect[0];
+                        sn.rect[1] += p.rect[1];
+                    }
+                    self.upsert(sn, sink)
+                }
                 None => self.remove_tree(t, sink),
             }
         }
@@ -284,7 +363,7 @@ impl Scene {
                 if *cur == n {
                     return;
                 }
-                let content = cur.asset != n.asset || cur.text != n.text || cur.name != n.name;
+                let content = cur.asset != n.asset || cur.text != n.text || cur.name != n.name || cur.card != n.card;
                 match (n.handle, n.renderable()) {
                     (Some(h), true) => sink.update(h, &n, content),
                     (Some(h), false) => {
@@ -492,6 +571,35 @@ mod tests {
         assert_eq!(log, vec!["remove frm", "remove kid"]);
         assert!(f.scene.is_empty());
         assert!(f.sink.live.is_empty());
+    }
+
+    #[test]
+    fn children_are_positioned_relative_to_their_parent() {
+        let mut f = Fixture::new();
+        let node = |id: &str, kind, parent: Option<&str>, x: f64| Command::CreateNode {
+            id: Some(id.into()),
+            kind,
+            parent: parent.map(String::from),
+            index: None,
+            name: String::new(),
+            props: props(json!({"x": x, "y": 10, "w": 100, "h": 100})),
+            text: None,
+        };
+        f.apply(&[
+            node("frm", NodeKind::Frame, None, 1000.0),
+            node("grp", NodeKind::Frame, Some("frm"), 50.0),
+            node("kid", NodeKind::Note, Some("grp"), 5.0),
+        ]);
+        assert_eq!(f.scene.get("kid").unwrap().rect, [1055.0, 30.0, 100.0, 100.0]);
+        assert_eq!(f.scene.descendants("frm"), vec!["grp".to_string(), "kid".to_string()]);
+        assert_eq!(f.scene.parent_origin("kid"), [1050.0, 20.0]);
+        // Moving the frame moves the whole subtree.
+        f.apply(&[Command::UpdateNode { id: "frm".into(), props: props(json!({"x": 0})) }]);
+        assert_eq!(f.scene.get("kid").unwrap().rect, [55.0, 30.0, 100.0, 100.0]);
+        // A rebuild agrees.
+        let mut scene = Scene::default();
+        scene.rebuild(&f.canvas, &mut Mock::default());
+        assert_eq!(scene.get("kid").unwrap().rect, [55.0, 30.0, 100.0, 100.0]);
     }
 
     #[test]

@@ -21,7 +21,7 @@ jbuzws frame "Moodboard" s(2000,1200) by(@lukas)
 - **type**: `image video audio text model3d vector document embed timeline stream
   generation frame group note connector`, and `style:<palette|lut|font|character|style_ref|lora>`.
 - **name**: quoted. Leave it out when the name is empty.
-- **common props**: `p(x,y)` position, `s(w,h)` size, `r(deg)` rotation, `locked`.
+- **common props**: `p(x,y)` position, relative to the parent node (top-level nodes use canvas coordinates; moving a frame moves its children), `s(w,h)` size, `r(deg)` rotation, `locked`.
   A prop that is 0 or false is left out.
 - **type props** (printed in this order):
 

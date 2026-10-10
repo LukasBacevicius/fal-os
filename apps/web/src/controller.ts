@@ -5,6 +5,7 @@ import { getState, setState, toast, type AssetInfo } from './store';
 import * as persist from './persist';
 import type { CanvasApp } from './wasm';
 import type { AnnotationView, NodeView } from './types';
+import { hostSync } from './sync';
 
 export const CANVAS_ID = 'main';
 
@@ -13,14 +14,18 @@ let booting = false;
 
 function refresh(app: CanvasApp, what: { nodes?: boolean; annotations?: boolean; assets?: boolean }) {
   const patch: Parameters<typeof setState>[0] = {};
-  if (what.nodes) patch.nodes = app.nodes() as NodeView[];
+  if (what.nodes) {
+    patch.nodes = app.nodes() as NodeView[];
+    hostSync()?.syncAssets(patch.nodes);
+  }
   if (what.annotations || what.nodes) patch.annotations = app.annotations() as AnnotationView[];
   if (what.assets) patch.assets = app.assets() as AssetInfo[];
   setState(patch);
 }
 
 function scheduleSave(app: CanvasApp) {
-  if (booting) return;
+  // With a host, the host owns the canvas on disk; IndexedDB keeps the local-only canvas.
+  if (booting || getState().conn !== 'local') return;
   setState({ saved: 'saving' });
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(async () => {
@@ -65,6 +70,7 @@ export function attach(app: CanvasApp) {
       case 'asset': {
         const blob = app.assetBlob(payload.id);
         if (blob && !booting) persist.saveAsset({ id: payload.id, blob, mime: payload.mime, name: payload.name }).catch(console.warn);
+        void hostSync()?.upload(payload.id);
         setState({ assets: app.assets() as AssetInfo[] });
         break;
       }
@@ -78,13 +84,14 @@ export function attach(app: CanvasApp) {
   });
 }
 
-/** Restores the canvas and its assets from IndexedDB. */
-export async function restore(app: CanvasApp) {
+/** Restores the canvas and its assets from IndexedDB. With a host, only the asset cache is
+ *  used (the host's snapshot replaces the canvas). */
+export async function restore(app: CanvasApp, hosted = false) {
   booting = true;
   try {
-    const [snapshot, assets] = await Promise.all([persist.loadSnapshot(CANVAS_ID), persist.loadAssets()]);
+    const [snapshot, assets] = await Promise.all([hosted ? undefined : persist.loadSnapshot(CANVAS_ID), persist.loadAssets()]);
     for (const a of assets) app.registerAsset(a.id, a.blob, a.mime, a.name);
-    if (snapshot) app.loadSnapshot(snapshot);
+    if (snapshot) app.loadSnapshot(snapshot, true);
   } catch (e) {
     console.warn('restore failed', e);
   } finally {
@@ -145,7 +152,7 @@ export async function importCanvas(file: File) {
       app.registerAsset(a.id, a.blob, a.mime, a.name);
       await persist.saveAsset(a);
     }
-    app.loadSnapshot(b.snapshot);
+    app.loadSnapshot(b.snapshot, true);
     toast(`Opened ${file.name}`);
   } catch (e) {
     toast(`Could not open: ${e}`);

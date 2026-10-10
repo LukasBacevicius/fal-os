@@ -105,6 +105,26 @@ fn region(r: &Region) -> String {
     }
 }
 
+/// An anchor in the text syntax, e.g. `box(0.1,0.2,0.4,0.3)` or `frame(4.2) pt(0.5,0.5)`.
+pub fn anchor_to_text(a: &Anchor) -> String {
+    anchor(a)
+}
+
+/// Parses an anchor written in the text syntax (`pt(..)`, `box(..)`, `frame(t) box(..)`, …).
+pub fn parse_anchor_text(s: &str) -> Result<Anchor, String> {
+    let mut parts = vec![];
+    for t in tokenize(s)? {
+        match t {
+            Tok::Call(n, a) if ANCHOR_CALLS.contains(&n.as_str()) => parts.push((n, a)),
+            Tok::Call(n, _) | Tok::Word(n) => {
+                return Err(format!("`{n}` is not part of an anchor"));
+            }
+            Tok::Str(_) => return Err("unexpected string in anchor".into()),
+        }
+    }
+    parse_anchor(&parts)?.ok_or_else(|| "empty anchor".to_string())
+}
+
 fn anchor(a: &Anchor) -> String {
     let with = |head: String, r: &Option<Region>| match r {
         Some(r) => format!("{head} {}", region(r)),

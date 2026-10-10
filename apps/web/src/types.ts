@@ -95,4 +95,6 @@ export interface Presence {
   cursor: [number, number] | null;
   status?: string | null;
   selection?: string[];
+  /** 0..1; idle cursors fade out. */
+  opacity?: number;
 }

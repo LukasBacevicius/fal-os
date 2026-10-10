@@ -256,6 +256,81 @@ async fn import_file_and_get_context() {
         .unwrap();
     assert_eq!(r.is_error, Some(true));
 
+    // A fal storage upload is cached on the asset (https only).
+    let asset_id = i["asset"].as_str().unwrap().to_string();
+    let bad = c
+        .call_tool(
+            CallToolRequestParams::new("set_asset_uri").with_arguments(
+                json!({"sessionId": sid, "canvas": "main", "asset": asset_id, "uri": "file:///etc/passwd"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad.is_error, Some(true));
+    // An existing uri is kept (asset records are first-write-wins).
+    call(
+        &c,
+        "set_asset_uri",
+        json!({"sessionId": sid, "canvas": "main", "asset": asset_id, "uri": "https://v3.fal.media/files/x.png"}),
+    )
+    .await;
+    let rec = env
+        .host
+        .read("main", |cv| cv.asset(&asset_id).unwrap())
+        .unwrap();
+    assert_eq!(rec.uri.as_deref(), Some("https://cdn/x.png"));
+    // A user upload (file in assets/, node with `asset`, no record yet) resolves to its
+    // file, and its fal storage URL is recorded once.
+    let mut user_png = PNG.to_vec();
+    user_png.extend_from_slice(b"user");
+    let hex: String = {
+        use sha2::Digest;
+        sha2::Sha256::digest(&user_png)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    std::fs::write(env.host.dir().join(format!("assets/{hex}.png")), &user_png).unwrap();
+    let e = call(
+        &c,
+        "edit",
+        json!({"sessionId": sid, "canvas": "main",
+               "text": format!("image \"my headphones\" p(0,600) s(400,400) asset(sha256:{hex})")}),
+    )
+    .await;
+    let user_node = e["created"][0].as_str().unwrap().to_string();
+    let ctx = call(
+        &c,
+        "get_context",
+        json!({"sessionId": sid, "canvas": "main", "chips": [{"kind": "node", "node": user_node}]}),
+    )
+    .await;
+    assert!(
+        ctx[0]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("{hex}.png"))
+    );
+    assert_eq!(ctx[0]["mime"], "image/png");
+    assert!(ctx[0]["uri"].is_null());
+    call(
+        &c,
+        "set_asset_uri",
+        json!({"sessionId": sid, "canvas": "main", "asset": format!("sha256:{hex}"), "uri": "https://v3.fal.media/files/u.png"}),
+    )
+    .await;
+    let rec = env
+        .host
+        .read("main", |cv| cv.asset(&format!("sha256:{hex}")).unwrap())
+        .unwrap();
+    assert_eq!(
+        (rec.uri.as_deref(), rec.mime.as_deref()),
+        (Some("https://v3.fal.media/files/u.png"), Some("image/png"))
+    );
+
     // get_context resolves rows, lineage, files and pixel crops.
     let ctx = call(
         &c,
