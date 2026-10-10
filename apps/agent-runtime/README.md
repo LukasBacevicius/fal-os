@@ -5,10 +5,10 @@ The swarm behind the chat panel. You type "OPUS please direct me an ad for the h
 | Agent | Model | Does |
 |---|---|---|
 | Director | `claude-opus-5-5` | Reads the canvas and the attached references (it looks at images and video frames itself). Lays out the Brief / Storyboard / Assets / Motion / Final frames, writes the brief, plans, delegates, and keeps you posted in chat. |
-| storyboard | `claude-sonnet-5-5` | Writes the script and the shot list as notes in the Storyboard frame. |
-| generator (one or more, in parallel) | `claude-sonnet-5-5` | Makes stills, video clips and music with **fal** into the Assets frame. Placeholders appear at once and turn into the media. |
-| motion | `claude-sonnet-5-5` (+ **Codex**) | Builds the edit in **Remotion** (motion graphics as code) from the canvas assets, renders a 1080p MP4 and imports it into the Final frame. |
-| qa | `claude-sonnet-5-5` | Runs ffprobe on the render, looks at extracted frames, pins annotations, and sends motion back once if needed. |
+| storyboard | `claude-opus-5-5` | Writes the script and the shot list as notes in the Storyboard frame. |
+| generator (one or more, in parallel) | `claude-opus-5-5` | Makes stills, video clips and music with **fal** into the Assets frame. Placeholders appear at once and turn into the media. |
+| motion | `claude-opus-5-5` (+ **Codex**) | Builds the edit in **Remotion** (motion graphics as code) from the canvas assets, renders a 1080p MP4 and imports it into the Final frame. |
+| qa | `claude-opus-5-5` | Runs ffprobe on the render, looks at extracted frames, pins annotations, and sends motion back once if needed. |
 | Codex | Codex CLI (your ChatGPT sign-in) | A coding worker the motion agent uses to write and iterate the composition. It has its own fal-os session. |
 
 ```
@@ -38,10 +38,10 @@ cargo run -p falos-host -- serve --project ~/fal-os-projects/demo   # spawns + s
 | Var | Default | |
 |---|---|---|
 | `FALOS_DIRECTOR_MODEL` | `claude-opus-5-5` | Director model |
-| `FALOS_WORKER_MODEL` | `claude-sonnet-5-5` | Subagent model |
+| `FALOS_WORKER_MODEL` | `claude-opus-5-5` | Subagent model |
 | `FALOS_MAX_CONSECUTIVE_FAILURES` | `3` | Circuit breaker: generation tools refuse after this many failed fal tasks in a row |
-| `FALOS_MAX_FAL_TASKS` | `40` | Runaway guard: fal tasks per chat turn |
-| `FALOS_MAX_TURNS` | `300` | Director API round-trips per turn |
+| `FALOS_MAX_FAL_TASKS` | `100` | Runaway guard: swarm fal tasks (`fal_agent` / `fal_model`) per chat run; a `generate_batch` call counts as none |
+| `FALOS_MAX_TURNS` | `500` | Director API round-trips per turn |
 
 ## Budgets and spend
 - There is **no spend cap**. Chat shows the fal spend as it happens (`cost` events, cumulative per turn):
@@ -69,6 +69,13 @@ Anything on the canvas can be a reference or a direct model input: generated med
 - `fal_model_schema(model)`: input fields of an endpoint, from fal's public OpenAPI.
 - `media_url(sessionId, nodes)`: public URLs for canvas media.
 - `codex(task, dir?)`: a Codex thread (`workspace-write`, no approvals) in the chat workspace. It has its own "Codex" session and status.
+
+## Drivers, queue, errors (UX v1)
+- **Drivers** per chat (`chat.send` `driver`): `opus` (this swarm), `fal` (talk to the fal Agent directly: plan, activities, its own cursor, artifacts imported with lineage, questions answered in the composer, multi-turn via `previous_response_id`), `codex` (a Codex thread with the fal-os MCP configured). See `src/drivers.ts`.
+- **Queued messages**: the host sends `queue` frames while a chat runs; the runtime injects them into the SDK query at the next tool call (streaming input, `priority: "next"`) and reports `injected`.
+- **Attribution**: every event has `agent` (+ `parent` for subagents); subagent text is forwarded (`forwardSubagentText`); `session.agent` frames tell the host which subagent owns a fal-os session. All MCP connections send `X-Falos-Chat`.
+- **Errors**: SDK result errors are logged, shown briefly, and the run auto-resumes once in the same session; then `status: error` with `actions: ["continue"]` (`chat.continue`).
+- **Batches**: agents use the host's `generate_batch` for many outputs (one call, parallel jobs).
 
 ## Multiple chats
 - Chats run concurrently, one SDK query each. A follow-up to a busy chat queues behind its current turn.

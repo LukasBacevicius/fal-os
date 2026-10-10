@@ -55,9 +55,30 @@ already in use). Two frame kinds:
 {"type":"claim_revoked","canvas":"main","node":"881s9r","actor":"codex","by":"lukas"}
 {"type":"annotation_assigned","canvas":"main","annotation":"yflw1y","node":"881s9r","assignee":"codex","by":"lukas"}
 {"type":"job","canvas":"main","node":"b59dlc","model":"fal-ai/flux/dev","status":"queued|running|done|failed","queue_position":3,"error":"…"}
+{"type":"batch","canvas":"main","batch":{"kind":"batch","id":"batch_…","model":"fal-ai/flux/schnell","total":200,"done":37,"failed":0,"running":120,"finished":false,"frame":"b…","nodes":null}}
+{"type":"activity","canvas":"main","session":"s_…","agent":"generator-2","chat":"c_…"|null,"color":"#7393c2","op":"read"|"write"|"edit"|"delete","nodes":["…"],"at":1760000000000}
+{"type":"activity.clear","session":"s_…","nodes":["…"]|null}           // null = everything (finish_working without ids, session end)
+{"type":"agent.connected","client":"claude","clientName":"claude-code","agentName":"Claude Code","session":"s_…","chat":"ext:claude-1","transport":"http"|"stdio"}
+{"type":"agent.first_write","client":"claude","session":"s_…","canvas":"main","nodes":["…"]}
+{"type":"agent.registered","client":"claude","ok":true,"path":"/Users/me/.claude.json","changed":true}   // reply to agent.register; on failure ok:false, path:null, error
 {"type":"error","message":"…"}
 ```
-`SessionInfo = {id, agentName, actor, kind: "human"|"agent", color, presence: {status, canvas?, cursor?: [x,y], viewport?: [x,y,w,h], last_activity}}`
+`SessionInfo = {id, agentName, actor, kind: "human"|"agent", color, presence: {status, canvas?, cursor?: [x,y], viewport?: [x,y,w,h], last_activity}, chat, agent, parent?, label, state, client?}`
+- `chat`: the chat the session works for (`c_…` for the runtime's agents, `ext:<client>-<n>` for external agents), else null. `color` is then the chat's color.
+- `agent`: the runtime's subagent label (`generator-2`, set via the runtime's `session.agent`) or the actor id; `parent`: its parent agent.
+- `label`: what the cursor shows: the `set_status` text, else the agent name. `state`: `thinking` (reading) | `writing` (changing) | `idle` (10 s without activity).
+- `client`: the normalized MCP client of external agents (`claude`, `codex`, `cursor`, `gemini`, `opencode`, else a slug of `clientInfo.name`).
+
+**Activity.** Every agent session has a working set of nodes it read or changed. Tool calls
+emit `activity`: `read`/`get_context`/`get_annotation` → `read`; `edit` → `write` for created
+nodes, `edit` for changed ones, `delete` for removed ones; `annotate` → `edit`;
+`generate`/`generate_batch`/`import_file` → `write`. Entries expire after 30 s (→
+`activity.clear` with the expired ids) or when the agent calls `finish_working`.
+
+**External agents and the connect flow.** An MCP session whose requests don't carry
+`X-Falos-Chat` is an external agent: on `session` the host creates its pseudo-chat
+`ext:<client>-<n>` (see CHAT-PROTOCOL.md), emits `agent.connected` (client from
+`clientInfo.name`), and `agent.first_write` on the session's first mutation.
 
 Agent presence is implicit: when an MCP session reads a subtree (`root`), edits, annotates,
 claims or generates, the host moves its `cursor` to the center of the last node it touched
@@ -71,7 +92,24 @@ for the connection's canvas; presence events are global.
 ```jsonc
 {"type":"presence","cursor":[x,y],"viewport":[x,y,w,h],"status":"…"}   // all optional
 {"type":"revoke_claim","node":"881s9r"}                                // human override
+{"type":"selection","nodes":["881s9r"]}                                 // the user's selection (get_selection, placement)
+{"type":"agent.register","client":"claude"|"codex"|"cursor"|"gemini"|"opencode"}  // → agent.registered
 ```
+`agent.register` writes the fal-os MCP server into that client's own config (same code as
+`falos-host register`): format-preserving, atomic, idempotent, refuses files it can't parse
+(e.g. JSONC with comments), new files 0600. Paths: `~/.claude.json`, `~/.codex/config.toml`,
+`~/.cursor/mcp.json`, `~/.gemini/settings.json`, `~/.config/opencode/opencode.json(c)`.
+Chat frames (`chat.*`) are in CHAT-PROTOCOL.md.
+
+## Stdio relay
+`falos-host mcp` is a stdio MCP server that relays to the running host's `/mcp` (URL and token
+from `~/.fal-os/host.json`), adding `X-Falos-From: stdio`. For clients that prefer stdio:
+`{"command": "falos-host", "args": ["mcp"]}`. Logs go to stderr.
+
+## Request headers (MCP)
+- `X-Falos-Chat: c_…`: sent by the agent runtime on its agents' connections; sessions created
+  there join that chat (color, activity, turn tracking for revert).
+- `X-Falos-From: stdio`: set by the relay.
 
 ## MCP tools
 All tools except `session` and `get_knowledge` require `sessionId` (no shared fallback).
@@ -93,5 +131,11 @@ tool result under `notices`.
 | `annotate(sessionId, canvas, nodeId, text, anchor?, assignee?)` | | Anchor in text syntax (`box(…)`, `frame(t) pt(…)`, …). |
 | `claim(sessionId, canvas, ids, ttlSecs?)` / `release(…, ids?)` | idempotent | Soft leases (default 120 s). Others get warnings, humans can revoke. |
 | `set_status(sessionId, text, canvas?, cursor?, viewport?)` | idempotent | Presence. |
-| `generate(sessionId, canvas, model, input, placement?)` | open-world | Returns the `generation` node id at once; fal queue job runs async and converts the node (same id) into the media node with an asset + lineage. Needs `FAL_KEY`. Future: MCP Tasks. |
+| `generate(sessionId, canvas, model, input, placement?)` | open-world | Returns the `generation` node id at once; fal queue job runs async and converts the node (same id) into the media node with an asset + lineage. Needs `FAL_KEY` (env or `~/.fal-os/fal.env`) or `falos-host login`. Without x/y, `placement` (`near?`) puts it in free space next to `near`, else the user's selection, never overlapping. |
+| `generate_batch(sessionId, canvas, model?, input?, count?, variations?, jobs?, parent?, near?, label?)` | open-world | Many outputs at once: all placeholders in one transaction in a grid in free space (frame "<label> ×N" for 8+), all jobs submitted in parallel (64 in flight), one shared poller (500 ms → 2 s backoff), downloads ×16, conversions coalesced every 150 ms. Returns `{batch, frame, total, nodes}` immediately; progress as `batch` events. Max 500 outputs. |
+| `await_batch(sessionId, batch, timeoutSecs?)` | read-only | Waits for a batch; → `{done, failed, finished, nodes, errors, seconds}`. |
+| `finish_working(sessionId, ids?)` | idempotent | Ends the activity highlight on `ids` (all when omitted) → `activity.clear`. |
+| `get_selection(sessionId)` | read-only | `{selections: [{actor, name, canvas, nodes: [{id, type, name, row}]}]}`: what the humans have selected. |
+| `find_space(sessionId, canvas, w, h, parent?, near?)` | read-only | A free `{x, y}` next to `near` / the selection. |
+| `chat_list` / `chat_new` / `chat_send` / `chat_read` / `chat_stop` | | Drive the in-app chats from an external agent (CHAT-PROTOCOL.md → External control). |
 | `get_knowledge(keys)` | read-only | `format`, `annotations`, `generation`, `collaboration`. |
