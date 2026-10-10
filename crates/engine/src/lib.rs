@@ -276,7 +276,12 @@ pub struct OverlayPrim {
     pub stroke_px: f32,
     pub radius_px: f32,
     pub shape: u32,
-    pub _pad: [u32; 3],
+    /// Animated shapes (`PULSE` and up): start time on the renderer clock (seconds, the
+    /// `time` passed to [`Renderer::render`]), and duration (0 = persistent).
+    pub t0: f32,
+    pub dur: f32,
+    /// Per-primitive random seed (dot patterns).
+    pub seed: f32,
 }
 
 impl OverlayPrim {
@@ -285,6 +290,31 @@ impl OverlayPrim {
     pub const CURSOR: u32 = 2;
     pub const DASHED: u32 = 3;
     pub const PIN: u32 = 4;
+    /// Agent activity (UX-V1 §4), animated in the shader from `t0`/`dur` and the clock:
+    /// a slowly pulsing outline (persistent while an agent works on a frame).
+    pub const PULSE: u32 = 5;
+    /// Read: a band sweeping upward over the rect.
+    pub const SWEEP_UP: u32 = 6;
+    /// Write: a band sweeping downward, revealing the rect.
+    pub const SWEEP_DOWN: u32 = 7;
+    /// Edit: an outline flash that decays.
+    pub const FLASH: u32 = 8;
+    /// Delete: a filled ghost that fades out.
+    pub const GHOST: u32 = 9;
+    /// Drifting dots in a strip (the "rain" on a worked frame's title line).
+    pub const RAIN: u32 = 10;
+    /// An outline that fades in, holds and fades out (sequential child outlines).
+    pub const BLINK: u32 = 11;
+
+    /// Whether the shape animates (needs frames while live).
+    pub fn animated(&self) -> bool {
+        self.shape >= Self::PULSE
+    }
+
+    /// An animated world rect: `shape` is one of the activity shapes.
+    pub fn activity(r: [f32; 4], shape: u32, fill: u32, stroke: u32, stroke_px: f32, t0: f32, dur: f32) -> Self {
+        Self { shape, t0, dur, ..Self::rect(r, fill, stroke, stroke_px) }
+    }
 
     /// A world-space rect `[x, y, w, h]`.
     pub fn rect(r: [f32; 4], fill: u32, stroke: u32, stroke_px: f32) -> Self {
@@ -479,6 +509,9 @@ pub struct Renderer {
     overlay_cap: usize,
     overlay: Vec<OverlayPrim>,
     overlay_dirty: bool,
+    /// Renderer-clock time until which animated overlay primitives are live.
+    overlay_anim_until: f32,
+    overlay_fast_until: f32,
 
     dpr: f32,
     /// Time of the last rendered frame (s).
@@ -617,7 +650,8 @@ impl Renderer {
             std::mem::size_of::<OverlayPrim>() as u64,
             &wgpu::vertex_attr_array![
                 0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2,
-                4 => Uint32, 5 => Uint32, 6 => Float32, 7 => Float32, 8 => Uint32
+                4 => Uint32, 5 => Uint32, 6 => Float32, 7 => Float32, 8 => Uint32,
+                9 => Float32, 10 => Float32, 11 => Float32
             ],
         );
         let overlay_cap = 256;
@@ -684,6 +718,8 @@ impl Renderer {
             overlay_cap,
             overlay: Vec::new(),
             overlay_dirty: false,
+            overlay_anim_until: f32::NEG_INFINITY,
+            overlay_fast_until: f32::NEG_INFINITY,
             dpr: 1.0,
             time: 0.0,
             animating: false,
@@ -1024,6 +1060,14 @@ impl Renderer {
             self.overlay.clear();
             self.overlay.extend_from_slice(prims);
             self.overlay_dirty = true;
+            // Animated primitives keep frames coming until the last one ends.
+            self.overlay_anim_until = prims
+                .iter()
+                .filter(|p| p.animated())
+                .map(|p| if p.dur <= 0.0 { f32::INFINITY } else { p.t0 + p.dur })
+                .fold(f32::NEG_INFINITY, f32::max);
+            self.overlay_fast_until =
+                prims.iter().filter(|p| p.animated() && p.dur > 0.0).map(|p| p.t0 + p.dur).fold(f32::NEG_INFINITY, f32::max);
         }
     }
 
@@ -1044,7 +1088,13 @@ impl Renderer {
     /// Whether a generating tile is on screen. Its dots move slowly, so the platform may redraw
     /// at a reduced rate (e.g. 30 Hz) while this is true, and not at all while it is false.
     pub fn animating(&self) -> bool {
-        self.animating
+        self.animating || self.time < self.overlay_anim_until
+    }
+
+    /// Whether a short overlay effect (sweep, flash, fade) is playing: those want every frame,
+    /// unlike the slow dots and pulses that [`Renderer::animating`] covers.
+    pub fn animating_fast(&self) -> bool {
+        self.time < self.overlay_fast_until
     }
 
     /// Restricts playback to these videos (e.g. hovered or selected); `None` plays every

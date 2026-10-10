@@ -1,5 +1,8 @@
 // Canvas-level UI drawn by the engine on top of the scene: selection outlines and handles,
-// marquee, annotation pins and boxes, remote cursors. One instanced draw of SDF primitives.
+// marquee, annotation pins and boxes, remote cursors, and agent activity (pulsing outlines,
+// read/write sweeps, edit flashes, delete ghosts, title-line dots). One instanced draw of SDF
+// primitives. Activity shapes animate here from their start time and the camera clock, so
+// the CPU uploads them once per event and only redraws.
 // Each primitive is anchored in world space with a world-space size (scales with zoom) plus a
 // screen-space offset/size (constant on screen), so handles and pins keep their pixel size.
 
@@ -22,6 +25,9 @@ struct Prim {
     @location(6) stroke_px: f32,
     @location(7) radius_px: f32,
     @location(8) shape: u32,
+    @location(9) t0: f32,
+    @location(10) dur: f32,
+    @location(11) seed: f32,
 };
 
 struct VsOut {
@@ -32,6 +38,7 @@ struct VsOut {
     @location(3) @interpolate(flat) stroke: vec4<f32>,
     @location(4) @interpolate(flat) params: vec3<f32>, // stroke_px, radius_px, shape
     @location(5) screen: vec2<f32>,
+    @location(6) @interpolate(flat) anim: vec3<f32>, // t0, dur, seed
 };
 
 const SHAPE_RECT: u32 = 0u;
@@ -39,6 +46,13 @@ const SHAPE_CIRCLE: u32 = 1u;
 const SHAPE_CURSOR: u32 = 2u;
 const SHAPE_DASHED: u32 = 3u;
 const SHAPE_PIN: u32 = 4u;
+const SHAPE_PULSE: u32 = 5u;
+const SHAPE_SWEEP_UP: u32 = 6u;
+const SHAPE_SWEEP_DOWN: u32 = 7u;
+const SHAPE_FLASH: u32 = 8u;
+const SHAPE_GHOST: u32 = 9u;
+const SHAPE_RAIN: u32 = 10u;
+const SHAPE_BLINK: u32 = 11u;
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 
@@ -62,6 +76,86 @@ fn vs(@builtin(vertex_index) vi: u32, prim: Prim) -> VsOut {
     out.stroke = unpack_color(prim.stroke);
     out.params = vec3(prim.stroke_px, prim.radius_px, f32(prim.shape));
     out.screen = screen;
+    out.anim = vec3(prim.t0, prim.dur, prim.seed);
+    return out;
+}
+
+fn hash11(n: f32) -> f32 {
+    return fract(sin(n * 127.1 + 311.7) * 43758.5453);
+}
+
+/// Activity shapes: everything derives from the clock, the start time and the rect.
+fn activity(in: VsOut, shape: u32, d: f32) -> vec4<f32> {
+    let t0 = in.anim.x;
+    let dur = max(in.anim.y, 1e-3);
+    let k = clamp((cam.time - t0) / dur, 0.0, 1.0);
+    let stroke_px = in.params.x;
+    let inside = clamp(0.5 - d, 0.0, 1.0);
+    let edge = clamp(0.5 - (abs(d) - stroke_px * 0.5), 0.0, 1.0);
+    // 0 at the top of the rect, 1 at the bottom.
+    let v = (in.p.y + in.half.y) / max(2.0 * in.half.y, 1.0);
+    var fa = 0.0; // fill alpha factor
+    var sa = 0.0; // stroke alpha factor
+    switch shape {
+        case SHAPE_PULSE: {
+            sa = 0.45 + 0.55 * (0.5 + 0.5 * sin((cam.time - t0) * 2.6));
+        }
+        case SHAPE_SWEEP_UP: {
+            // A soft band rising from below the rect to above it.
+            let c = 1.15 - k * 1.3;
+            let b = (v - c) / 0.14;
+            fa = exp(-b * b) * inside;
+            // A trail under the band that fades as it passes.
+            fa += 0.35 * smoothstep(c, c + 0.5, v) * (1.0 - smoothstep(c + 0.5, c + 0.9, v)) * inside * (1.0 - k);
+            sa = 0.5 * (1.0 - k);
+        }
+        case SHAPE_SWEEP_DOWN: {
+            // The band descends; above it the rect is tinted, and the tint fades out.
+            let c = -0.15 + k * 1.3;
+            let b = (v - c) / 0.12;
+            fa = (exp(-b * b) + 0.35 * step(v, c) * (1.0 - k)) * inside;
+            sa = smoothstep(0.0, 0.2, k) * (1.0 - smoothstep(0.6, 1.0, k));
+        }
+        case SHAPE_FLASH: {
+            let e = (1.0 - k) * (1.0 - k);
+            sa = e;
+            fa = 0.6 * e * inside;
+        }
+        case SHAPE_GHOST: {
+            let e = 1.0 - smoothstep(0.0, 1.0, k);
+            fa = e * inside;
+            sa = e;
+        }
+        case SHAPE_BLINK: {
+            sa = smoothstep(0.0, 0.15, k) * (1.0 - smoothstep(0.65, 1.0, k));
+        }
+        case SHAPE_RAIN: {
+            // Sparse 2 px squares in 10 px columns, each drifting down the strip on its own
+            // phase and twinkling in and out at the ends.
+            let col_w = 10.0 * cam.dpr;
+            let x = in.p.x + in.half.x;
+            let col = floor(x / col_w);
+            let h = hash11(col + in.anim.z * 17.0);
+            if h > 0.72 {
+                let speed = 0.35 + 0.5 * hash11(col * 3.1 + 1.7);
+                let ph = fract(h * 9.0 + (cam.time - t0) * speed);
+                let y = (ph - 0.5) * 2.0 * in.half.y;
+                let cx = (col + 0.5) * col_w - in.half.x;
+                let s = 1.0 * cam.dpr;
+                let q = abs(in.p - vec2(cx, y)) - vec2(s);
+                let dot = clamp(0.5 - max(q.x, q.y), 0.0, 1.0);
+                fa = dot * sin(ph * 3.14159);
+            }
+            return vec4(in.fill.rgb, 1.0) * in.fill.a * fa;
+        }
+        default: {}
+    }
+    let a = clamp(in.fill.a * fa, 0.0, 1.0);
+    var out = vec4(in.fill.rgb * a, a);
+    if stroke_px > 0.0 {
+        let s = edge * in.stroke.a * sa;
+        out = vec4(in.stroke.rgb * s, s) + out * (1.0 - s);
+    }
     return out;
 }
 
@@ -108,6 +202,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         default: {
             d = rounded_box_sdf(in.p, in.half, min(in.params.y, min(in.half.x, in.half.y)));
         }
+    }
+    if shape >= SHAPE_PULSE {
+        return activity(in, shape, rounded_box_sdf(in.p, in.half, 0.0));
     }
     let fill_a = clamp(0.5 - d, 0.0, 1.0) * in.fill.a;
     var out = vec4(in.fill.rgb * fill_a, fill_a);

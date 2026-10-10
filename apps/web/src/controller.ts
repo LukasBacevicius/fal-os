@@ -7,6 +7,8 @@ import type { CanvasApp } from './wasm';
 import type { NodeView, Pick } from './types';
 import { hostSync } from './sync';
 import { addChips, chipFromPick, type Chip } from './chat';
+import { trackNodes } from './activity';
+import { worldRects } from './geometry';
 
 export const CANVAS_ID = 'main';
 
@@ -16,6 +18,7 @@ let booting = false;
 function refreshNodes(app: CanvasApp) {
   const nodes = app.nodes() as NodeView[];
   hostSync()?.syncAssets(nodes);
+  trackNodes(nodes);
   setState({ nodes });
 }
 
@@ -40,6 +43,7 @@ export function attach(app: CanvasApp) {
     switch (type) {
       case 'selection':
         setState({ selection: payload as string[] });
+        hostSync()?.sendSelection(payload as string[]);
         break;
       case 'doc':
         if (payload.nodes) refreshNodes(app);
@@ -100,6 +104,40 @@ export async function importFiles(files: File[], at?: [number, number]) {
     toast(`import failed: ${e}`);
     return [];
   }
+}
+
+/** A screen point (CSS px) near the middle of the view where a ~`size` px box covers no
+ *  node, so attached files land in empty space; falls back to the center. */
+export function emptySpot(size = 260): [number, number] {
+  const { app, camera, nodes } = getState();
+  const c: [number, number] = [camera.width / 2, camera.height / 2];
+  if (!app) return c;
+  const rects = [...worldRects(nodes).values()];
+  const free = (sx: number, sy: number) => {
+    const [x0, y0] = app.screenToWorld(sx - size / 2, sy - size / 2);
+    const [x1, y1] = app.screenToWorld(sx + size / 2, sy + size / 2);
+    return !rects.some((r) => r[0] < x1 && r[0] + r[2] > x0 && r[1] < y1 && r[1] + r[3] > y0);
+  };
+  const step = size / 2;
+  for (let ring = 0; ring < 6; ring++) {
+    for (let dx = -ring; dx <= ring; dx++) {
+      for (let dy = -ring; dy <= ring; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
+        const p: [number, number] = [c[0] + dx * step, c[1] + dy * step];
+        if (p[0] < size / 2 || p[1] < size / 2 || p[0] > camera.width - size / 2 || p[1] > camera.height - size / 2) continue;
+        if (free(p[0], p[1])) return p;
+      }
+    }
+  }
+  return c;
+}
+
+/** Files dropped or pasted on the chat: imported as canvas nodes in empty space near the
+ *  view (uploaded to the host like any import) and attached as chips. */
+export async function attachFiles(files: File[]) {
+  if (!files.length) return;
+  const ids = await importFiles(files, emptySpot());
+  addContext(ids.map((node) => ({ kind: 'node', node })));
 }
 
 // ---- chat context ----------------------------------------------------------------------

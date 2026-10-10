@@ -112,7 +112,8 @@ export function TextLayer() {
     <div className="text-layer" style={{ transform: `translate(${-camera.x * z}px, ${-camera.y * z}px) scale(${z})` }}>
       {shown.map((n) => {
         const r = rects.get(n.id)!;
-        const style = { left: r[0], top: r[1], width: r[2], height: r[3], fontSize: NOTE_FONT };
+        const fs = Number(n.props?.fontSize);
+        const style = { left: r[0], top: r[1], width: r[2], height: r[3], fontSize: fs > 0 ? fs : NOTE_FONT };
         return (
           <div key={n.id} className="note-text" style={style}>
             {n.id === editing ? <Editor node={n} /> : n.text || (n.kind === 'text' ? <span className="faint">{n.name}</span> : null)}

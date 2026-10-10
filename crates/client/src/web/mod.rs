@@ -23,7 +23,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::api;
 use crate::interact::{Ctx, Effect, Interaction, Mods, PickRegion, Tool};
-use crate::overlay::{self, CursorView, OverlayInput, Palette};
+use crate::overlay::{self, ActivityFx, CursorView, OverlayInput, Palette};
 use crate::scene::{ChangeFeed, RenderSink, Scene, SceneNode};
 use crate::sync::{Incoming, LocalOnly, Outgoing, Presence, SyncTransport};
 use media::{Content, MediaStore, classify, content_of, source_spec};
@@ -60,6 +60,13 @@ struct App {
     presence: Vec<Presence>,
     /// Soft claims from the host: node ids (outlined in the overlay).
     claims: Vec<String>,
+    /// Transient agent-activity effects; `node` (when set) makes the effect follow the node.
+    fx: Vec<(Option<String>, ActivityFx)>,
+    /// Frames/groups agents are working on: persistent pulse + title-line dots.
+    working: Vec<(String, u32)>,
+    reduce_motion: bool,
+    /// Nodes highlighted from outside the canvas (layers row hover).
+    highlight: Vec<String>,
     palette: Palette,
     /// Generation nodes removed recently (id → ms): when a media node with the same id
     /// appears (the host converts a finished generation in place), it reveals with a crossfade.
@@ -339,8 +346,29 @@ impl App {
             .presence
             .iter()
             .filter(|p| p.actor != self.actor.id)
-            .filter_map(|p| Some(CursorView { world: p.cursor? }))
+            .filter_map(|p| Some(CursorView { world: p.cursor?, color: overlay::parse_color(&p.color) }))
             .collect();
+        let t = self.anim_time as f32;
+        let mut activity: Vec<ActivityFx> = Vec::with_capacity(self.fx.len() + self.working.len() * 2);
+        for (i, (id, color)) in self.working.iter().enumerate() {
+            let Some(n) = self.scene.get(id) else { continue };
+            if self.reduce_motion {
+                activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RECT, color: *color, t0: 0.0, dur: 0.0, seed: 0.0 });
+                continue;
+            }
+            activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::PULSE, color: *color, t0: 0.0, dur: 0.0, seed: 0.0 });
+            if matches!(n.kind, NodeKind::Frame | NodeKind::Group) {
+                activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RAIN, color: *color, t0: 0.0, dur: 0.0, seed: i as f32 + 1.0 });
+            }
+        }
+        for (node, f) in &self.fx {
+            if t < f.t0 && f.shape == OverlayPrim::RECT {
+                continue;
+            }
+            let rect = node.as_deref().and_then(|id| self.scene.get(id)).map_or(f.rect, |n| n.rect);
+            activity.push(ActivityFx { rect, ..f.clone() });
+        }
+        let highlight: Vec<[f32; 4]> = self.highlight.iter().filter_map(|id| self.scene.get(id)).map(|n| n.rect).collect();
         let outlines: Vec<[f32; 4]> = self
             .scene
             .iter()
@@ -360,6 +388,8 @@ impl App {
             outlines: &outlines,
             claims: &claims,
             cursors: &cursors,
+            activity: &activity,
+            highlight: &highlight,
             dpr: self.dpr,
             px_world: 1.0 / self.camera.zoom.max(1e-3),
         })
@@ -664,7 +694,14 @@ impl App {
         if !self.ix.dragging() && self.camera == self.last_camera {
             self.anim_time += dt / 1000.0;
         }
-        let animate = self.gpu.renderer.animating() && now - self.last_anim_frame >= ANIM_MS;
+        // Finished activity effects leave the overlay (and stop asking for frames).
+        let t = self.anim_time as f32;
+        let before = self.fx.len();
+        self.fx.retain(|(_, f)| t < f.t0 + f.dur);
+        if self.fx.len() != before {
+            self.dirty = true;
+        }
+        let animate = self.gpu.renderer.animating_fast() || (self.gpu.renderer.animating() && now - self.last_anim_frame >= ANIM_MS);
         if self.dirty || self.gpu.renderer.needs_redraw() || animate {
             self.render(now);
         }
@@ -1022,6 +1059,10 @@ impl CanvasApp {
                 failed: HashSet::new(),
                 presence: Vec::new(),
                 claims: Vec::new(),
+                fx: Vec::new(),
+                working: Vec::new(),
+                reduce_motion: false,
+                highlight: Vec::new(),
                 palette: overlay::DARK,
                 gen_removed: HashMap::new(),
                 reveal: HashSet::new(),
@@ -1580,6 +1621,92 @@ impl CanvasApp {
         let mut a = self.app.borrow_mut();
         a.presence = serde_json::from_value(from_js(&presence)).unwrap_or_default();
         a.dirty = true;
+    }
+
+    /// One agent-activity event (UX-V1 §4): `{op: "read"|"write"|"edit"|"delete", nodes: [id],
+    /// color: "#rrggbb", rects?: {id: [x, y, w, h]}}` (world rects for nodes that are already
+    /// gone, e.g. deletes). Drawn in the chat color; animated on the GPU unless motion is
+    /// reduced, in which case it is a short static outline.
+    pub fn activity(&self, event: JsValue) {
+        let v = from_js(&event);
+        let mut a = self.app.borrow_mut();
+        let Some(color) = v["color"].as_str().and_then(overlay::parse_color) else { return };
+        let t = a.anim_time as f32;
+        let reduce = a.reduce_motion;
+        let op = v["op"].as_str().unwrap_or("");
+        let ids: Vec<String> = v["nodes"].as_array().map(|l| l.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        let mut add = Vec::new();
+        for (i, id) in ids.iter().take(24).enumerate() {
+            let given = v["rects"][id.as_str()].as_array().and_then(|r| {
+                let f: Vec<f32> = r.iter().filter_map(|x| x.as_f64().map(|x| x as f32)).collect();
+                (f.len() == 4).then(|| [f[0], f[1], f[2], f[3]])
+            });
+            let node = a.scene.get(id);
+            let Some(rect) = node.map(|n| n.rect).or(given) else { continue };
+            let seed = i as f32;
+            let fx = |shape, t0, dur| ActivityFx { rect, shape, color, t0, dur, seed };
+            let follow = node.is_some().then(|| id.clone());
+            if reduce {
+                add.push((follow, fx(OverlayPrim::RECT, t, 1.2)));
+                continue;
+            }
+            match op {
+                "read" => add.push((follow, fx(OverlayPrim::SWEEP_UP, t, 0.9))),
+                "write" => {
+                    add.push((follow.clone(), fx(OverlayPrim::SWEEP_DOWN, t, 1.0)));
+                    // Then the container's children outline one after another (capped).
+                    let kids: Vec<(String, [f32; 4])> =
+                        a.scene.iter().filter(|c| c.parent.as_deref() == Some(id.as_str())).take(6).map(|c| (c.id.clone(), c.rect)).collect();
+                    for (j, (kid, r)) in kids.into_iter().enumerate() {
+                        add.push((Some(kid), ActivityFx { rect: r, shape: OverlayPrim::BLINK, color, t0: t + 0.45 + j as f32 * 0.12, dur: 1.2, seed }));
+                    }
+                }
+                "edit" => add.push((follow, fx(OverlayPrim::FLASH, t, 0.7))),
+                "delete" => add.push((None, fx(OverlayPrim::GHOST, t, 0.8))),
+                _ => {}
+            }
+        }
+        // Bounded: the oldest effects give way.
+        a.fx.extend(add);
+        let n = a.fx.len();
+        if n > 96 {
+            a.fx.drain(..n - 96);
+        }
+        a.dirty = true;
+    }
+
+    /// Frames/groups (or nodes) agents are working on right now: `[{node, color}]`.
+    #[wasm_bindgen(js_name = setWorking)]
+    pub fn set_working(&self, list: JsValue) {
+        let v = from_js(&list);
+        let next: Vec<(String, u32)> = v
+            .as_array()
+            .map(|l| l.iter().filter_map(|w| Some((w["node"].as_str()?.to_string(), overlay::parse_color(w["color"].as_str()?)?))).collect())
+            .unwrap_or_default();
+        let mut a = self.app.borrow_mut();
+        if a.working != next {
+            a.working = next;
+            a.dirty = true;
+        }
+    }
+
+    /// "Reduce motion": activity draws as static outlines instead of sweeps and pulses.
+    #[wasm_bindgen(js_name = setReduceMotion)]
+    pub fn set_reduce_motion(&self, on: bool) {
+        let mut a = self.app.borrow_mut();
+        a.reduce_motion = on;
+        a.dirty = true;
+    }
+
+    /// Outlines nodes from outside the canvas (layers row hover); `[]` clears.
+    #[wasm_bindgen(js_name = setHighlight)]
+    pub fn set_highlight(&self, ids: JsValue) {
+        let ids: Vec<String> = serde_json::from_value(from_js(&ids)).unwrap_or_default();
+        let mut a = self.app.borrow_mut();
+        if a.highlight != ids {
+            a.highlight = ids;
+            a.dirty = true;
+        }
     }
 
     /// Sends the local user's presence through the transport.
