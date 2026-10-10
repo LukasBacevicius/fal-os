@@ -1,0 +1,30 @@
+[package]
+name = "falos-host"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+falos-doc = { path = "../doc" }
+rmcp = { version = "3.5", features = ["server", "macros", "transport-streamable-http-server"] }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+schemars = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rand = "0.9"
+toml_edit = "0.25"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+sha2 = "0.10"
+
+[dev-dependencies]
+rmcp = { version = "3.5", features = ["client", "transport-streamable-http-client-reqwest"] }
+tempfile = "3"
+tokio-tungstenite = "0.29"
+futures = "0.3"
