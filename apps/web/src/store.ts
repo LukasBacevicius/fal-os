@@ -21,7 +21,13 @@ export interface State {
   tool: Tool;
   draft: Draft | null;
   presence: Presence[];
-  simulateAgents: boolean;
+  /** Host connection (`local` = no host found). */
+  conn: import("./sync").ConnState;
+  hostAddr: string | null;
+  /** Other sessions (agents, other humans) on the host. */
+  sessions: import("./sync").SessionInfo[];
+  claims: { node: string; actor: string; color: string }[];
+  jobs: Record<string, import("./sync").JobInfo>;
   toast: string | null;
   saved: 'idle' | 'saving' | 'saved';
 }
@@ -43,7 +49,11 @@ let state: State = {
   tool: 'select',
   draft: null,
   presence: [],
-  simulateAgents: false,
+  conn: "local",
+  hostAddr: null,
+  sessions: [],
+  claims: [],
+  jobs: {},
   toast: null,
   saved: 'idle',
 };

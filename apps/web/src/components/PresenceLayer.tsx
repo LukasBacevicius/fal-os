@@ -12,7 +12,7 @@ export function PresenceLayer() {
         if (!p.cursor) return null;
         const [x, y] = app.worldToScreen(p.cursor[0], p.cursor[1]);
         return (
-          <div key={p.actor} className="cursor-label" style={{ transform: `translate(${x + 14}px, ${y + 18}px)`, background: p.color }}>
+          <div key={p.actor} className="cursor-label" style={{ transform: `translate(${x + 14}px, ${y + 18}px)`, background: p.color, opacity: p.opacity ?? 1 }}>
             <span className="cursor-name">{p.name}</span>
             {p.status && <span className="cursor-status">{p.status}</span>}
           </div>

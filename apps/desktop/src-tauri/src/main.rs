@@ -31,8 +31,25 @@ addEventListener('load', async () => {
 });
 "#;
 
+/// The local fal-os host's discovery file (`~/.fal-os/host.json`, `$FALOS_HOME/host.json`):
+/// `{port, token, project}` for the web app's sync connection, or null when no host runs.
+#[tauri::command]
+fn host_info() -> Option<serde_json::Value> {
+    let home = std::env::var_os("FALOS_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".fal-os")))?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.join("host.json")).ok()?).ok()?;
+    Some(serde_json::json!({
+        "port": v.get("port")?,
+        "token": v.get("token")?,
+        "project": v.get("project"),
+    }))
+}
+
 fn main() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![host_info])
         .setup(|app| {
             let url = match std::env::var("FALOS_URL") {
                 Ok(u) => WebviewUrl::External(u.parse()?),

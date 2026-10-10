@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { setState, useStore } from '../store';
-import { AGENTS, ME } from '../agents';
+import { useStore } from '../store';
+import { ME, initials } from '../agents';
+import { IDLE_MS } from '../sync';
 import { exportCanvas, importCanvas, loadSamples, newCanvas } from '../controller';
 import { IconMore, IconRedo, IconUndo } from '../icons';
 import { Avatar } from './Avatar';
@@ -8,8 +9,9 @@ import { Avatar } from './Avatar';
 export function TopBar() {
   const app = useStore((s) => s.app);
   const name = useStore((s) => s.canvasName);
-  const presence = useStore((s) => s.presence);
-  const simulate = useStore((s) => s.simulateAgents);
+  const sessions = useStore((s) => s.sessions);
+  const conn = useStore((s) => s.conn);
+  const hostAddr = useStore((s) => s.hostAddr);
   const annotations = useStore((s) => s.annotations);
   const [menu, setMenu] = useState(false);
   const open = useRef<HTMLInputElement>(null);
@@ -33,31 +35,32 @@ export function TopBar() {
           <svg width="18" height="18" viewBox="0 0 24 24"><path d="M4 4h16v4H8v4h9v4H8v4H4z" fill="currentColor" /></svg>
         </div>
         <div className="crumbs">
-          <span className="crumb-dim">Local project</span>
+          <span className="crumb-dim">{conn === 'local' ? 'Local project' : 'Host project'}</span>
           <span className="crumb-sep">/</span>
           <span className="crumb">{name}</span>
         </div>
       </div>
       <div className="topbar-right">
-        <div className="presence" aria-label="Agents on this canvas">
-          {AGENTS.map((a) => {
-            const p = presence.find((x) => x.actor === a.id);
-            const n = assigned(a.id);
+        <div className="presence" aria-label="Who is on this canvas">
+          {sessions.map((s) => {
+            const active = Date.now() - s.presence.last_activity < IDLE_MS;
+            const n = assigned(s.actor);
+            const a = { id: s.actor, name: s.agentName, kind: s.kind, color: s.color, initials: initials(s.agentName) };
             return (
-              <div key={a.id} className={`presence-item ${p ? 'live' : ''}`} title={`${a.name}${p?.status ? ` — ${p.status}` : p ? ' — on canvas' : ' — not connected'}${n ? ` · ${n} open task${n > 1 ? 's' : ''}` : ''}`}>
-                <Avatar actor={a} size={24} ring={!!p} />
+              <div key={s.id} className={`presence-item ${active ? 'live' : ''}`} title={`${s.agentName} (@${s.actor})${s.presence.status ? ` — ${s.presence.status}` : ''}${n ? ` · ${n} open task${n > 1 ? 's' : ''}` : ''}`}>
+                <Avatar actor={a} size={24} ring={active} />
                 {n > 0 && <span className="presence-badge">{n}</span>}
               </div>
             );
           })}
         </div>
-        <button
-          className={`toggle ${simulate ? 'on' : ''}`}
-          onClick={() => setState({ simulateAgents: !simulate })}
-          title="Simulate agent presence (local demo; real agents connect through the host)"
+        <span
+          className={`conn-pill ${conn}`}
+          title={conn === 'local' ? 'No fal-os host found: this canvas lives in the browser' : `fal-os host ${hostAddr ?? ''}`}
         >
-          <span className="toggle-dot" /> Live agents
-        </button>
+          <span className="conn-dot" />
+          {conn === 'local' ? 'Local' : conn === 'connected' ? 'Live' : conn === 'connecting' ? 'Connecting…' : 'Reconnecting…'}
+        </span>
         <div className="topbar-sep" />
         <button className="icon-btn" title="Undo (⌘Z)" onClick={() => app?.undo()}><IconUndo /></button>
         <button className="icon-btn" title="Redo (⇧⌘Z)" onClick={() => app?.redo()}><IconRedo /></button>
