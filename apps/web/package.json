@@ -6,7 +6,6 @@
   "scripts": {
     "build:wasm": "sh scripts/build-wasm.sh",
     "build:wasm:dev": "sh scripts/build-wasm.sh dev",
-    "samples": "sh scripts/make-samples.sh",
     "dev": "sh scripts/build-wasm.sh dev && vite",
     "build": "sh scripts/build-wasm.sh && tsc -b && vite build",
     "preview": "vite preview",

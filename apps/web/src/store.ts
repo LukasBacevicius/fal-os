@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react';
-import type { AnnotationView, CameraView, Draft, NodeView, Presence, Stats, Tool } from './types';
+import type { CameraView, NodeView, Presence, Stats, Tool } from './types';
 import type { CanvasApp } from './wasm';
+import type { ChatState } from './chat';
+import { emptyChat } from './chat';
 
 export interface AssetInfo { id: string; mime: string; name: string; size: number }
 
@@ -10,24 +12,27 @@ export interface State {
   loading: boolean;
   canvasName: string;
   nodes: NodeView[];
-  annotations: AnnotationView[];
-  assets: AssetInfo[];
   selection: string[];
-  selectedAnnotation: string | null;
   hoverNode: string | null;
-  hoverAnnotation: string | null;
+  /** Note/text node being edited in place. */
+  editing: string | null;
   camera: CameraView;
   stats: Stats | null;
   tool: Tool;
-  draft: Draft | null;
   presence: Presence[];
   /** Host connection (`local` = no host found). */
-  conn: import("./sync").ConnState;
+  conn: import('./sync').ConnState;
   hostAddr: string | null;
   /** Other sessions (agents, other humans) on the host. */
-  sessions: import("./sync").SessionInfo[];
-  claims: { node: string; actor: string; color: string }[];
-  jobs: Record<string, import("./sync").JobInfo>;
+  sessions: import('./sync').SessionInfo[];
+  claims: { node: string; actor: string }[];
+  jobs: Record<string, import('./sync').JobInfo>;
+  chat: ChatState;
+  chatOpen: boolean;
+  /** Left outline of frames/groups; null = automatic (shown when the canvas has any). */
+  outlineOpen: boolean | null;
+  /** Modal overlay: command palette or the shortcut list. */
+  overlay: 'palette' | 'help' | null;
   toast: string | null;
   saved: 'idle' | 'saving' | 'saved';
 }
@@ -36,24 +41,37 @@ let state: State = {
   app: null,
   error: null,
   loading: true,
-  canvasName: 'Untitled',
+  canvasName: 'main',
   nodes: [],
-  annotations: [],
-  assets: [],
   selection: [],
-  selectedAnnotation: null,
   hoverNode: null,
-  hoverAnnotation: null,
+  editing: null,
   camera: { x: 0, y: 0, zoom: 1, width: 0, height: 0 },
   stats: null,
   tool: 'select',
-  draft: null,
   presence: [],
-  conn: "local",
+  conn: 'local',
   hostAddr: null,
   sessions: [],
   claims: [],
   jobs: {},
+  chat: emptyChat(),
+  chatOpen: (() => {
+    try {
+      return localStorage.getItem('falos.chatClosed') !== '1';
+    } catch {
+      return true;
+    }
+  })(),
+  overlay: null,
+  outlineOpen: (() => {
+    try {
+      const v = localStorage.getItem('falos.outline');
+      return v === '1' ? true : v === '0' ? false : null;
+    } catch {
+      return null;
+    }
+  })(),
   toast: null,
   saved: 'idle',
 };

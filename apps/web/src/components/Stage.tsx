@@ -1,22 +1,36 @@
 import { useEffect, useRef, useState } from 'react';
 import { createCanvasApp } from '../wasm';
 import { getState, setState, useStore } from '../store';
-import { attach, CANVAS_ID, importFiles, loadSamples, restore } from '../controller';
-import { ME } from '../agents';
+import { attach, CANVAS_ID, importFiles, restore } from '../controller';
 import { connectHost, hostSync } from '../sync';
 import { NodeOverlays } from './NodeOverlays';
-import { Composer } from './Composer';
 import { PresenceLayer } from './PresenceLayer';
-import { Toolbar } from './Toolbar';
 import { StatusBar } from './StatusBar';
-import { IconUpload } from '../icons';
+import { TextLayer, createNote, editNode } from './TextLayer';
+import { installKeys, pointer } from '../keys';
+import { theme } from '../theme';
+
+/** The local user. The host suffixes the actor id if several browsers connect. */
+const ME = { id: 'you', name: 'you' };
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 
-function editable(t: EventTarget | null) {
-  const el = t as HTMLElement | null;
-  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+/** Backing-store step (CSS px): the canvas is allocated at the window size rounded up to
+ *  this, so resizing the visible area (window drag, chat panel) only moves the GPU viewport. */
+const BUCKET = 64;
+
+/** Visible size in device pixels + over-allocated backing store size, for `resizePx`. */
+function canvasSizes(wrap: HTMLElement, entry?: ResizeObserverEntry): [number, number, number, number, number] {
+  const dpr = devicePixelRatio || 1;
+  const r = wrap.getBoundingClientRect();
+  const dp = entry?.devicePixelContentBoxSize?.[0];
+  const vw = Math.max(1, dp ? dp.inlineSize : Math.round(r.width * dpr));
+  const vh = Math.max(1, dp ? dp.blockSize : Math.round(r.height * dpr));
+  const bw = Math.ceil(Math.max(r.width, innerWidth) / BUCKET) * BUCKET;
+  const bh = Math.ceil(Math.max(r.height, innerHeight) / BUCKET) * BUCKET;
+  return [vw, vh, Math.max(vw, Math.round(bw * dpr)), Math.max(vh, Math.round(bh * dpr)), dpr];
 }
+
 
 /** The canvas surface: owns the wasm app, forwards input, hosts DOM overlays. */
 export function Stage() {
@@ -33,24 +47,23 @@ export function Stage() {
     let disposed = false;
     let created: { stop(): void } | null = null;
     const el = canvas.current!;
-    const box = wrap.current!.getBoundingClientRect();
-    el.width = Math.max(1, Math.round(box.width * devicePixelRatio));
-    el.height = Math.max(1, Math.round(box.height * devicePixelRatio));
-    createCanvasApp(el, { actor: { id: ME.id, name: ME.name }, canvas: { id: CANVAS_ID, name: 'Untitled canvas' } })
+    const initial = canvasSizes(wrap.current!);
+    el.width = initial[2];
+    el.height = initial[3];
+    el.style.width = `${initial[2] / initial[4]}px`;
+    el.style.height = `${initial[3] / initial[4]}px`;
+    createCanvasApp(el, { actor: ME, canvas: { id: CANVAS_ID, name: CANVAS_ID } })
       .then(async (a) => {
         if (disposed) return;
         created = a;
         attach(a);
-        a.resize(box.width, box.height, devicePixelRatio);
+        a.setTheme(theme());
+        a.resizePx(...canvasSizes(wrap.current!));
         setState({ app: a });
-        const hosted = await connectHost(a, CANVAS_ID, { id: ME.id, name: ME.name });
+        const hosted = await connectHost(a, CANVAS_ID, ME);
         await restore(a, hosted);
         a.start();
         setState({ loading: false });
-        // `?samples`: seed an empty canvas with the generated sample media (demos, shell probes).
-        if (new URLSearchParams(location.search).has('samples') && getState().nodes.length === 0) {
-          await loadSamples();
-        }
         (window as any).falos = a; // handy for debugging and agents driving the page
       })
       .catch((e) => setState({ error: String(e?.message ?? e), loading: false }));
@@ -62,15 +75,33 @@ export function Stage() {
     };
   }, []);
 
-  // Size + DPR tracking.
+  // Size + DPR tracking. The ResizeObserver callback runs after layout and before paint;
+  // `resizePx` reconfigures (only when the backing bucket changes) and draws a frame in the
+  // same task, so the browser never shows a cleared or stretched canvas.
   useEffect(() => {
     if (!app) return;
-    const ro = new ResizeObserver(() => {
-      const r = wrap.current!.getBoundingClientRect();
-      app.resize(r.width, r.height, devicePixelRatio);
-    });
-    ro.observe(wrap.current!);
-    return () => ro.disconnect();
+    let last = '';
+    const apply = (entry?: ResizeObserverEntry) => {
+      const s = canvasSizes(wrap.current!, entry);
+      const key = s.join(',');
+      if (key === last) return;
+      last = key;
+      app.resizePx(...s);
+    };
+    const ro = new ResizeObserver((entries) => apply(entries[entries.length - 1]));
+    try {
+      ro.observe(wrap.current!, { box: 'device-pixel-content-box' });
+    } catch {
+      ro.observe(wrap.current!); // WebKit: no device-pixel-content-box
+    }
+    // Window growth past the backing bucket without a stage size change (rare) and DPR
+    // changes in browsers without device-pixel boxes.
+    const onWin = () => apply();
+    window.addEventListener('resize', onWin);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', onWin);
+    };
   }, [app]);
 
   // Pointer, wheel and gesture input.
@@ -83,12 +114,17 @@ export function Stage() {
     };
     const meta = (e: MouseEvent | KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
     const down = (e: PointerEvent) => {
+      // The canvas isn't focusable: clicking it must still take focus away from the chat
+      // input (or a note editor) so canvas shortcuts work.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== document.body) active.blur();
       el.setPointerCapture(e.pointerId);
       const [x, y] = pos(e);
       app.pointerDown(x, y, e.button, e.shiftKey, e.altKey, meta(e));
     };
     const move = (e: PointerEvent) => {
       const [x, y] = pos(e);
+      pointer.at = [x, y];
       app.pointerMove(x, y, e.shiftKey, e.altKey, meta(e));
       const sync = hostSync();
       if (sync) {
@@ -118,6 +154,17 @@ export function Stage() {
       lastScale = e.scale;
     };
     const ctx = (e: Event) => e.preventDefault();
+    // Double-click: edit a note/text in place, or create a note on empty canvas.
+    const dbl = (e: MouseEvent) => {
+      const [x, y] = pos(e);
+      // Groups: the first double-click enters the group (selects inside it).
+      const r = app.doubleClick(x, y) as { entered: string | null; node: string | null };
+      if (r.entered) return;
+      const n = r.node ? getState().nodes.find((m) => m.id === r.node) : null;
+      if (n && (n.kind === 'note' || n.kind === 'text')) editNode(n.id);
+      else if (!n || n.kind === 'frame') createNote([x, y]);
+    };
+    el.addEventListener('dblclick', dbl);
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
@@ -137,26 +184,12 @@ export function Stage() {
       el.removeEventListener('gesturestart', gstart as any);
       el.removeEventListener('gesturechange', gchange as any);
       el.removeEventListener('contextmenu', ctx);
+      el.removeEventListener('dblclick', dbl);
     };
   }, [app]);
 
-  // Keyboard shortcuts (ignored while typing in inputs).
-  useEffect(() => {
-    if (!app) return;
-    const kd = (e: KeyboardEvent) => {
-      if (editable(e.target)) return;
-      if (app.keyDown(e.key, e.shiftKey, e.altKey, isMac ? e.metaKey : e.ctrlKey)) e.preventDefault();
-    };
-    const ku = (e: KeyboardEvent) => {
-      if (!editable(e.target)) app.keyUp(e.key);
-    };
-    window.addEventListener('keydown', kd);
-    window.addEventListener('keyup', ku);
-    return () => {
-      window.removeEventListener('keydown', kd);
-      window.removeEventListener('keyup', ku);
-    };
-  }, [app]);
+  // Keyboard: see keys.ts (one handler for the whole app).
+  useEffect(() => installKeys(), []);
 
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
@@ -184,29 +217,12 @@ export function Stage() {
       onDrop={onDrop}
     >
       <canvas ref={canvas} className="stage-canvas" />
+      <TextLayer />
       <NodeOverlays />
       <PresenceLayer />
-      <Composer />
-      {!loading && !error && empty && (
-        <div className="empty">
-          <div className="empty-card">
-            <div className="empty-icon"><IconUpload size={22} /></div>
-            <div className="empty-title">Drop media to start</div>
-            <div className="empty-sub">Images, video, audio, 3D, PDFs and text — or paste a link.</div>
-            <button className="btn" onClick={() => loadSamples()}>Load sample media</button>
-          </div>
-        </div>
-      )}
-      {error && (
-        <div className="empty">
-          <div className="empty-card">
-            <div className="empty-title">Can't start the canvas</div>
-            <div className="empty-sub">{error}</div>
-          </div>
-        </div>
-      )}
-      {dragging && <div className="drop-hint"><span>Drop to add to canvas</span></div>}
-      <Toolbar />
+      {!loading && !error && empty && <div className="empty faint">drop files or press N · ? for keys</div>}
+      {error && <div className="empty">can't start the canvas: {error}</div>}
+      {dragging && <div className="drop-hint">drop to import</div>}
       <StatusBar />
     </div>
   );

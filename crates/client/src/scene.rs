@@ -256,16 +256,33 @@ impl Scene {
         self.order.clear();
     }
 
-    /// Full sync from the doc (initial load). Equivalent to applying "every node is dirty".
+    /// Full sync from a (possibly replaced) doc. Equivalent to applying "every node is dirty",
+    /// but nodes that still exist (same id) keep their engine handle and resident pixels, so
+    /// reloading a snapshot (host bootstrap, reconnect) never blanks the canvas; only nodes
+    /// that are gone are removed.
     pub fn rebuild(&mut self, canvas: &Canvas, sink: &mut impl RenderSink) {
         let tree = canvas.tree();
+        let alive: HashSet<String> = canvas.nodes().into_iter().map(|n| n.id).collect();
+        let gone: Vec<String> = self.nodes.keys().filter(|id| !alive.contains(*id)).cloned().collect();
+        for id in gone {
+            if let Some(n) = self.nodes.remove(&id) {
+                if let Some(h) = n.handle {
+                    sink.remove(h, &n);
+                }
+                self.by_tree.remove(&n.tree);
+            }
+        }
+        // Tree ids may differ in a replaced doc; nodes are matched by id in `upsert`.
+        self.by_tree.clear();
+        for n in self.nodes.values() {
+            self.by_tree.insert(n.tree, n.id.clone());
+        }
         let changes = DocChanges {
             dirty: tree.get_nodes(false).into_iter().map(|n| n.id).collect(),
             structure: true,
             any: true,
             ..Default::default()
         };
-        self.clear(sink);
         self.apply(canvas, &changes, sink);
     }
 
@@ -360,6 +377,11 @@ impl Scene {
         match self.nodes.get_mut(&n.id) {
             Some(cur) => {
                 n.handle = cur.handle;
+                if cur.tree != n.tree {
+                    // Same node in a replaced doc (snapshot reload).
+                    self.by_tree.remove(&cur.tree);
+                    self.by_tree.insert(n.tree, n.id.clone());
+                }
                 if *cur == n {
                     return;
                 }
@@ -640,6 +662,24 @@ mod tests {
         assert!(ch.dirty.is_empty());
         f.scene.apply(&f.canvas, &ch, &mut f.sink);
         assert!(f.log().is_empty());
+    }
+
+    #[test]
+    fn rebuild_from_a_replaced_doc_keeps_surviving_nodes() {
+        let mut f = Fixture::new();
+        f.apply(&[image("aaa", 0.0), image("bbb", 200.0)]);
+        let (a, b) = (f.handle("aaa"), f.handle("bbb"));
+        // The host's copy: same nodes plus one, minus one.
+        let mut other = Canvas::from_snapshot(&f.canvas.export_snapshot().unwrap()).unwrap();
+        other.apply(&me(), None, &[Command::DeleteNode { id: "bbb".into() }, image("ccc", 400.0)]).unwrap();
+        f.log();
+        f.scene.rebuild(&other, &mut f.sink);
+        let mut log = f.log();
+        log.sort();
+        assert_eq!(log, vec!["add ccc", "remove bbb"]);
+        assert_eq!(f.scene.get("aaa").unwrap().handle, Some(a));
+        assert!(f.sink.live.contains_key(&a) && !f.sink.live.contains_key(&b));
+        assert_eq!(f.scene.order(), ["aaa", "ccc"]);
     }
 
     #[test]

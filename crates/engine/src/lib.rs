@@ -34,6 +34,13 @@ const FLAG_LOW_READY: u32 = 4;
 const FLAG_HIDDEN: u32 = 8;
 const FLAG_FLAT: u32 = 16;
 
+/// Generating-tile modes (`Instance::tile[2]`, see `shader.wgsl`).
+const GEN_NONE: f32 = 0.0;
+const GEN_DOTS: f32 = 1.0;
+const GEN_REVEAL: f32 = 2.0;
+/// Crossfade from the dots to the media once its pixels are resident, seconds.
+pub const REVEAL_SECS: f32 = 0.2;
+
 /// Stable id of a node inside the renderer. Freed handles are reused.
 pub type Handle = u32;
 
@@ -72,6 +79,21 @@ pub struct NodeDesc {
     /// Maximum corner radius in screen pixels.
     pub radius: f32,
     pub hidden: bool,
+    /// Draw as a generating tile: sparse drifting square dots over `color` (one shader effect,
+    /// no CPU work per frame).
+    pub generating: Option<GenTile>,
+}
+
+/// A generation placeholder drawn by the shader (see [`NodeDesc::gen`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GenTile {
+    /// Per-node seed (dot layout, drift and twinkle phases).
+    pub seed: u32,
+    /// 0..1 draws a 1 px progress bar along the bottom; negative = unknown (no bar).
+    pub progress: f32,
+    /// The generation just completed: keep the dots until the node's pixels are resident, then
+    /// crossfade to them over [`REVEAL_SECS`].
+    pub reveal: bool,
 }
 
 impl Default for NodeDesc {
@@ -85,6 +107,7 @@ impl Default for NodeDesc {
             aspect: 0.0,
             radius: 6.0,
             hidden: false,
+            generating: None,
         }
     }
 }
@@ -213,7 +236,9 @@ struct CameraUniform {
     viewport: [f32; 2],
     zoom: f32,
     time: f32,
-    _pad: [f32; 2],
+    /// Device pixel ratio (generating-tile dots are sized in CSS pixels).
+    dpr: f32,
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -229,6 +254,8 @@ struct Instance {
     aspect: f32,
     radius: f32,
     hires_layer: i32,
+    /// Generating tile: seed (16 bit), progress (<0 = none), mode (`GEN_*`), crossfade start.
+    tile: [f32; 4],
 }
 
 /// One overlay primitive (see `overlay.wgsl`). Screen sizes are in physical pixels.
@@ -382,6 +409,8 @@ struct NodeState {
     low_ready: bool,
     /// Detail / hires tile requested from the platform and not yet provided.
     requested: [bool; 2],
+    /// Reveal crossfade start (renderer time, s); negative until pixels arrive.
+    fade_start: f32,
 }
 
 struct MipJob {
@@ -450,6 +479,17 @@ pub struct Renderer {
     overlay_cap: usize,
     overlay: Vec<OverlayPrim>,
     overlay_dirty: bool,
+
+    dpr: f32,
+    /// Time of the last rendered frame (s).
+    time: f32,
+    /// A generating tile is visible: the platform should keep drawing at its animation rate.
+    animating: bool,
+    /// A reveal crossfade is running (drawn every frame until it ends).
+    fading: bool,
+    /// Only these videos play (`None` = every visible video, up to the cap); the others show
+    /// their poster or last frame.
+    video_focus: Option<HashSet<Handle>>,
 }
 
 const TIER_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING
@@ -550,7 +590,8 @@ impl Renderer {
             std::mem::size_of::<Instance>() as u64,
             &wgpu::vertex_attr_array![
                 0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
-                3 => Uint32, 4 => Sint32, 5 => Uint32, 6 => Uint32, 7 => Float32, 8 => Float32, 9 => Sint32
+                3 => Uint32, 4 => Sint32, 5 => Uint32, 6 => Uint32, 7 => Float32, 8 => Float32, 9 => Sint32,
+                10 => Float32x4
             ],
         );
 
@@ -643,6 +684,11 @@ impl Renderer {
             overlay_cap,
             overlay: Vec::new(),
             overlay_dirty: false,
+            dpr: 1.0,
+            time: 0.0,
+            animating: false,
+            fading: false,
+            video_focus: None,
         }
     }
 
@@ -721,7 +767,7 @@ impl Renderer {
         if matches!(desc.content, Content::Synthetic(_)) {
             self.low_queue.push_back(h);
         }
-        self.nodes[h as usize] = Some(NodeState { desc, draw, low_ready: false, requested: [false; 2] });
+        self.nodes[h as usize] = Some(NodeState { desc, draw, low_ready: false, requested: [false; 2], fade_start: -1.0 });
         self.mark(draw);
         h
     }
@@ -910,6 +956,15 @@ impl Renderer {
             }
         };
         self.write_tile(tier, layer, origin, px);
+        let time = self.time;
+        if let Some(s) = self.state_mut(h)
+            && s.desc.generating.is_some_and(|g| g.reveal)
+            && s.fade_start < 0.0
+        {
+            // Pixels land on the GPU this frame; the crossfade starts with the next one.
+            s.fade_start = time + 1.0 / 60.0;
+            self.fading = true;
+        }
         self.refresh_instance(h);
         true
     }
@@ -983,6 +1038,28 @@ impl Renderer {
             || !self.video_pending.is_empty()
             || self.detail_backlog
             || self.synth_videos
+            || self.fading
+    }
+
+    /// Whether a generating tile is on screen. Its dots move slowly, so the platform may redraw
+    /// at a reduced rate (e.g. 30 Hz) while this is true, and not at all while it is false.
+    pub fn animating(&self) -> bool {
+        self.animating
+    }
+
+    /// Restricts playback to these videos (e.g. hovered or selected); `None` plays every
+    /// visible video up to the decoder cap.
+    pub fn set_video_focus(&mut self, focus: Option<&[Handle]>) {
+        let next = focus.map(|f| f.iter().copied().collect::<HashSet<_>>());
+        if next != self.video_focus {
+            self.video_focus = next;
+            self.overlay_dirty = true; // forces a frame so playback state updates
+        }
+    }
+
+    /// Device pixel ratio, for effects sized in CSS pixels.
+    pub fn set_pixel_ratio(&mut self, dpr: f32) {
+        self.dpr = dpr.max(0.5);
     }
 
     // ---- frame -------------------------------------------------------------------------------
@@ -990,6 +1067,7 @@ impl Renderer {
     /// Streams media within budget, then draws one frame into `target`.
     pub fn render(&mut self, target: &wgpu::TextureView, camera: &Camera, time: f32) -> FrameStats {
         self.frame += 1;
+        self.time = time;
         let mut stats = FrameStats { nodes: self.order.len(), ..Default::default() };
         self.stream_low_tier(&mut stats);
         self.stream_detail_tier(camera, time, &mut stats);
@@ -1013,7 +1091,7 @@ impl Renderer {
             }
             self.overlay_dirty = false;
         }
-        let cam = CameraUniform { offset: camera.offset, viewport: camera.viewport, zoom: camera.zoom, time, _pad: [0.0; 2] };
+        let cam = CameraUniform { offset: camera.offset, viewport: camera.viewport, zoom: camera.zoom, time, dpr: self.dpr, _pad: 0.0 };
         self.queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -1035,6 +1113,11 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The target may be larger than the visible viewport (the platform over-allocates
+            // its backing store so live resizes don't reconfigure the swapchain every frame):
+            // draw into the top-left `camera.viewport` region. The target must be at least
+            // that big.
+            pass.set_viewport(0.0, 0.0, camera.viewport[0].max(1.0), camera.viewport[1].max(1.0), 0.0, 1.0);
             if !self.instances.is_empty() {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
@@ -1111,6 +1194,7 @@ impl Renderer {
         let mut wanted: Vec<(Handle, f32)> = Vec::new();
         let mut videos: Vec<(Handle, f32)> = Vec::new();
         let real_video = self.video.is_some();
+        let (mut animating, mut fading) = (false, false);
         for &h in &self.order {
             let Some(s) = self.nodes[h as usize].as_ref() else { continue };
             let n = &s.desc;
@@ -1119,10 +1203,20 @@ impl Renderer {
             }
             stats.visible += 1;
             let px = n.size[0].max(n.size[1]) * camera.zoom;
+            if let Some(g) = n.generating {
+                if !g.reveal || s.fade_start < 0.0 {
+                    // Dots too small to see don't need frames.
+                    animating |= px >= 24.0;
+                } else if time - s.fade_start < REVEAL_SECS + 0.05 {
+                    fading = true;
+                }
+            }
             if px < b.detail_min_px || n.content == Content::None || n.kind == Kind::Flat {
                 continue;
             }
-            let is_video = n.kind == Kind::Video && (real_video || matches!(n.content, Content::Synthetic(_)));
+            let is_video = n.kind == Kind::Video
+                && (real_video || matches!(n.content, Content::Synthetic(_)))
+                && self.video_focus.as_ref().is_none_or(|f| f.contains(&h));
             if is_video { videos.push((h, px)) } else { wanted.push((h, px)) }
         }
         // Biggest on screen first.
@@ -1158,6 +1252,8 @@ impl Renderer {
         }
         stats.video_ms += video_start.elapsed().as_secs_f32() * 1000.0;
         stats.active_videos = videos.len();
+        self.animating = animating;
+        self.fading = fading;
         self.synth_videos = !real_video && !videos.is_empty();
 
         let mut uploads = 0;
@@ -1385,6 +1481,7 @@ impl Renderer {
         let hires = self.hires.node_slot.get(&h).map_or(-1, |&s| s as i32);
         let mut inst = instance_for(h, &s.desc, s.low_ready, slot);
         inst.hires_layer = hires;
+        inst.tile[3] = s.fade_start;
         let draw = s.draw;
         if self.instances[draw] != inst {
             self.instances[draw] = inst;
@@ -1662,6 +1759,10 @@ fn instance_for(h: Handle, n: &NodeDesc, low_ready: bool, detail_slot: i32) -> I
         aspect: n.aspect,
         radius: n.radius,
         hires_layer: -1,
+        tile: match n.generating {
+            None => [0.0, -1.0, GEN_NONE, -1.0],
+            Some(g) => [(g.seed & 0xffff) as f32, g.progress, if g.reveal { GEN_REVEAL } else { GEN_DOTS }, -1.0],
+        },
     }
 }
 
@@ -1702,4 +1803,23 @@ pub fn demo_scene(count: usize, videos: usize) -> Vec<NodeDesc> {
             node
         })
         .collect()
+}
+
+#[cfg(test)]
+mod shader_tests {
+    /// The WGSL sources parse and validate (catches shader errors without a GPU).
+    #[test]
+    fn shaders_validate() {
+        for (name, src) in [
+            ("shader", include_str!("shader.wgsl")),
+            ("overlay", include_str!("overlay.wgsl")),
+            ("blit", include_str!("blit.wgsl")),
+            ("mip", include_str!("mip.wgsl")),
+        ] {
+            let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
+    }
 }

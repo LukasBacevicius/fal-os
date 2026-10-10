@@ -1,19 +1,45 @@
+import { useEffect, useState } from 'react';
 import { useStore } from './store';
-import { TopBar } from './components/TopBar';
-import { LeftPanel } from './components/LeftPanel';
-import { RightPanel } from './components/RightPanel';
 import { Stage } from './components/Stage';
+import { ChatPanel } from './components/ChatPanel';
+import { Help, Palette } from './components/Palette';
+import { Outline } from './components/Outline';
 
+function stored(key: string, fallback: number) {
+  try {
+    const v = Number(localStorage.getItem(key));
+    return Number.isFinite(v) && v > 0 ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Canvas + chat. Nothing else unless something needs attention. */
 export function App() {
   const toast = useStore((s) => s.toast);
+  const chatOpen = useStore((s) => s.chatOpen);
+  const overlay = useStore((s) => s.overlay);
+  const outline = useStore((s) => s.outlineOpen ?? s.nodes.some((n) => n.kind === 'frame' || n.kind === 'group'));
+  const [chatWidth, setChatWidth] = useState(() => stored('falos.chatWidth', 360));
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('falos.chatWidth', String(chatWidth));
+      localStorage.setItem('falos.chatClosed', chatOpen ? '0' : '1');
+    } catch {
+      /* private mode */
+    }
+  }, [chatWidth, chatOpen]);
+
   return (
     <div className="app">
-      <TopBar />
       <div className="main">
-        <LeftPanel />
+        {outline && <Outline />}
         <Stage />
-        <RightPanel />
+        {chatOpen && <ChatPanel width={chatWidth} onResize={setChatWidth} />}
       </div>
+      {overlay === 'palette' && <Palette />}
+      {overlay === 'help' && <Help />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );

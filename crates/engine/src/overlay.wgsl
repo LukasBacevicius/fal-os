@@ -8,7 +8,8 @@ struct Camera {
     viewport: vec2<f32>,
     zoom: f32,
     time: f32,
-    _pad: vec2<f32>,
+    dpr: f32,
+    _pad: f32,
 };
 
 struct Prim {
