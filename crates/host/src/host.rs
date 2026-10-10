@@ -166,6 +166,8 @@ struct Open {
 pub struct HostOptions {
     pub fal_queue_url: String,
     pub fal_key: Option<String>,
+    /// Use the signed-in fal session (via the fal MCP relay) when there is no `fal_key`.
+    pub fal_session: bool,
     pub renderer: Box<dyn ContextRenderer>,
 }
 
@@ -175,6 +177,7 @@ impl Default for HostOptions {
             fal_queue_url: std::env::var("FALOS_FAL_QUEUE_URL")
                 .unwrap_or_else(|_| "https://queue.fal.run".into()),
             fal_key: std::env::var("FAL_KEY").ok().filter(|k| !k.is_empty()),
+            fal_session: true,
             renderer: Box::new(NoRenderer),
         }
     }

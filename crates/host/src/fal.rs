@@ -15,7 +15,20 @@ use falos_doc::{Actor, Asset, Command, Lineage, NodeKind, Props};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 
+use crate::fal_relay::Relay;
 use crate::host::{Event, Host};
+
+/// How jobs reach fal: the user's OAuth session through the fal MCP relay (default), or a
+/// raw `FAL_KEY` against the queue API (CI/tests).
+enum Backend {
+    Relay(&'static Relay),
+    Key(String),
+}
+
+fn relay(http: &reqwest::Client) -> &'static Relay {
+    static RELAY: std::sync::OnceLock<Relay> = std::sync::OnceLock::new();
+    RELAY.get_or_init(|| Relay::new(http.clone()))
+}
 
 const POLL: Duration = Duration::from_millis(1000);
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -42,11 +55,11 @@ pub fn start(
     input: Json,
     place: Placement,
 ) -> Result<String> {
-    let key = host
-        .opts
-        .fal_key
-        .clone()
-        .ok_or_else(|| anyhow!("FAL_KEY is not set for the fal-os host; set it in the host's environment and restart `falos-host serve`"))?;
+    let backend = match host.opts.fal_key.clone() {
+        Some(key) => Backend::Key(key),
+        None if host.opts.fal_session && Relay::available() => Backend::Relay(relay(&host.http)),
+        None => bail!("the fal-os host is not signed in to fal: ask the user to run `falos-host login`"),
+    };
     if model.is_empty() || model.contains("..") || model.starts_with('/') {
         bail!("bad model id `{model}`");
     }
@@ -98,7 +111,7 @@ pub fn start(
         node: node.clone(),
         model: model.into(),
         input,
-        key,
+        backend,
         requester: actor.id.clone(),
     };
     tokio::spawn(async move {
@@ -115,7 +128,7 @@ struct Job {
     node: String,
     model: String,
     input: Json,
-    key: String,
+    backend: Backend,
     requester: String,
 }
 
@@ -162,29 +175,99 @@ impl Job {
         self.event("failed", None, Some(err.into()));
     }
 
+    async fn submit(&self) -> Result<(String, Json)> {
+        match &self.backend {
+            Backend::Key(key) => {
+                let submit: Json = self
+                    .host
+                    .http
+                    .post(format!("{}/{}", self.host.opts.fal_queue_url, self.model))
+                    .header("Authorization", format!("Key {key}"))
+                    .json(&self.input)
+                    .send()
+                    .await?
+                    .error_for_status()
+                    .context("fal queue submit")?
+                    .json()
+                    .await?;
+                let id = submit["request_id"].as_str().unwrap_or_default().to_string();
+                Ok((id, submit))
+            }
+            Backend::Relay(r) => {
+                let submit = r
+                    .call("submit_job", json!({"endpoint_id": self.model, "input": self.input}))
+                    .await?;
+                let id = submit["request_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("fal submit_job returned no request_id: {submit}"))?
+                    .to_string();
+                Ok((id, submit))
+            }
+        }
+    }
+
+    /// Returns the job status (`IN_QUEUE`, `IN_PROGRESS`, `COMPLETED`, …) and queue position.
+    async fn status(&self, id: &str, submit: &Json) -> Result<(String, Option<u64>, Option<String>)> {
+        let s: Json = match &self.backend {
+            Backend::Key(key) => {
+                let url = submit["status_url"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("fal queue: no status_url in {submit}"))?;
+                self.host
+                    .http
+                    .get(url)
+                    .header("Authorization", format!("Key {key}"))
+                    .send()
+                    .await?
+                    .error_for_status()
+                    .context("fal queue status")?
+                    .json()
+                    .await?
+            }
+            Backend::Relay(r) => {
+                let mut args = json!({"endpoint_id": self.model, "request_id": id});
+                if let Some(u) = submit["status_url"].as_str() {
+                    args["status_url"] = u.into();
+                }
+                r.call("check_job", args).await?
+            }
+        };
+        let status = s["status"].as_str().unwrap_or_default().to_uppercase().replace(' ', "_");
+        let error = s.get("error").and_then(Json::as_str).map(String::from);
+        Ok((status, s["queue_position"].as_u64(), error))
+    }
+
+    async fn result(&self, id: &str, submit: &Json) -> Result<Json> {
+        match &self.backend {
+            Backend::Key(key) => {
+                let url = submit["response_url"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("fal queue: no response_url in {submit}"))?;
+                Ok(self
+                    .host
+                    .http
+                    .get(url)
+                    .header("Authorization", format!("Key {key}"))
+                    .send()
+                    .await?
+                    .error_for_status()
+                    .context("fal queue result")?
+                    .json()
+                    .await?)
+            }
+            Backend::Relay(r) => {
+                let mut args = json!({"endpoint_id": self.model, "request_id": id});
+                if let Some(u) = submit["response_url"].as_str() {
+                    args["response_url"] = u.into();
+                }
+                r.call("get_job_result", args).await
+            }
+        }
+    }
+
     async fn run(&self) -> Result<()> {
         let http = &self.host.http;
-        let auth = format!("Key {}", self.key);
-        let submit: Json = http
-            .post(format!("{}/{}", self.host.opts.fal_queue_url, self.model))
-            .header("Authorization", &auth)
-            .json(&self.input)
-            .send()
-            .await?
-            .error_for_status()
-            .context("fal queue submit")?
-            .json()
-            .await?;
-        let request_id = submit["request_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let status_url = submit["status_url"]
-            .as_str()
-            .ok_or_else(|| anyhow!("fal queue: no status_url in {submit}"))?;
-        let response_url = submit["response_url"]
-            .as_str()
-            .ok_or_else(|| anyhow!("fal queue: no response_url in {submit}"))?;
+        let (request_id, submit) = self.submit().await?;
         if !self.update(json!({"job": request_id})) {
             return Ok(());
         }
@@ -196,46 +279,29 @@ impl Job {
             if started.elapsed() > TIMEOUT {
                 bail!("timed out after {} min", TIMEOUT.as_secs() / 60);
             }
-            let s: Json = http
-                .get(status_url)
-                .header("Authorization", &auth)
-                .send()
-                .await?
-                .error_for_status()
-                .context("fal queue status")?
-                .json()
-                .await?;
-            let status = s["status"].as_str().unwrap_or_default();
-            let pos = s["queue_position"].as_u64();
-            match status {
-                "COMPLETED" => {
-                    if let Some(e) = s.get("error").and_then(Json::as_str) {
+            let (status, pos, error) = self.status(&request_id, &submit).await?;
+            match status.as_str() {
+                "COMPLETED" | "OK" | "SUCCEEDED" => {
+                    if let Some(e) = error {
                         bail!("{e}");
                     }
                     break;
                 }
-                "IN_PROGRESS" if last != status => {
+                "FAILED" | "ERROR" | "CANCELLED" => bail!("{}", error.unwrap_or(status)),
+                "IN_PROGRESS" | "RUNNING" if last != status => {
                     if !self.update(json!({"status": "running", "progress": 0.5})) {
                         return Ok(());
                     }
                     self.event("running", None, None);
                 }
-                "IN_QUEUE" => self.event("queued", pos, None),
+                "IN_QUEUE" | "QUEUED" => self.event("queued", pos, None),
                 _ => {}
             }
-            last = status.to_string();
+            last = status;
             tokio::time::sleep(POLL).await;
         }
 
-        let result: Json = http
-            .get(response_url)
-            .header("Authorization", &auth)
-            .send()
-            .await?
-            .error_for_status()
-            .context("fal queue result")?
-            .json()
-            .await?;
+        let result = self.result(&request_id, &submit).await?;
         let media = find_media(&result).ok_or_else(|| anyhow!("no media url in fal result"))?;
         let bytes = http
             .get(&media.url)
@@ -336,6 +402,7 @@ fn find_media(v: &Json) -> Option<Media> {
         Json::Object(o) => {
             if let Some(url) = o.get("url").and_then(Json::as_str)
                 && url.starts_with("http")
+                && !url.contains("queue.fal.run")
             {
                 let mime = o
                     .get("content_type")

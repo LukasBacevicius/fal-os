@@ -32,6 +32,7 @@ async fn start(fal_queue_url: &str, fal_key: Option<&str>) -> Env {
         HostOptions {
             fal_queue_url: fal_queue_url.into(),
             fal_key: fal_key.map(String::from),
+            fal_session: false,
             renderer: Box::new(NoRenderer),
         },
     )
@@ -322,7 +323,7 @@ async fn mcp_end_to_end() {
         "{read}"
     );
 
-    // Knowledge + generate without FAL_KEY.
+    // Knowledge + generate without a fal session or key.
     let k = call(
         &claude,
         "get_knowledge",
@@ -334,7 +335,7 @@ async fn mcp_end_to_end() {
         "sessionId": sid, "canvas": "main", "model": "fal-ai/flux/dev", "input": {"prompt": "x"},
     })).await;
     assert_eq!(r.is_error, Some(true));
-    assert!(text(&r).contains("FAL_KEY"));
+    assert!(text(&r).contains("not signed in to fal"));
 
     // Autosave reaches disk.
     env.host.flush().unwrap();

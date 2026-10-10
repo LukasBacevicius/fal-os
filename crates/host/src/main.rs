@@ -26,6 +26,12 @@ enum Cmd {
         #[arg(long, default_value_t = server::DEFAULT_PORT)]
         port: u16,
     },
+    /// Sign in with your fal account (browser, OAuth via fal AuthKit).
+    Login,
+    /// Forget the stored fal session.
+    Logout,
+    /// Show the signed-in fal account and check the token against fal's API.
+    Whoami,
     /// Add/update the fal-os MCP server in an agent client's config.
     Register {
         #[arg(long, value_enum)]
@@ -64,12 +70,38 @@ async fn main() -> Result<()> {
                 server::mcp_url(port),
                 server::home_dir().join("host.json").display()
             );
-            if host.opts.fal_key.is_none() {
-                tracing::warn!("FAL_KEY is not set: `generate` will return an error");
+            if host.opts.fal_key.is_none() && !falos_host::fal_relay::Relay::available() {
+                tracing::warn!("not signed in to fal: run `falos-host login` so agents can `generate`");
             }
             tokio::signal::ctrl_c().await?;
             running.cancel.cancel();
             running.task.await?;
+        }
+        Cmd::Login => {
+            let t = falos_host::auth::login(|url| {
+                println!("Opening your browser to sign in to fal…\nIf it doesn't open, visit:\n{url}\n");
+                let _ = std::process::Command::new("open").arg(url).status();
+            })
+            .await?;
+            let who = falos_host::auth::claims(&t.access_token).unwrap_or_default();
+            println!("Signed in to fal{}.", who["email"].as_str().map(|e| format!(" as {e}")).unwrap_or_default());
+        }
+        Cmd::Logout => {
+            falos_host::auth::logout()?;
+            println!("Signed out of fal.");
+        }
+        Cmd::Whoami => {
+            let http = reqwest::Client::new();
+            let token = falos_host::auth::access_token(&http).await?;
+            let c = falos_host::auth::claims(&token).unwrap_or_default();
+            println!("iss: {}\nsub: {}\nemail: {}\naud: {}\nexp: {}", c["iss"], c["sub"], c["email"], c["aud"], c["exp"]);
+            let res = http
+                .get("https://queue.fal.run/fal-ai/flux/requests/00000000-0000-0000-0000-000000000000/status")
+                .bearer_auth(&token)
+                .send()
+                .await?;
+            let status = res.status();
+            println!("fal queue API with bearer token: {status} {}", res.text().await.unwrap_or_default());
         }
         Cmd::Register { client, dry_run } => {
             let token = server::load_or_create_token()?;
