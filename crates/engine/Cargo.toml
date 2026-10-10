@@ -1,0 +1,10 @@
+[package]
+name = "falos-engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true

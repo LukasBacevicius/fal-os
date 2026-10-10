@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+wgpu = "30"
+winit = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+web-time = "1"
+
+[profile.release]
+debug = 1
+lto = "thin"
+
+[profile.wasm]
+inherits = "release"
+opt-level = 3
+debug = 0
+lto = true
+codegen-units = 1
