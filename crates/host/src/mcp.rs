@@ -250,6 +250,22 @@ fn ann_line(a: &Annotation) -> String {
     s
 }
 
+/// Node-normalized point an anchor's pin sits at (region center; node center otherwise).
+fn pin_point(a: &falos_doc::Anchor) -> [f64; 2] {
+    match a.region() {
+        Some(falos_doc::Region::Point { x, y }) => [x, y],
+        Some(falos_doc::Region::Box { x, y, w, h }) => [x + w * 0.5, y + h * 0.5],
+        Some(falos_doc::Region::Polygon { points }) if !points.is_empty() => {
+            let n = points.len() as f64;
+            [
+                points.iter().map(|p| p[0]).sum::<f64>() / n,
+                points.iter().map(|p| p[1]).sum::<f64>() / n,
+            ]
+        }
+        _ => [0.5, 0.5],
+    }
+}
+
 const GUIDE: &str = "fal-os canvas MCP. Workflow: `read` (text projection; keep its `version`) → \
 `edit` (same text format: rows without id create, rows with id change only named props) → \
 check `stale`/`warnings` in the result. Feedback lives in annotations: `list_annotations` \
@@ -395,6 +411,10 @@ impl CanvasMcp {
                 s.read_versions.insert(canvas.clone(), version);
                 s.presence.canvas = Some(canvas.clone());
             })?;
+            if let Some(root) = &a.root {
+                self.host
+                    .touch_nodes(&a.session_id, &canvas, std::slice::from_ref(root));
+            }
             let mut out = format!("canvas `{canvas}` · version {vs} · {count} nodes");
             let others = self.others_here(&a.session_id, &canvas);
             if !others.is_empty() {
@@ -453,6 +473,12 @@ impl CanvasMcp {
             self.host.with_session(&a.session_id, |s| {
                 s.read_versions.insert(canvas.clone(), res.version.clone());
             })?;
+            let focus = if res.created.is_empty() {
+                &res.touched
+            } else {
+                &res.created
+            };
+            self.host.touch_nodes(&a.session_id, &canvas, focus);
             let mut v = tx_json(&res);
             let claimed = self
                 .host
@@ -572,6 +598,7 @@ impl CanvasMcp {
     )]
     async fn get_annotation(&self, Parameters(a): Parameters<GetAnnotationArgs>) -> CallToolResult {
         let mut image = None;
+        let mut pin: Option<(String, [f64; 2])> = None;
         let r = (|| {
             self.host.actor(&a.session_id)?;
             let host = &self.host;
@@ -589,7 +616,34 @@ impl CanvasMcp {
                 if let Some(to) = &ann.assignee {
                     let _ = write!(head, " · assigned to @{to}");
                 }
-                let _ = write!(head, "\nanchor: {}", serde_json::to_string(&ann.anchor)?);
+                let _ = write!(
+                    head,
+                    "\nanchor: {} (normalized: 0..1 of the node's width/height)",
+                    falos_doc::anchor_to_text(&ann.anchor)
+                );
+                if let Some(n) = c.node(&ann.node_id)
+                    && let Some(r) = ann.anchor.region()
+                {
+                    let px = |v: &[f64]| -> String {
+                        v.chunks(2)
+                            .map(|p| format!("{:.0},{:.0}", p[0] * n.w, p.get(1).copied().unwrap_or(0.0) * n.h))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    let s = match &r {
+                        falos_doc::Region::Point { x, y } => format!("pt({})", px(&[*x, *y])),
+                        falos_doc::Region::Box { x, y, w, h } => {
+                            format!("box({},{})", px(&[*x, *y]), px(&[*w, *h]))
+                        }
+                        falos_doc::Region::Polygon { points } => format!("poly({})", px(&points.concat())),
+                        falos_doc::Region::Mask { asset } => format!("mask({asset})"),
+                    };
+                    let _ = write!(
+                        head,
+                        "\nanchor in node pixels: {s} (node is {}x{}; for media pixels scale by the asset's size / node size)",
+                        n.w, n.h
+                    );
+                }
                 if !ann.outcome.is_empty() {
                     let _ = write!(head, "\noutcome: {}", ann.outcome.join(", "));
                 }
@@ -636,10 +690,14 @@ impl CanvasMcp {
                     let _ = writeln!(data, "> @{} {}", m.author, quote(&m.text));
                 }
                 image = host.opts.renderer.render_annotation(c, &ann);
+                pin = Some((ann.node_id.clone(), pin_point(&ann.anchor)));
                 Ok(format!("{head}\n{}", untrusted(&data)))
             })??;
             Ok(out)
         })();
+        if let Some((node, p)) = pin {
+            self.host.touch_point(&a.session_id, &a.canvas, &node, p);
+        }
         let mut res = self.finish(Some(&a.session_id), r);
         if let Some(img) = image {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&img.data);
@@ -702,9 +760,19 @@ impl CanvasMcp {
             let anchor = a
                 .anchor
                 .clone()
-                .unwrap_or_else(|| format!("box(0,0,{},{})", node.w, node.h));
+                .unwrap_or_else(|| "box(0,0,1,1)".to_string());
             if anchor.contains('\n') || anchor.contains('"') {
                 bail!("bad anchor `{anchor}`");
+            }
+            let parsed = falos_doc::parse_anchor_text(&anchor)
+                .map_err(|e| anyhow!("bad anchor `{anchor}`: {e}"))?;
+            if !parsed.is_normalized() {
+                bail!(
+                    "anchor `{anchor}` has coordinates outside 0..1: anchors are normalized to the node \
+                     (box(0,0,1,1) = the whole node, which is {}x{}); divide pixel values by the node's width/height",
+                    node.w,
+                    node.h
+                );
             }
             let to = match &a.assignee {
                 Some(h) => {
@@ -724,6 +792,8 @@ impl CanvasMcp {
             let res = self.host.mutate(&a.canvas, &actor.id, None, |c| {
                 c.apply_edit(&text, &actor, None)
             })?;
+            self.host
+                .touch_point(&a.session_id, &a.canvas, &node.id, pin_point(&parsed));
             let mut v = tx_json(&res);
             v["annotationId"] = json!(res.created.first());
             Ok(serde_json::to_string_pretty(&v)?)
@@ -744,6 +814,7 @@ impl CanvasMcp {
         let r = (|| {
             let ttl = Duration::from_secs(a.ttl_secs.unwrap_or(120).clamp(5, 3600));
             let o = self.host.claim(&a.session_id, &a.canvas, &a.ids, ttl)?;
+            self.host.touch_nodes(&a.session_id, &a.canvas, &o.granted);
             Ok(serde_json::to_string_pretty(&json!({
                 "granted": o.granted, "refused": o.refused, "ttlSecs": ttl.as_secs(),
             }))?)
@@ -838,6 +909,8 @@ impl CanvasMcp {
                     parent: p.parent,
                 },
             )?;
+            self.host
+                .touch_nodes(&a.session_id, &a.canvas, std::slice::from_ref(&node));
             Ok(serde_json::to_string_pretty(&json!({
                 "node": node,
                 "status": "queued",

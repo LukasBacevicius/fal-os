@@ -302,6 +302,48 @@ pub enum Anchor {
     Point3d { p: [f64; 3], camera: Camera },
 }
 
+impl Region {
+    /// The 2D coordinates the region spans (empty for masks).
+    pub fn coords(&self) -> Vec<f64> {
+        match self {
+            Region::Point { x, y } => vec![*x, *y],
+            Region::Box { x, y, w, h } => vec![*x, *y, *x + *w, *y + *h],
+            Region::Polygon { points } => points.concat(),
+            Region::Mask { .. } => vec![],
+        }
+    }
+}
+
+impl Anchor {
+    /// The 2D region of the anchor, if it has one (`frame(t) box(..)` → the box).
+    pub fn region(&self) -> Option<Region> {
+        match self {
+            Anchor::Point { x, y } => Some(Region::Point { x: *x, y: *y }),
+            Anchor::Box { x, y, w, h } => Some(Region::Box {
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+            }),
+            Anchor::Polygon { points } => Some(Region::Polygon {
+                points: points.clone(),
+            }),
+            Anchor::Mask { asset } => Some(Region::Mask {
+                asset: asset.clone(),
+            }),
+            Anchor::Frame { region, .. } | Anchor::Page { region, .. } => region.clone(),
+            _ => None,
+        }
+    }
+
+    /// True when every 2D coordinate is node-normalized (0..1, with a little slack). Pixel
+    /// coordinates such as `box(10,20,200,100)` are the common mistake this catches.
+    pub fn is_normalized(&self) -> bool {
+        self.region()
+            .is_none_or(|r| r.coords().iter().all(|v| (-0.001..=1.001).contains(v)))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub author: String,

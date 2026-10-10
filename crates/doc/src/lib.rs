@@ -12,7 +12,7 @@ pub use canvas::{
 };
 pub use model::*;
 pub use project::{CanvasEntry, Project};
-pub use text::ReadOpts;
+pub use text::{ReadOpts, anchor_to_text, parse_anchor_text};
 
 pub use loro;
 

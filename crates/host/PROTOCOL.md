@@ -1,11 +1,24 @@
 # fal-os host protocol
 
-One loopback HTTP server (`127.0.0.1`, port 7317 or the next free one) serves two endpoints:
+One loopback HTTP server (`127.0.0.1`, port 7317 or the next free one) serves:
 
 | Path | What |
 |---|---|
 | `POST/GET /mcp` | Canvas MCP server, Streamable HTTP (agents) |
 | `GET /sync/{canvas}` → WebSocket | Canvas sync (the canvas UI, running falos-doc in wasm) |
+| `GET/HEAD/PUT /assets/{sha256}` | Content-addressed project media (`<project>/assets/<hex>.<ext>`) |
+
+## Assets
+`{sha256}` is the hex digest, optionally prefixed `sha256:` (the doc's asset id form).
+- `PUT` streams the body to disk, verifies the digest (`400` on mismatch), caps it at 2 GiB
+  (`413`), stores the content type as the file extension; `201` when written, `200` when it
+  already existed (dedupe: clients `HEAD` first).
+- `GET`/`HEAD` serve the file with its content type, `ETag`, immutable caching and
+  `Accept-Ranges: bytes`; a single `Range: bytes=a-b | a- | -n` gets `206` + `Content-Range`
+  (`416` if unsatisfiable), so `<video src>` can seek. GET/HEAD also accept `?token=` because
+  media elements can't set headers.
+- CORS: allowed origins (below) get `Access-Control-Allow-Origin` echoed; `OPTIONS` preflight
+  on `/assets/*` needs no token.
 
 ## Discovery and auth
 - `~/.fal-os/token` (0600): per-install random bearer token. `~/.fal-os/host.json` (0600):
@@ -45,6 +58,12 @@ already in use). Two frame kinds:
 {"type":"error","message":"…"}
 ```
 `SessionInfo = {id, agentName, actor, kind: "human"|"agent", color, presence: {status, canvas?, cursor?: [x,y], viewport?: [x,y,w,h], last_activity}}`
+
+Agent presence is implicit: when an MCP session reads a subtree (`root`), edits, annotates,
+claims or generates, the host moves its `cursor` to the center of the last node it touched
+(world coordinates; child positions are parent-relative) and its `viewport` to that node plus
+a margin, then emits `presence`. `set_status` sets the status line (and may override them).
+
 `Claim = {node, session, actor, expires}` (unix ms). Canvas-scoped events are only sent
 for the connection's canvas; presence events are global.
 

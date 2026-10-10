@@ -1051,6 +1051,7 @@ dependencies = [
  "clap",
  "falos-doc",
  "futures",
+ "futures-util",
  "rand 0.9.5",
  "reqwest",
  "rmcp",

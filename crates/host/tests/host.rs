@@ -194,7 +194,7 @@ async fn mcp_end_to_end() {
         &claude,
         "annotate",
         json!({
-            "sessionId": sid, "canvas": "main", "nodeId": img, "anchor": "box(10,20,200,100)",
+            "sessionId": sid, "canvas": "main", "nodeId": img, "anchor": "box(0.1,0.2,0.4,0.3)",
             "text": "make the sky stormier", "assignee": "codex",
         }),
     )
@@ -226,7 +226,9 @@ async fn mcp_end_to_end() {
     )
     .await;
     assert!(
-        g.contains("\"kind\":\"box\"") && g.contains("> @claude-code \"make the sky stormier\""),
+        g.contains("anchor: box(0.1,0.2,0.4,0.3)")
+            && g.contains("anchor in node pixels: box(")
+            && g.contains("> @claude-code \"make the sky stormier\""),
         "{g}"
     );
     assert!(g.contains("red car"));
@@ -567,4 +569,178 @@ async fn generate_runs_fal_queue_job() {
         ("fal-ai/mock", "claude", Some(7))
     );
     assert_eq!(l.fal_request_id.as_deref(), Some("req-1"));
+}
+
+#[tokio::test]
+async fn asset_routes_put_get_range_and_cors() {
+    use sha2::{Digest, Sha256};
+    let env = start("http://127.0.0.1:1", None).await;
+    let http = reqwest::Client::new();
+    let body: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+    let hex: String = Sha256::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let url = format!("http://127.0.0.1:{}/assets/{hex}", env.port);
+    let auth = format!("Bearer {TOKEN}");
+
+    // No token → 401; HEAD before upload → 404.
+    assert_eq!(http.get(&url).send().await.unwrap().status(), 401);
+    let head = http.head(&url).header("authorization", &auth).send();
+    assert_eq!(head.await.unwrap().status(), 404);
+    // A wrong hash is rejected and leaves nothing behind.
+    let bad = http
+        .put(&url)
+        .header("authorization", &auth)
+        .header("content-type", "video/mp4")
+        .body(b"nope".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    assert!(falos_host::assets::find(&env.host.dir().join("assets"), &hex).is_none());
+    // Upload: the file lands in <project>/assets with the extension of its content type.
+    let put = || {
+        http.put(&url)
+            .header("authorization", &auth)
+            .header("content-type", "video/mp4")
+            .body(body.clone())
+            .send()
+    };
+    assert_eq!(put().await.unwrap().status(), 201);
+    assert!(env.host.dir().join(format!("assets/{hex}.mp4")).exists());
+    // Re-upload dedupes.
+    assert_eq!(put().await.unwrap().status(), 200);
+
+    // Full GET with ?token= (what <video src> uses); type from the stored extension.
+    let full = http
+        .get(format!("{url}?token={TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(full.status(), 200);
+    assert_eq!(full.headers()["content-type"], "video/mp4");
+    assert_eq!(full.headers()["accept-ranges"], "bytes");
+    assert_eq!(full.bytes().await.unwrap().as_ref(), body.as_slice());
+    // Byte ranges (and the `sha256:` id form).
+    let range = |u: String, r: &'static str| {
+        http.get(u)
+            .header("authorization", &auth)
+            .header("range", r)
+            .send()
+    };
+    let part = range(
+        format!("http://127.0.0.1:{}/assets/sha256:{hex}", env.port),
+        "bytes=10-19",
+    )
+    .await
+    .unwrap();
+    assert_eq!(part.status(), 206);
+    assert_eq!(part.headers()["content-range"], "bytes 10-19/1000");
+    assert_eq!(part.bytes().await.unwrap().as_ref(), &body[10..20]);
+    let tail = range(url.clone(), "bytes=-5").await.unwrap();
+    assert_eq!(tail.status(), 206);
+    assert_eq!(tail.bytes().await.unwrap().as_ref(), &body[995..]);
+    let unsat = range(url.clone(), "bytes=5000-").await.unwrap();
+    assert_eq!(unsat.status(), 416);
+
+    // CORS: preflight without credentials; allowed origins echoed; foreign ones refused.
+    let pre = http
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("origin", "http://127.0.0.1:5173")
+        .header("access-control-request-method", "PUT")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pre.status(), 204);
+    assert_eq!(
+        pre.headers()["access-control-allow-origin"],
+        "http://127.0.0.1:5173"
+    );
+    let get = http
+        .get(&url)
+        .header("authorization", &auth)
+        .header("origin", "http://localhost:5173")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.headers()["access-control-allow-origin"],
+        "http://localhost:5173"
+    );
+    let evil = http
+        .get(&url)
+        .header("authorization", &auth)
+        .header("origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(evil.status(), 403);
+    // PUT never accepts ?token=.
+    let qput = http
+        .put(format!("{url}?token={TOKEN}"))
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(qput.status(), 401);
+}
+
+#[tokio::test]
+async fn annotate_defaults_normalized_and_agent_presence_follows_work() {
+    let env = start("http://127.0.0.1:1", None).await;
+    let c = client(env.port).await;
+    let s = js(&call(
+        &c,
+        "session",
+        json!({"agentName": "Claude Code", "canvas": "main"}),
+    )
+    .await);
+    let sid = s["sessionId"].as_str().unwrap().to_string();
+    let e = js(&call(&c, "edit", json!({
+        "sessionId": sid, "canvas": "main",
+        "text": "frame \"Board\" p(100,100) s(1200,800)\n  image \"car\" p(40,80) s(512,256) asset(sha:9f)",
+    })).await);
+    let img = e["created"][1].as_str().unwrap().to_string();
+    // The cursor sits on the center of the last created node, in world coordinates
+    // (child positions are relative to their parent frame).
+    let me = || {
+        env.host
+            .sessions()
+            .into_iter()
+            .find(|x| x.id == sid)
+            .unwrap()
+    };
+    assert_eq!(me().presence.cursor, Some([396.0, 308.0]));
+    assert_eq!(me().presence.canvas.as_deref(), Some("main"));
+    assert!(me().presence.viewport.is_some());
+
+    // Default anchor = the whole node, normalized; get_annotation also gives node pixels.
+    let a = js(&call(
+        &c,
+        "annotate",
+        json!({"sessionId": sid, "canvas": "main", "nodeId": img, "text": "whole thing"}),
+    )
+    .await);
+    let ann = a["annotationId"].as_str().unwrap().to_string();
+    let g = call(
+        &c,
+        "get_annotation",
+        json!({"sessionId": sid, "canvas": "main", "id": ann}),
+    )
+    .await;
+    assert!(g.contains("anchor: box(0,0,1,1)"), "{g}");
+    assert!(g.contains("anchor in node pixels: box(0,0,512,256)"), "{g}");
+    // Pixel coordinates are refused with a hint.
+    let r = call_raw(&c, "annotate", json!({
+        "sessionId": sid, "canvas": "main", "nodeId": img, "text": "px", "anchor": "box(10,20,200,100)",
+    })).await;
+    assert_eq!(r.is_error, Some(true));
+    assert!(text(&r).contains("normalized"), "{}", text(&r));
+    // A point anchor moves the cursor onto that point.
+    call(&c, "annotate", json!({
+        "sessionId": sid, "canvas": "main", "nodeId": img, "text": "here", "anchor": "pt(0.5,0.25)",
+    }))
+    .await;
+    assert_eq!(me().presence.cursor, Some([396.0, 244.0]));
 }
