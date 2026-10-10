@@ -1,0 +1,58 @@
+# UI spec v0: plain mono terminal
+
+> A POC look. Plain, monochrome and functional, like a 90s terminal: no branding, no color, no ornament. We'll redesign properly later. If in doubt, remove it.
+
+## Visual language
+- **Type:** monospace everywhere (`ui-monospace, "SF Mono", Menlo, monospace`), 12–13px, regular weight; 500 for headings only. No icon fonts. Use text labels such as `[sel]` `[hand]` `[+ file]`, or plain ASCII glyphs.
+- **Color:** black, white and grays only.
+  - CSS variables: `--bg #0a0a0a`, `--panel #0f0f0f`, `--line #262626`, `--text #e6e6e6`, `--dim #8a8a8a`, `--faint #4a4a4a`.
+  - Provide a light variant through the same variables (`[data-theme=light]`: white background, black text). Dark is the default.
+  - **No accent colors, gradients, shadows, glows, blur, or rounded "pill" chips.** Corners are 0–2px; borders are 1px `--line`.
+- **Selection** is a 1px white outline with small square handles: white fill, black border.
+- **Motion** is only functional: 120ms fades. No bounces.
+
+## Layout
+```
+┌ fal-os / demo / main ───────────────────────── ● host · lukas@fal ┐
+│                                                 │ chat             │
+│                    canvas                       │ ...messages...   │
+│                                                 │                  │
+│                                                 │ agents: ...      │
+│                                                 │ [chips]          │
+│ 43% · 7 nodes                                   │ > input_         │
+└─────────────────────────────────────────────────┴──────────────────┘
+```
+- **Top bar** (28px):
+  - Left: a text breadcrumb, `fal-os / <project> / <canvas>`.
+  - Right: a host connection dot (white = connected, `--faint` = offline, as a text label rather than a color) and the signed-in fal account as text.
+  - Undo/redo stay as keyboard shortcuts only.
+- **Canvas** fills the rest. The bottom-left status is plain dim text: `43% · 7 nodes`. Show fps only with `?debug`.
+- **Chat panel** on the right: 360px, resizable, collapsible with ⌘\\. It implements [CHAT-PROTOCOL.md](CHAT-PROTOCOL.md):
+  - Messages are plain text blocks. User lines are prefixed `>`, agent lines `director:`, `generator:` and so on.
+  - Tool and agent activity appears as single dim lines (e.g. `· generator  generate flux/schnell → 3 nodes`), collapsible. Node ids are clickable and pan to the node.
+  - The swarm strip above the input has one line per active subagent (`motion   rendering 0:07/0:15`). It appears only while agents run.
+  - Context chips are bracketed text: `[img hero-2]`, `[spot hero-2 0.42,0.31]`, `[frame clip-1 @3.24s box]`, each with an `×`.
+  - The input is a textarea with a `>` prompt. Enter sends, Shift+Enter adds a newline, Esc stops a run.
+- **Adding context:** select nodes and press ⌘L (or click "add to chat" in a tiny text button by the selection). Alt-click a spot on an image or video to add a spot chip; Alt-drag to add a region chip; on a video this uses the current playhead frame.
+
+## Remove
+- The F logo, product branding, colored avatars, and the "Live agents" demo.
+- **All fake or demo cursors.** Agent cursors are shown only for real host sessions with activity in the last ~10 s: a small white arrow plus a mono text label (`motion: rendering`), with no colored bubble. They fade out when idle.
+- The annotations panel, the annotate tool and annotation pins and boxes on the canvas. Keep the doc data model, just don't render it.
+- The left layers/assets panel and the inspector panel. Lineage is shown later via chat or hover.
+- The bottom floating toolbar. Tools are keys: V select, H/space hand, and drop files to import.
+
+## Generating state (important)
+A `generation` node renders as a dark tile (`#1a1a1c`) with **sparse square pixel dots**: 2–3 px gray squares, 6–20 per tile, slowly drifting and twinkling at random. See the designer's reference in `docs/ref-generating-tiles.webp` and the fal web-app's generating tiles.
+- Draw it in the engine, ideally as one shader effect on the tile: hash-based dots with time; no per-frame CPU work.
+- Respect the shader budget: animate only visible tiles, and pause the animation during heavy gestures.
+- **Progress:** if known, a 1px bottom bar in `--dim`. The prompt snippet and model show only on hover, as tiny dim mono text.
+- **When it completes:** a 200ms crossfade from dots to the media.
+- **Failed:** the tile shows `failed` in dim mono text with a retry affordance. The text goes in the chat.
+
+## Node rendering (agent content)
+- **frame:** a 1px `--line` outline with the title in dim mono above its top-left corner. No fill.
+- **note / text:** a plain mono text block on `--panel`, with a 1px border and no sticky colors (ignore `color` props for now).
+- **image / video:** the media, edge to edge. Videos play muted on hover, or while selected.
+- **audio:** a waveform in `--dim` on `--panel`, with the name.
+- **other types:** a bordered box with `[3d] name`, `[pdf] name` and so on.
