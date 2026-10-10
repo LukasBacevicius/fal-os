@@ -1,0 +1,6 @@
+# Standalone pnpm project. Remotion's compositor/esbuild ship native binaries.
+allowBuilds:
+  esbuild: true
+  "@remotion/compositor-darwin-arm64": true
+  "@remotion/compositor-darwin-x64": true
+  "@remotion/compositor-linux-x64-gnu": true

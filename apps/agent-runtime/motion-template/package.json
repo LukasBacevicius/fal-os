@@ -1,0 +1,21 @@
+{
+  "name": "falos-motion-template",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Remotion ad template the Motion agent adapts per chat (copied to <project>/work/<chat>/motion).",
+  "scripts": {
+    "render": "remotion render src/index.ts Ad out/ad.mp4 --props=props.json",
+    "still": "remotion still src/index.ts Ad out/still.png --props=props.json --frame=60",
+    "studio": "remotion studio src/index.ts --props=props.json"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.527",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.527"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "typescript": "5.6.3"
+  }
+}
