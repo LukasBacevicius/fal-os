@@ -1766,25 +1766,6 @@ fn instance_for(h: Handle, n: &NodeDesc, low_ready: bool, detail_slot: i32) -> I
     }
 }
 
-#[cfg(test)]
-mod shader_tests {
-    /// The WGSL sources parse and validate (catches shader errors without a GPU).
-    #[test]
-    fn shaders_validate() {
-        for (name, src) in [
-            ("shader", include_str!("shader.wgsl")),
-            ("overlay", include_str!("overlay.wgsl")),
-            ("blit", include_str!("blit.wgsl")),
-            ("mip", include_str!("mip.wgsl")),
-        ] {
-            let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
-            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-                .validate(&module)
-                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        }
-    }
-}
-
 /// A moodboard-like scene: `count` synthetic nodes with varied aspect ratios packed in
 /// shelves, `videos` of them videos.
 pub fn demo_scene(count: usize, videos: usize) -> Vec<NodeDesc> {
@@ -1822,4 +1803,23 @@ pub fn demo_scene(count: usize, videos: usize) -> Vec<NodeDesc> {
             node
         })
         .collect()
+}
+
+#[cfg(test)]
+mod shader_tests {
+    /// The WGSL sources parse and validate (catches shader errors without a GPU).
+    #[test]
+    fn shaders_validate() {
+        for (name, src) in [
+            ("shader", include_str!("shader.wgsl")),
+            ("overlay", include_str!("overlay.wgsl")),
+            ("blit", include_str!("blit.wgsl")),
+            ("mip", include_str!("mip.wgsl")),
+        ] {
+            let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
+    }
 }
