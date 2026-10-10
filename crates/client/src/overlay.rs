@@ -155,7 +155,7 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
                 let fill = match shape {
                     OverlayPrim::GHOST => with_alpha(f.color, 56),
                     OverlayPrim::FLASH => with_alpha(f.color, 60),
-                    _ => with_alpha(f.color, 120),
+                    _ => with_alpha(f.color, 96),
                 };
                 OverlayPrim { seed: f.seed, ..OverlayPrim::activity(f.rect, shape, fill, stroke, d, f.t0, f.dur) }
             }
