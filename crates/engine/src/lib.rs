@@ -8,11 +8,12 @@
 //! - two texture tiers: an always-resident 32px mipmapped tier for every node, and a
 //!   256px detail tier with a fixed slot budget and LRU eviction
 //! - per-frame upload budgets, progressive cold open, and a cap on active video decoders
+//! - pluggable real video decode ([`media::VideoSource`]); new frames are GPU-blitted into detail slots
 
 pub mod media;
 
 use media::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
 
 const PAGE: u32 = 2048;
@@ -137,6 +138,10 @@ pub struct FrameStats {
     pub detail_resident: usize,
     pub detail_uploads: u32,
     pub active_videos: usize,
+    /// Real decoded video frames blitted into the detail tier this frame (VideoSource path).
+    pub video_frames: u32,
+    /// CPU time spent on video this frame (synth+upload, or source calls + blit encoding).
+    pub video_ms: f32,
     pub low_ready: usize,
     pub instance_upload: bool,
 }
@@ -199,6 +204,19 @@ pub struct Renderer {
     detail: DetailCache,
     frame: u64,
     scratch: Vec<u8>,
+
+    video: Option<Box<dyn VideoSource>>,
+    /// Node index → video id (index among video nodes), `usize::MAX` for images.
+    video_id: Vec<usize>,
+    playing: HashSet<usize>,
+    /// Video nodes holding a slot that still waits for its first real frame.
+    video_pending: HashSet<usize>,
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_layout: wgpu::BindGroupLayout,
+    blit_sampler: wgpu::Sampler,
+    /// Render-target views of the detail tier, indexed `layer * DETAIL_MIPS + mip`.
+    detail_targets: Vec<wgpu::TextureView>,
+    blits: Vec<(u32, wgpu::BindGroup)>,
 }
 
 impl Renderer {
@@ -219,7 +237,9 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             })
         };
@@ -324,6 +344,36 @@ impl Renderer {
             cache: None,
         });
 
+        let (blit_pipeline, blit_layout) = blit_pipeline(&device);
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let detail_targets = (0..detail_layers * DETAIL_MIPS)
+            .map(|i| {
+                detail_tex.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_mip_level: i % DETAIL_MIPS,
+                    mip_level_count: Some(1),
+                    base_array_layer: i / DETAIL_MIPS,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let mut videos = 0;
+        let video_id = nodes
+            .iter()
+            .map(|n| match n.kind {
+                Kind::Video => {
+                    videos += 1;
+                    videos - 1
+                }
+                Kind::Image => usize::MAX,
+            })
+            .collect();
+
         let instances: Vec<Instance> = nodes.iter().enumerate().map(|(i, n)| instance_for(i, n)).collect();
         let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("instances"),
@@ -348,7 +398,27 @@ impl Renderer {
             low_rows_done: 0,
             frame: 0,
             scratch: Vec::new(),
+            video: None,
+            video_id,
+            playing: HashSet::new(),
+            video_pending: HashSet::new(),
+            blit_pipeline,
+            blit_layout,
+            blit_sampler,
+            detail_targets,
+            blits: Vec::new(),
         }
+    }
+
+    /// Number of video nodes; video ids passed to a [`VideoSource`] are `0..video_count()`.
+    pub fn video_count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.kind == Kind::Video).count()
+    }
+
+    /// Plugs in a platform decoder; replaces synthesized video frames.
+    pub fn set_video_source(&mut self, source: Box<dyn VideoSource>) {
+        self.video = Some(source);
+        self.playing.clear();
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -422,6 +492,9 @@ impl Renderer {
         self.queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        let blit_start = web_time::Instant::now();
+        self.encode_video_blits(&mut encoder);
+        stats.video_ms += blit_start.elapsed().as_secs_f32() * 1000.0;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("canvas"),
@@ -519,18 +592,24 @@ impl Renderer {
             }
         }
 
-        // Active videos decode a new frame every frame.
-        for &(i, _) in &videos {
-            let slot = match self.detail.node_slot.get(&i) {
-                Some(&s) => s,
-                None => match self.assign_slot(i) {
-                    Some(s) => s,
-                    None => continue,
-                },
-            };
-            self.upload_detail(slot, self.nodes[i].seed, time);
-            stats.detail_uploads += 1;
+        let video_start = web_time::Instant::now();
+        if self.video.is_some() {
+            self.update_real_videos(&videos, stats);
+        } else {
+            // Simulated decode: synthesize and upload a new frame every frame.
+            for &(i, _) in &videos {
+                let slot = match self.detail.node_slot.get(&i) {
+                    Some(&s) => s,
+                    None => match self.assign_slot(i) {
+                        Some(s) => s,
+                        None => continue,
+                    },
+                };
+                self.upload_detail(slot, self.nodes[i].seed, time);
+                stats.detail_uploads += 1;
+            }
         }
+        stats.video_ms += video_start.elapsed().as_secs_f32() * 1000.0;
         stats.active_videos = videos.len();
 
         let mut uploads = 0;
@@ -547,6 +626,107 @@ impl Renderer {
         }
         stats.detail_uploads += uploads;
         stats.detail_resident = self.detail.node_slot.len();
+    }
+
+    /// Real decode path: play exactly the chosen videos, pause the rest (they keep their
+    /// last frame), and queue a GPU blit for every new decoded frame.
+    fn update_real_videos(&mut self, videos: &[(usize, f32)], stats: &mut FrameStats) {
+        let Some(src) = self.video.as_mut() else { return };
+        let now: HashSet<usize> = videos.iter().map(|v| v.0).collect();
+        for &i in self.playing.difference(&now) {
+            src.set_active(self.video_id[i], false);
+        }
+        for &i in now.difference(&self.playing) {
+            src.set_active(self.video_id[i], true);
+        }
+        self.playing = now;
+
+        for &(i, _) in videos {
+            let (slot, fresh) = match self.detail.node_slot.get(&i) {
+                Some(&s) => (s, false),
+                None => match self.assign_slot(i) {
+                    Some(s) => (s, true),
+                    None => continue,
+                },
+            };
+            let force = fresh || self.video_pending.contains(&i);
+            let Some(src) = self.video.as_mut() else { return };
+            let idx = slot % DETAIL_PER_LAYER;
+            let target = SlotTarget {
+                texture: &self.detail_tex,
+                layer: slot / DETAIL_PER_LAYER,
+                origin: [(idx % DETAIL_PER_ROW) * DETAIL_TILE, (idx / DETAIL_PER_ROW) * DETAIL_TILE],
+                size: DETAIL_TILE,
+                mips: DETAIL_MIPS,
+            };
+            let written = match src.update(self.video_id[i], force, &target, &self.device, &self.queue) {
+                FrameUpdate::Texture(view) => {
+                    let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("video frame"),
+                        layout: &self.blit_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.blit_sampler) },
+                        ],
+                    });
+                    self.blits.push((slot, bind_group));
+                    true
+                }
+                FrameUpdate::Written => true,
+                FrameUpdate::None => false,
+            };
+            if written {
+                if self.video_pending.remove(&i) {
+                    self.instances[i].detail_slot = slot as i32;
+                    self.instances_dirty = true;
+                }
+                stats.video_frames += 1;
+                stats.detail_uploads += 1;
+            } else if force {
+                // No frame yet: keep the slot but show the low tier until one arrives.
+                self.video_pending.insert(i);
+                self.instances[i].detail_slot = -1;
+                self.instances_dirty = true;
+            }
+        }
+    }
+
+    /// One render pass per (layer, mip) touched; each blit draws into its slot's viewport.
+    fn encode_video_blits(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if self.blits.is_empty() {
+            return;
+        }
+        let mut blits = std::mem::take(&mut self.blits);
+        blits.sort_by_key(|b| b.0);
+        for layer_blits in blits.chunk_by(|a, b| a.0 / DETAIL_PER_LAYER == b.0 / DETAIL_PER_LAYER) {
+            let layer = layer_blits[0].0 / DETAIL_PER_LAYER;
+            for mip in 0..DETAIL_MIPS {
+                let size = (DETAIL_TILE >> mip) as f32;
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("video blit"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.detail_targets[(layer * DETAIL_MIPS + mip) as usize],
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.blit_pipeline);
+                for (slot, bind_group) in layer_blits {
+                    let idx = slot % DETAIL_PER_LAYER;
+                    let (cx, cy) = ((idx % DETAIL_PER_ROW) as f32, (idx / DETAIL_PER_ROW) as f32);
+                    pass.set_viewport(cx * size, cy * size, size, size, 0.0, 1.0);
+                    pass.set_bind_group(0, bind_group, &[]);
+                    pass.draw(0..4, 0..1);
+                }
+            }
+        }
+        blits.clear();
+        self.blits = blits;
     }
 
     fn assign_slot(&mut self, node: usize) -> Option<u32> {
@@ -605,6 +785,65 @@ fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         },
         count: None,
     }
+}
+
+fn blit_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("video blit"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("video blit"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("video blit"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, layout)
 }
 
 fn set_flag(flags: &mut u32, flag: u32, on: bool) {
