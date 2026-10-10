@@ -19,7 +19,7 @@ use falos_doc::{Actor, Asset, Canvas, Command, Lineage, NodeKind, Props, ReadOpt
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -33,24 +33,73 @@ const HISTORY_EVENTS: usize = 5000;
 
 // ---- hub ----------------------------------------------------------------------------------
 
-#[derive(Default)]
-struct ChatState {
+/// Cross-chat messages allowed per (from, to) pair per minute (loop guard).
+pub const CROSS_CHAT_PER_MIN: usize = 5;
+/// Events summarized for a `chat` chip.
+const CHIP_EVENTS: usize = 20;
+
+/// Persistent chat metadata (`chats/index.json`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ChatMeta {
+    chat: String,
     canvas: String,
     title: String,
+    /// The title still follows the first message (not set by the director or the user).
+    #[serde(default)]
+    title_auto: bool,
+    created: i64,
+    updated: i64,
+    #[serde(default)]
+    archived: bool,
+    /// Cumulative fal spend of finished turns (USD).
+    #[serde(default)]
+    cost: f64,
+    #[serde(default)]
+    state: String,
+}
+
+#[derive(Default)]
+struct ChatState {
+    meta: ChatMeta,
     seq: u64,
-    running: bool,
+    /// agent label → status line, for agents currently working.
+    agents: std::collections::BTreeMap<String, String>,
+    /// Spend of the current turn (the runtime reports it per turn).
+    turn_cost: f64,
+}
+
+impl ChatState {
+    fn total_cost(&self) -> f64 {
+        ((self.meta.cost + self.turn_cost) * 10000.0).round() / 10000.0
+    }
+    fn list_row(&self) -> Json {
+        json!({
+            "chat": self.meta.chat,
+            "canvas": self.meta.canvas,
+            "title": self.meta.title,
+            "state": if self.meta.state.is_empty() { "idle" } else { &self.meta.state },
+            "updated": self.meta.updated,
+            "agents": self.agents.iter().map(|(a, s)| json!({"agent": a, "status": s})).collect::<Vec<_>>(),
+            "cost": self.total_cost(),
+        })
+    }
 }
 
 /// Chat routing state of one host.
 pub struct ChatHub {
     /// Second secret (besides the per-install token) that only the supervised runtime
-    /// knows: guards `/runtime` and the fal token endpoint.
+    /// knows: guards `/runtime`.
     pub runtime_token: String,
     /// Outgoing frames to the connected runtime (one at a time; a new one replaces it).
     runtime: Mutex<Option<(u64, mpsc::UnboundedSender<String>)>>,
     /// Runs sent while no runtime was connected; flushed on connect.
     pending: Mutex<Vec<String>>,
-    chats: Mutex<HashMap<String, ChatState>>,
+    chats: Mutex<Option<HashMap<String, ChatState>>>,
+    /// Canvases whose `chat.list` changed (flushed by the list task).
+    dirty: Mutex<std::collections::HashSet<String>>,
+    flusher: std::sync::Once,
+    /// Cross-chat send times per (from, to).
+    cross: Mutex<HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>>,
     /// The host spawned a runtime (so a missing connection is transient).
     pub supervised: std::sync::atomic::AtomicBool,
 }
@@ -70,6 +119,9 @@ impl Default for ChatHub {
             runtime: Mutex::default(),
             pending: Mutex::default(),
             chats: Mutex::default(),
+            dirty: Mutex::default(),
+            flusher: std::sync::Once::new(),
+            cross: Mutex::default(),
             supervised: Default::default(),
         }
     }
@@ -83,8 +135,21 @@ fn valid_chat_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+fn new_chat_id() -> String {
+    format!(
+        "c_{}",
+        (0..5)
+            .map(|_| format!("{:02x}", rand::random::<u8>()))
+            .collect::<String>()
+    )
+}
+
 fn chats_dir(host: &Host) -> PathBuf {
     host.dir().join("chats")
+}
+
+fn log_path(host: &Host, chat: &str) -> PathBuf {
+    chats_dir(host).join(format!("{chat}.jsonl"))
 }
 
 /// `{"seq":…,"ts":…,"event":{…}}` lines of a chat log.
@@ -96,95 +161,298 @@ fn read_log(path: &Path) -> Vec<Json> {
         .collect()
 }
 
-fn meta_path(host: &Host, chat: &str) -> PathBuf {
-    chats_dir(host).join(format!("{chat}.meta.json"))
-}
+const NEW_CHAT_TITLE: &str = "New chat";
 
 impl ChatHub {
-    /// Load (or create) a chat's state from disk.
-    fn state<'a>(
+    /// Run `f` on the loaded chat table (loaded from `chats/index.json` on first use).
+    fn with_chats<T>(
+        &self,
         host: &Host,
-        chats: &'a mut HashMap<String, ChatState>,
-        chat: &str,
-        canvas: &str,
-    ) -> &'a mut ChatState {
-        chats.entry(chat.to_string()).or_insert_with(|| {
-            let meta: Json = std::fs::read(meta_path(host, chat))
+        f: impl FnOnce(&mut HashMap<String, ChatState>) -> T,
+    ) -> T {
+        let mut guard = self.chats.lock().unwrap();
+        let chats = guard.get_or_insert_with(|| {
+            let index: Json = std::fs::read(chats_dir(host).join("index.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or_default();
-            let seq = read_log(&chats_dir(host).join(format!("{chat}.jsonl")))
-                .iter()
-                .filter_map(|l| l["seq"].as_u64())
-                .max()
-                .unwrap_or(0);
-            ChatState {
-                canvas: meta["canvas"].as_str().unwrap_or(canvas).to_string(),
-                title: meta["title"].as_str().unwrap_or_default().to_string(),
-                seq,
-                running: false,
+            let mut m = HashMap::new();
+            for row in index["chats"].as_array().into_iter().flatten() {
+                let Ok(mut meta) = serde_json::from_value::<ChatMeta>(row.clone()) else {
+                    continue;
+                };
+                if !valid_chat_id(&meta.chat) {
+                    continue;
+                }
+                if meta.state == "running" {
+                    meta.state = "idle".into(); // the host restarted mid-run
+                }
+                let seq = read_log(&log_path(host, &meta.chat))
+                    .iter()
+                    .filter_map(|l| l["seq"].as_u64())
+                    .max()
+                    .unwrap_or(0);
+                m.insert(
+                    meta.chat.clone(),
+                    ChatState {
+                        meta,
+                        seq,
+                        ..Default::default()
+                    },
+                );
             }
+            // Chats from before index.json (one `<chat>.meta.json` each).
+            for e in std::fs::read_dir(chats_dir(host))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let Some(chat) = name.strip_suffix(".meta.json") else {
+                    continue;
+                };
+                if !valid_chat_id(chat) || m.contains_key(chat) {
+                    continue;
+                }
+                let old: Json = std::fs::read(e.path())
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default();
+                let log = read_log(&log_path(host, chat));
+                let ts = |l: Option<&Json>| l.and_then(|l| l["ts"].as_i64()).unwrap_or(0);
+                let meta = ChatMeta {
+                    chat: chat.to_string(),
+                    canvas: old["canvas"].as_str().unwrap_or("main").to_string(),
+                    title: old["title"].as_str().unwrap_or(NEW_CHAT_TITLE).to_string(),
+                    created: ts(log.first()),
+                    updated: ts(log.last()),
+                    state: "idle".into(),
+                    ..Default::default()
+                };
+                let seq = log
+                    .iter()
+                    .filter_map(|l| l["seq"].as_u64())
+                    .max()
+                    .unwrap_or(0);
+                m.insert(
+                    chat.to_string(),
+                    ChatState {
+                        meta,
+                        seq,
+                        ..Default::default()
+                    },
+                );
+            }
+            m
+        });
+        f(chats)
+    }
+
+    fn save_index(host: &Host, chats: &HashMap<String, ChatState>) {
+        let mut rows: Vec<&ChatMeta> = chats.values().map(|s| &s.meta).collect();
+        rows.sort_by_key(|m| m.created);
+        let _ = std::fs::create_dir_all(chats_dir(host));
+        let tmp = chats_dir(host).join(format!("index.json.tmp{}", std::process::id()));
+        if std::fs::write(
+            &tmp,
+            serde_json::to_vec_pretty(&json!({"chats": rows})).unwrap_or_default(),
+        )
+        .is_ok()
+        {
+            let _ = std::fs::rename(tmp, chats_dir(host).join("index.json"));
+        }
+    }
+
+    fn mark_dirty(&self, canvas: &str) {
+        self.dirty.lock().unwrap().insert(canvas.to_string());
+    }
+
+    /// Start the task that broadcasts changed `chat.list`s (coalesced, every 250 ms).
+    pub fn start_list_task(&self, host: &Arc<Host>) {
+        self.flusher.call_once(|| {
+            let weak = Arc::downgrade(host);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    let Some(host) = weak.upgrade() else { return };
+                    let dirty: Vec<String> = host.chat.dirty.lock().unwrap().drain().collect();
+                    for canvas in dirty {
+                        host.emit(Event::ChatList {
+                            canvas: canvas.clone(),
+                            chats: host.chat.list(&host, Some(&canvas)),
+                        });
+                    }
+                }
+            });
+        });
+    }
+
+    /// Chats (newest activity first), not archived; one canvas or all.
+    pub fn list(&self, host: &Host, canvas: Option<&str>) -> Json {
+        self.with_chats(host, |chats| {
+            let mut v: Vec<&ChatState> = chats
+                .values()
+                .filter(|s| !s.meta.archived && canvas.is_none_or(|c| s.meta.canvas == c))
+                .collect();
+            v.sort_by_key(|s| std::cmp::Reverse(s.meta.updated));
+            Json::Array(v.into_iter().map(ChatState::list_row).collect())
         })
     }
 
-    fn save_meta(host: &Host, chat: &str, s: &ChatState) {
-        let _ = std::fs::create_dir_all(chats_dir(host));
-        let _ = std::fs::write(
-            meta_path(host, chat),
-            serde_json::to_vec_pretty(&json!({"chat": chat, "canvas": s.canvas, "title": s.title}))
-                .unwrap_or_default(),
-        );
+    /// Create an empty chat on `canvas`.
+    pub fn create(&self, host: &Host, canvas: &str) -> String {
+        let chat = new_chat_id();
+        self.ensure(host, &chat, canvas);
+        chat
     }
 
-    /// Number an event, persist it and broadcast it as `chat.event`.
+    /// Make sure a chat exists (new chats start with an automatic title).
+    fn ensure(&self, host: &Host, chat: &str, canvas: &str) {
+        self.with_chats(host, |chats| {
+            if !chats.contains_key(chat) {
+                let now = now_ms();
+                chats.insert(
+                    chat.to_string(),
+                    ChatState {
+                        meta: ChatMeta {
+                            chat: chat.to_string(),
+                            canvas: canvas.to_string(),
+                            title: NEW_CHAT_TITLE.into(),
+                            title_auto: true,
+                            created: now,
+                            updated: now,
+                            state: "idle".into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                );
+                Self::save_index(host, chats);
+            }
+        });
+        self.mark_dirty(canvas);
+    }
+
+    fn canvas_of(&self, host: &Host, chat: &str) -> Option<String> {
+        self.with_chats(host, |chats| chats.get(chat).map(|s| s.meta.canvas.clone()))
+    }
+
+    pub fn title_of(&self, host: &Host, chat: &str) -> Option<String> {
+        self.with_chats(host, |chats| chats.get(chat).map(|s| s.meta.title.clone()))
+    }
+
+    /// Rename / archive. Returns the chat's canvas.
+    fn update_meta(
+        &self,
+        host: &Host,
+        chat: &str,
+        f: impl FnOnce(&mut ChatMeta),
+    ) -> Result<String> {
+        let canvas = self.with_chats(host, |chats| {
+            let s = chats
+                .get_mut(chat)
+                .ok_or_else(|| anyhow!("unknown chat `{chat}`"))?;
+            f(&mut s.meta);
+            s.meta.updated = now_ms();
+            let canvas = s.meta.canvas.clone();
+            Self::save_index(host, chats);
+            Ok::<_, anyhow::Error>(canvas)
+        })?;
+        self.mark_dirty(&canvas);
+        Ok(canvas)
+    }
+
+    /// Number an event, persist it and broadcast it as `chat.event`. `cost` events are
+    /// rewritten to the chat's cumulative spend (`usd`), keeping the turn's as `turn_usd`.
     pub fn append(
         &self,
         host: &Host,
         chat: &str,
         canvas: Option<&str>,
-        event: Json,
+        mut event: Json,
     ) -> Result<u64> {
         if !valid_chat_id(chat) {
             bail!("bad chat id `{chat}`");
         }
-        let (seq, canvas) = {
-            let mut chats = self.chats.lock().unwrap();
-            let s = Self::state(host, &mut chats, chat, canvas.unwrap_or("main"));
-            let mut meta_dirty = false;
+        self.ensure(host, chat, canvas.unwrap_or("main"));
+        let (seq, canvas) = self.with_chats(host, |chats| {
+            let s = chats.get_mut(chat).expect("ensured");
+            let mut save = false;
             match event["kind"].as_str() {
-                Some("user") if s.title.is_empty() => {
-                    s.title = title_from(event["text"].as_str().unwrap_or_default());
-                    meta_dirty = true;
+                Some("user") => {
+                    if s.meta.title_auto {
+                        s.meta.title = title_from(event["text"].as_str().unwrap_or_default());
+                        s.meta.title_auto = false;
+                    }
+                    // A new turn: bank the last turn's spend.
+                    s.meta.cost += s.turn_cost;
+                    s.turn_cost = 0.0;
+                    save = true;
                 }
                 Some("title") => {
-                    s.title = event["title"]
+                    let t = event["text"]
                         .as_str()
+                        .or(event["title"].as_str())
                         .unwrap_or_default()
-                        .chars()
-                        .take(80)
-                        .collect();
-                    meta_dirty = true;
+                        .trim();
+                    if !t.is_empty() {
+                        s.meta.title = t.chars().take(80).collect();
+                        s.meta.title_auto = false;
+                        save = true;
+                    }
                 }
-                Some("status") => s.running = event["state"] == "running",
-                Some("done") => s.running = false,
+                Some("status") => {
+                    let st = event["state"].as_str().unwrap_or("idle").to_string();
+                    if st != "running" {
+                        s.agents.clear();
+                    }
+                    s.meta.state = st;
+                    save = true;
+                }
+                Some("agent") => {
+                    let a = event["agent"].as_str().unwrap_or("agent").to_string();
+                    match event["state"].as_str() {
+                        Some("done" | "failed") => {
+                            s.agents.remove(&a);
+                        }
+                        _ => {
+                            s.agents.insert(
+                                a,
+                                event["status"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .chars()
+                                    .take(140)
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+                Some("cost") => {
+                    s.turn_cost = event["usd"].as_f64().unwrap_or(0.0);
+                    event["turn_usd"] = json!(s.turn_cost);
+                    event["usd"] = json!(s.total_cost());
+                }
+                Some("done") => s.agents.clear(),
                 _ => {}
             }
-            if s.seq == 0 {
-                meta_dirty = true;
-            }
             s.seq += 1;
-            if meta_dirty {
-                Self::save_meta(host, chat, s);
+            s.meta.updated = now_ms();
+            let out = (s.seq, s.meta.canvas.clone());
+            if save {
+                Self::save_index(host, chats);
             }
-            (s.seq, s.canvas.clone())
-        };
+            out
+        });
+        // Every event can change the list row (agents, state, updated): coalesced broadcast.
+        self.mark_dirty(&canvas);
         let dir = chats_dir(host);
         std::fs::create_dir_all(&dir)?;
         let line = json!({"seq": seq, "ts": now_ms(), "event": event});
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join(format!("{chat}.jsonl")))?;
+            .open(log_path(host, chat))?;
         writeln!(f, "{line}")?;
         host.emit(Event::ChatEvent {
             canvas,
@@ -196,7 +464,7 @@ impl ChatHub {
     }
 
     /// Send a frame to the runtime, or queue it until one connects.
-    fn to_runtime(&self, frame: String) -> bool {
+    pub fn to_runtime(&self, frame: String) -> bool {
         if let Some((_, tx)) = &*self.runtime.lock().unwrap()
             && tx.send(frame.clone()).is_ok()
         {
@@ -228,14 +496,13 @@ impl ChatHub {
                 return;
             }
         }
-        let running: Vec<String> = self
-            .chats
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, s)| s.running)
-            .map(|(k, _)| k.clone())
-            .collect();
+        let running: Vec<String> = self.with_chats(host, |chats| {
+            chats
+                .iter()
+                .filter(|(_, s)| s.meta.state == "running")
+                .map(|(k, _)| k.clone())
+                .collect()
+        });
         for chat in running {
             let _ = self.append(
                 host,
@@ -248,6 +515,24 @@ impl ChatHub {
 
     pub fn runtime_connected(&self) -> bool {
         self.runtime.lock().unwrap().is_some()
+    }
+
+    /// Loop guard for cross-chat messages.
+    fn cross_chat_allowed(&self, from: &str, to: &str) -> bool {
+        let mut m = self.cross.lock().unwrap();
+        let q = m.entry((from.to_string(), to.to_string())).or_default();
+        let now = std::time::Instant::now();
+        while q
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > std::time::Duration::from_secs(60))
+        {
+            q.pop_front();
+        }
+        if q.len() >= CROSS_CHAT_PER_MIN {
+            return false;
+        }
+        q.push_back(now);
+        true
     }
 }
 
@@ -272,95 +557,299 @@ pub fn chat_frame(text: &str) -> Option<Json> {
         .filter(|m| m["type"].as_str().is_some_and(|t| t.starts_with("chat.")))
 }
 
-/// Handle a `chat.*` frame from a `/sync` client. Returns an error message for the client.
-pub async fn handle_client(host: &Arc<Host>, canvas: &str, author: &str, msg: &Json) -> Result<()> {
+/// `chat.list` frame for a canvas.
+pub fn list_frame(host: &Host, canvas: &str) -> Json {
+    json!({"type": "chat.list", "chats": host.chat.list(host, Some(canvas))})
+}
+
+/// Append a user message to `chat` and start a run there (queued by the runtime if busy).
+#[allow(clippy::too_many_arguments)]
+async fn deliver(
+    host: &Arc<Host>,
+    chat: &str,
+    canvas: &str,
+    text: &str,
+    author: &str,
+    chips: Vec<Json>,
+    options: Json,
+    from: Option<Json>,
+) -> Result<u64> {
     let hub = &host.chat;
+    hub.ensure(host, chat, canvas);
+    let canvas = hub
+        .canvas_of(host, chat)
+        .unwrap_or_else(|| canvas.to_string());
+    // Prior turns, before this message is appended.
+    let history = condensed_history(host, chat);
+    let mut ev = json!({"kind": "user", "text": text, "context": chips, "author": author});
+    if let Some(f) = &from {
+        ev["from_title"] = f["title"].clone();
+    }
+    let seq = hub.append(host, chat, Some(&canvas), ev)?;
+    let mut resolved = Vec::new();
+    for c in &chips {
+        resolved.push(match resolve_chip(host, &canvas, c).await {
+            Ok(r) => r,
+            Err(e) => json!({"chip": c, "error": format!("{e:#}")}),
+        });
+    }
+    let frame = json!({
+        "type": "run",
+        "chat": chat,
+        "canvas": canvas,
+        "title": hub.title_of(host, chat),
+        "text": text,
+        "author": author,
+        "from": from,
+        "context": resolved,
+        "history": history,
+        "options": options,
+        "project": host.dir().display().to_string(),
+    });
+    let delivered = hub.to_runtime(frame.to_string());
+    if !delivered && !hub.supervised.load(std::sync::atomic::Ordering::Relaxed) {
+        hub.append(
+            host,
+            chat,
+            None,
+            json!({"kind": "status", "state": "error",
+                   "error": "no agent runtime is connected (start the host with --runtime); the message is queued"}),
+        )?;
+    }
+    Ok(seq)
+}
+
+/// Handle a `chat.*` frame from a `/sync` client. Returns a reply for that client, if any.
+pub async fn handle_client(
+    host: &Arc<Host>,
+    canvas: &str,
+    author: &str,
+    msg: &Json,
+) -> Result<Option<Json>> {
+    let hub = &host.chat;
+    hub.start_list_task(host);
+    let chat_arg = || -> Result<String> {
+        let c = msg["chat"].as_str().context("needs chat")?;
+        if !valid_chat_id(c) {
+            bail!("bad chat id `{c}`");
+        }
+        Ok(c.to_string())
+    };
     match msg["type"].as_str() {
         Some("chat.send") => {
             let text = msg["text"].as_str().unwrap_or_default().trim().to_string();
             if text.is_empty() {
                 bail!("chat.send needs text");
             }
-            let chat = match msg["chat"].as_str() {
-                Some(c) if valid_chat_id(c) => c.to_string(),
-                Some(c) => bail!("bad chat id `{c}`"),
-                None => format!(
-                    "c_{}",
-                    (0..5)
-                        .map(|_| format!("{:02x}", rand::random::<u8>()))
-                        .collect::<String>()
-                ),
+            let chat = match msg.get("chat").filter(|c| !c.is_null()) {
+                Some(_) => chat_arg()?,
+                None => new_chat_id(),
             };
             let chips: Vec<Json> = msg["context"].as_array().cloned().unwrap_or_default();
             let options = msg.get("options").cloned().unwrap_or(Json::Null);
-            // Prior turns, before this message is appended.
-            let history = condensed_history(host, &chat);
-            hub.append(
-                host,
-                &chat,
-                Some(canvas),
-                json!({"kind": "user", "text": text, "context": chips, "author": author}),
-            )?;
-            let mut resolved = Vec::new();
-            for c in &chips {
-                resolved.push(match resolve_chip(host, canvas, c).await {
-                    Ok(r) => r,
-                    Err(e) => json!({"chip": c, "error": format!("{e:#}")}),
-                });
-            }
-            let chat_canvas = {
-                let mut chats = hub.chats.lock().unwrap();
-                ChatHub::state(host, &mut chats, &chat, canvas)
-                    .canvas
-                    .clone()
-            };
-            let frame = json!({
-                "type": "run",
-                "chat": chat,
-                "canvas": chat_canvas,
-                "text": text,
-                "author": author,
-                "context": resolved,
-                "history": history,
-                "options": options,
-                "project": host.dir().display().to_string(),
-            });
-            let delivered = hub.to_runtime(frame.to_string());
-            if !delivered && !hub.supervised.load(std::sync::atomic::Ordering::Relaxed) {
-                hub.append(
-                    host,
-                    &chat,
-                    None,
-                    json!({"kind": "status", "state": "error",
-                           "error": "no agent runtime is connected (start the host with --runtime); the message is queued"}),
-                )?;
-            }
-            Ok(())
+            deliver(host, &chat, canvas, &text, author, chips, options, None).await?;
+            Ok(None)
         }
         Some("chat.stop") => {
-            let chat = msg["chat"]
-                .as_str()
-                .filter(|c| valid_chat_id(c))
-                .context("chat.stop needs chat")?;
+            let chat = chat_arg()?;
             hub.to_runtime(json!({"type": "stop", "chat": chat}).to_string());
-            Ok(())
+            Ok(None)
+        }
+        Some("chat.new") => {
+            let chat = hub.create(host, canvas);
+            Ok(Some(json!({"type": "chat.created", "chat": chat})))
+        }
+        Some("chat.rename") => {
+            let chat = chat_arg()?;
+            let title: String = msg["title"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .chars()
+                .take(80)
+                .collect();
+            if title.is_empty() {
+                bail!("chat.rename needs a title");
+            }
+            hub.update_meta(host, &chat, |m| {
+                m.title = title;
+                m.title_auto = false;
+            })?;
+            Ok(None)
+        }
+        Some("chat.archive") => {
+            let chat = chat_arg()?;
+            hub.update_meta(host, &chat, |m| m.archived = true)?;
+            hub.to_runtime(json!({"type": "stop", "chat": chat}).to_string());
+            Ok(None)
         }
         other => bail!("unknown chat message {other:?}"),
     }
+}
+
+// ---- runtime requests (cross-chat) ------------------------------------------------------------
+
+/// Handle a `{"type":"request","id","op",…}` frame from the runtime; returns the reply frame.
+pub async fn handle_runtime_request(host: &Arc<Host>, msg: &Json) -> Json {
+    host.chat.start_list_task(host);
+    let id = msg["id"].clone();
+    let r: Result<Json> = async {
+        let hub = &host.chat;
+        match msg["op"].as_str() {
+            Some("chat.list") => Ok(hub.list(host, None)),
+            Some("chat.read") => {
+                let chat = msg["chat"].as_str().filter(|c| valid_chat_id(c)).context("needs chat")?;
+                let title = hub.title_of(host, chat).ok_or_else(|| anyhow!("unknown chat `{chat}`"))?;
+                let n = msg["last_n"].as_u64().unwrap_or(30).clamp(1, 200) as usize;
+                Ok(json!({"chat": chat, "title": title, "digest": chat_digest(host, chat, n)}))
+            }
+            Some("chat.send") => {
+                let from = msg["from"].as_str().filter(|c| valid_chat_id(c)).context("needs from")?;
+                let to = msg["chat"].as_str().filter(|c| valid_chat_id(c)).context("needs chat")?;
+                let text = msg["text"].as_str().unwrap_or_default().trim();
+                if text.is_empty() {
+                    bail!("chat.send needs text");
+                }
+                if from == to {
+                    bail!("a chat can't message itself");
+                }
+                let canvas = hub.canvas_of(host, to).ok_or_else(|| anyhow!("unknown chat `{to}`"))?;
+                if !hub.cross_chat_allowed(from, to) {
+                    bail!("loop guard: more than {CROSS_CHAT_PER_MIN} messages from {from} to {to} in the last minute");
+                }
+                let from_title = hub.title_of(host, from).unwrap_or_default();
+                let seq = deliver(
+                    host,
+                    to,
+                    &canvas,
+                    text,
+                    &format!("chat:{from}"),
+                    vec![],
+                    Json::Null,
+                    Some(json!({"chat": from, "title": from_title})),
+                )
+                .await?;
+                Ok(json!({"delivered": true, "chat": to, "seq": seq}))
+            }
+            other => bail!("unknown request op {other:?}"),
+        }
+    }
+    .await;
+    match r {
+        Ok(result) => json!({"type": "reply", "id": id, "ok": true, "result": result}),
+        Err(e) => json!({"type": "reply", "id": id, "ok": false, "error": format!("{e:#}")}),
+    }
+}
+
+/// Last `n` events of a chat as readable lines (user messages, director text, agents, tools,
+/// done), truncated. Used for `chat` chips and `chat_read`.
+pub fn chat_digest(host: &Host, chat: &str, n: usize) -> String {
+    let log = read_log(&log_path(host, chat));
+    let skip = log.len().saturating_sub(n);
+    let mut lines: Vec<String> = Vec::new();
+    let mut text = String::new();
+    let clip = |s: &str, max: usize| -> String {
+        let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if s.chars().count() > max {
+            format!("{}…", s.chars().take(max).collect::<String>())
+        } else {
+            s
+        }
+    };
+    let flush = |text: &mut String, lines: &mut Vec<String>| {
+        if !text.trim().is_empty() {
+            lines.push(format!("director: {}", clip(text, 600)));
+        }
+        text.clear();
+    };
+    for l in log.into_iter().skip(skip) {
+        let e = &l["event"];
+        match e["kind"].as_str() {
+            Some("text") => {
+                text.push_str(e["delta"].as_str().unwrap_or_default());
+                continue;
+            }
+            Some("user") => {
+                flush(&mut text, &mut lines);
+                lines.push(format!(
+                    "user ({}): {}",
+                    e["author"].as_str().unwrap_or("user"),
+                    clip(e["text"].as_str().unwrap_or_default(), 600)
+                ));
+            }
+            Some("agent") if matches!(e["state"].as_str(), Some("started" | "done" | "failed")) => {
+                flush(&mut text, &mut lines);
+                lines.push(format!(
+                    "agent {} {}: {}",
+                    e["agent"].as_str().unwrap_or("?"),
+                    e["state"].as_str().unwrap_or(""),
+                    clip(e["status"].as_str().unwrap_or_default(), 200)
+                ));
+            }
+            Some("tool") if e["state"] != "running" => {
+                flush(&mut text, &mut lines);
+                let nodes = e["nodes"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "[{}] {} {}{}{}",
+                    e["agent"].as_str().unwrap_or("?"),
+                    e["name"].as_str().unwrap_or("?"),
+                    e["state"].as_str().unwrap_or(""),
+                    e["summary"]
+                        .as_str()
+                        .map(|s| format!(" — {}", clip(s, 160)))
+                        .unwrap_or_default(),
+                    if nodes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" → {nodes}")
+                    }
+                ));
+            }
+            Some("done") => {
+                flush(&mut text, &mut lines);
+                lines.push(format!(
+                    "done: {}",
+                    clip(e["summary"].as_str().unwrap_or_default(), 800)
+                ));
+            }
+            Some("status") if e["state"] == "error" => {
+                flush(&mut text, &mut lines);
+                lines.push(format!(
+                    "error: {}",
+                    clip(e["error"].as_str().unwrap_or_default(), 200)
+                ));
+            }
+            _ => {}
+        }
+    }
+    flush(&mut text, &mut lines);
+    let mut out = lines.join("\n");
+    if out.chars().count() > 8000 {
+        out = out.chars().skip(out.chars().count() - 8000).collect();
+    }
+    untrusted(&out)
 }
 
 /// Prior turns of a chat as `[{role, text}]`: user messages and the director's text.
 fn condensed_history(host: &Host, chat: &str) -> Vec<Json> {
     let mut out: Vec<Json> = Vec::new();
     let mut assistant = String::new();
-    for l in read_log(&chats_dir(host).join(format!("{chat}.jsonl"))) {
+    for l in read_log(&log_path(host, chat)) {
         let e = &l["event"];
         match e["kind"].as_str() {
             Some("user") => {
                 if !assistant.is_empty() {
                     out.push(json!({"role": "assistant", "text": std::mem::take(&mut assistant)}));
                 }
-                out.push(json!({"role": "user", "text": e["text"]}));
+                out.push(json!({"role": "user", "text": e["text"], "author": e["author"]}));
             }
             Some("text") if e["agent"].as_str().is_none_or(|a| a == "director") => {
                 assistant.push_str(e["delta"].as_str().unwrap_or_default())
@@ -379,24 +868,19 @@ fn condensed_history(host: &Host, chat: &str) -> Vec<Json> {
     out
 }
 
-/// `chat.history` for a canvas: every chat whose canvas it is, oldest first.
+/// `chat.history` for a canvas: every (non-archived) chat on it, oldest first.
 pub fn history(host: &Host, canvas: &str) -> Json {
-    let mut chats = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(chats_dir(host)) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Some(chat) = name.strip_suffix(".meta.json") else {
-                continue;
-            };
-            let meta: Json = std::fs::read(e.path())
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or_default();
-            if meta["canvas"].as_str() != Some(canvas) {
-                continue;
-            }
-            let log = read_log(&chats_dir(host).join(format!("{chat}.jsonl")));
-            let first = log.first().and_then(|l| l["ts"].as_i64()).unwrap_or(0);
+    let rows: Vec<(i64, String, String)> = host.chat.with_chats(host, |chats| {
+        chats
+            .values()
+            .filter(|s| !s.meta.archived && s.meta.canvas == canvas)
+            .map(|s| (s.meta.created, s.meta.chat.clone(), s.meta.title.clone()))
+            .collect()
+    });
+    let mut chats: Vec<(i64, Json)> = rows
+        .into_iter()
+        .map(|(created, chat, title)| {
+            let log = read_log(&log_path(host, &chat));
             let skip = log.len().saturating_sub(HISTORY_EVENTS);
             let events: Vec<Json> = log
                 .into_iter()
@@ -407,12 +891,12 @@ pub fn history(host: &Host, canvas: &str) -> Json {
                     ev
                 })
                 .collect();
-            chats.push((
-                first,
-                json!({"chat": chat, "title": meta["title"], "events": events}),
-            ));
-        }
-    }
+            (
+                created,
+                json!({"chat": chat, "title": title, "events": events}),
+            )
+        })
+        .collect();
     chats.sort_by_key(|(t, _)| *t);
     json!({"type": "chat.history", "chats": chats.into_iter().map(|(_, c)| c).collect::<Vec<_>>()})
 }
@@ -455,6 +939,19 @@ fn quote_path(p: &Path) -> String {
 /// Resolve one chip to rows, lineage, local file and crop/frame hints.
 pub async fn resolve_chip(host: &Host, canvas: &str, chip: &Json) -> Result<Json> {
     let kind = chip["kind"].as_str().unwrap_or("node");
+    if kind == "chat" {
+        let chat = chip["chat"]
+            .as_str()
+            .filter(|c| valid_chat_id(c))
+            .context("chat chip needs chat")?;
+        let title = host
+            .chat
+            .title_of(host, chat)
+            .ok_or_else(|| anyhow!("unknown chat `{chat}`"))?;
+        return Ok(
+            json!({"chip": chip, "chat": chat, "title": title, "digest": chat_digest(host, chat, CHIP_EVENTS)}),
+        );
+    }
     if !matches!(kind, "node" | "spot" | "region" | "frame" | "range") {
         bail!("unknown chip kind `{kind}`");
     }

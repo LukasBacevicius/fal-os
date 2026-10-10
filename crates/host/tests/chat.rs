@@ -509,3 +509,284 @@ async fn chat_routing_and_history() {
     .unwrap();
     assert_eq!(next_of(&mut ui, "error").await["type"], "error");
 }
+
+async fn send(ws: &mut Ws, v: Json) {
+    ws.send(Message::Text(v.to_string().into())).await.unwrap();
+}
+
+/// Next `chat.list` satisfying `pred` (lists are coalesced, so intermediate states may be skipped).
+async fn list_until(ws: &mut Ws, pred: impl Fn(&[Json]) -> bool) -> Vec<Json> {
+    loop {
+        let l = next_of(ws, "chat.list").await;
+        let chats = l["chats"].as_array().unwrap().clone();
+        if pred(&chats) {
+            return chats;
+        }
+    }
+}
+
+thread_local! {
+    /// Run frames that arrived while `request` waited for its reply (one test per thread).
+    static RUNS: std::cell::RefCell<std::collections::VecDeque<Json>> = Default::default();
+}
+
+async fn next_run(rt: &mut Ws) -> Json {
+    if let Some(r) = RUNS.with(|q| q.borrow_mut().pop_front()) {
+        return r;
+    }
+    next_of(rt, "run").await
+}
+
+async fn request(rt: &mut Ws, id: u64, req: Json) -> Json {
+    let mut req = req;
+    req["type"] = json!("request");
+    req["id"] = json!(id);
+    send(rt, req).await;
+    loop {
+        let r = next_json(rt).await;
+        match r["type"].as_str() {
+            Some("reply") if r["id"] == id => return r,
+            Some("run") => RUNS.with(|q| q.borrow_mut().push_back(r)),
+            _ => {}
+        }
+    }
+}
+
+fn row<'a>(chats: &'a [Json], chat: &str) -> Option<&'a Json> {
+    chats.iter().find(|c| c["chat"] == chat)
+}
+
+#[tokio::test]
+async fn multi_chat_and_cross_chat() {
+    let env = start().await;
+    let mut rt = runtime_client(env.port, &env.host.chat.runtime_token)
+        .await
+        .unwrap();
+    let mut ui = sync_client(env.port).await;
+    next_of(&mut ui, "chat.history").await;
+    assert_eq!(next_of(&mut ui, "chat.list").await["chats"], json!([]));
+
+    // chat.new → chat.created (to the requester) + chat.list (to everyone); rename.
+    send(&mut ui, json!({"type": "chat.new"})).await;
+    let a = next_of(&mut ui, "chat.created").await["chat"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let chats = list_until(&mut ui, |c| row(c, &a).is_some()).await;
+    assert_eq!(row(&chats, &a).unwrap()["title"], "New chat");
+    assert_eq!(row(&chats, &a).unwrap()["state"], "idle");
+    send(
+        &mut ui,
+        json!({"type": "chat.rename", "chat": a, "title": "Logo"}),
+    )
+    .await;
+    list_until(&mut ui, |c| {
+        row(c, &a).is_some_and(|r| r["title"] == "Logo")
+    })
+    .await;
+
+    // Two chats run concurrently: both runs reach the runtime, both show running.
+    send(
+        &mut ui,
+        json!({"type": "chat.send", "chat": a, "text": "make a logo"}),
+    )
+    .await;
+    send(
+        &mut ui,
+        json!({"type": "chat.send", "text": "OPUS please direct me an ad for the headphones"}),
+    )
+    .await;
+    let r1 = next_run(&mut rt).await;
+    let r2 = next_run(&mut rt).await;
+    assert_eq!(r1["chat"], a);
+    assert_eq!(r1["title"], "Logo"); // a renamed chat keeps its title
+    let b = r2["chat"].as_str().unwrap().to_string();
+    for (chat, agent) in [(&a, "generator"), (&b, "motion")] {
+        for e in [
+            json!({"kind": "status", "state": "running"}),
+            json!({"kind": "agent", "agent": agent, "state": "working", "status": "busy"}),
+        ] {
+            send(&mut rt, json!({"type": "event", "chat": chat, "event": e})).await;
+        }
+    }
+    let chats = list_until(&mut ui, |c| {
+        c.iter()
+            .filter(|r| {
+                r["state"] == "running" && r["agents"].as_array().is_some_and(|a| a.len() == 1)
+            })
+            .count()
+            == 2
+    })
+    .await;
+    assert_eq!(
+        row(&chats, &b).unwrap()["title"],
+        "OPUS please direct me an ad for the headphones"
+    );
+    assert_eq!(
+        row(&chats, &b).unwrap()["agents"][0],
+        json!({"agent": "motion", "status": "busy"})
+    );
+
+    // Cost: per-turn values from the runtime become cumulative per chat.
+    send(
+        &mut rt,
+        json!({"type": "event", "chat": a, "event": {"kind": "cost", "usd": 0.5}}),
+    )
+    .await;
+    let ev = loop {
+        let e = next_of(&mut ui, "chat.event").await;
+        if e["event"]["kind"] == "cost" {
+            break e;
+        }
+    };
+    assert_eq!(
+        (
+            ev["event"]["usd"].as_f64(),
+            ev["event"]["turn_usd"].as_f64()
+        ),
+        (Some(0.5), Some(0.5))
+    );
+
+    // Runtime tools: chat.list, chat.send (delivered as a user event + a run), loop guard, chat.read.
+    let l = request(&mut rt, 1, json!({"op": "chat.list"})).await;
+    assert_eq!(l["ok"], true);
+    assert_eq!(l["result"].as_array().unwrap().len(), 2);
+    let r = request(
+        &mut rt,
+        2,
+        json!({"op": "chat.send", "from": b, "chat": a, "text": "need a logo for the end card"}),
+    )
+    .await;
+    assert_eq!(r["ok"], true, "{r}");
+    let ev = loop {
+        let e = next_of(&mut ui, "chat.event").await;
+        if e["chat"] == a
+            && e["event"]["kind"] == "user"
+            && e["event"]["author"] == format!("chat:{b}")
+        {
+            break e;
+        }
+    };
+    assert_eq!(
+        ev["event"]["from_title"],
+        "OPUS please direct me an ad for the headphones"
+    );
+    assert_eq!(ev["event"]["text"], "need a logo for the end card");
+    let run = next_run(&mut rt).await;
+    assert_eq!(
+        (run["chat"].as_str(), run["from"]["chat"].as_str()),
+        (Some(a.as_str()), Some(b.as_str()))
+    );
+    assert_eq!(run["author"], format!("chat:{b}"));
+    assert!(
+        run["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["text"] == "make a logo")
+    );
+    for i in 0..4 {
+        let r = request(
+            &mut rt,
+            10 + i,
+            json!({"op": "chat.send", "from": b, "chat": a, "text": format!("ping {i}")}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    let r = request(
+        &mut rt,
+        20,
+        json!({"op": "chat.send", "from": b, "chat": a, "text": "one too many"}),
+    )
+    .await;
+    assert_eq!(r["ok"], false);
+    assert!(r["error"].as_str().unwrap().contains("loop guard"));
+    // The reverse direction has its own budget; self-sends are refused.
+    assert_eq!(
+        request(
+            &mut rt,
+            21,
+            json!({"op": "chat.send", "from": a, "chat": b, "text": "logo done: n1"})
+        )
+        .await["ok"],
+        true
+    );
+    assert_eq!(
+        request(
+            &mut rt,
+            22,
+            json!({"op": "chat.send", "from": a, "chat": a, "text": "me"})
+        )
+        .await["ok"],
+        false
+    );
+    let rd = request(
+        &mut rt,
+        23,
+        json!({"op": "chat.read", "chat": a, "last_n": 50}),
+    )
+    .await;
+    let digest = rd["result"]["digest"].as_str().unwrap();
+    assert!(
+        digest.contains("need a logo for the end card")
+            && digest.contains(&format!("user (chat:{b})")),
+        "{digest}"
+    );
+
+    // A new turn banks the previous turn's spend.
+    send(
+        &mut rt,
+        json!({"type": "event", "chat": a, "event": {"kind": "cost", "usd": 0.25}}),
+    )
+    .await;
+    let ev = loop {
+        let e = next_of(&mut ui, "chat.event").await;
+        if e["event"]["kind"] == "cost" {
+            break e;
+        }
+    };
+    assert_eq!(
+        (
+            ev["event"]["usd"].as_f64(),
+            ev["event"]["turn_usd"].as_f64()
+        ),
+        (Some(0.75), Some(0.25))
+    );
+
+    // A chat chip resolves to the chat's title and a digest of its recent events.
+    send(&mut ui, json!({"type": "chat.send", "text": "use what #Logo made", "context": [{"kind": "chat", "chat": a}]})).await;
+    let run = loop {
+        let r = next_run(&mut rt).await;
+        if r["text"] == "use what #Logo made" {
+            break r;
+        }
+    };
+    assert_eq!(run["context"][0]["title"], "Logo");
+    assert!(
+        run["context"][0]["digest"]
+            .as_str()
+            .unwrap()
+            .contains("make a logo")
+    );
+
+    // Archive hides the chat; everything is persisted in chats/index.json.
+    send(&mut ui, json!({"type": "chat.archive", "chat": b})).await;
+    list_until(&mut ui, |c| row(c, &b).is_none() && row(c, &a).is_some()).await;
+    let index: Json =
+        serde_json::from_slice(&std::fs::read(env.host.dir().join("chats/index.json")).unwrap())
+            .unwrap();
+    let rows = index["chats"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    let ra = rows.iter().find(|r| r["chat"] == a).unwrap();
+    assert_eq!(
+        (ra["title"].as_str(), ra["state"].as_str()),
+        (Some("Logo"), Some("running"))
+    );
+    assert!((ra["cost"].as_f64().unwrap() - 0.5).abs() < 1e-9); // banked; the open turn adds 0.25
+    assert_eq!(
+        rows.iter().find(|r| r["chat"] == b).unwrap()["archived"],
+        true
+    );
+    assert!(env.host.dir().join(format!("chats/{a}.jsonl")).exists());
+}

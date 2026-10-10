@@ -90,6 +90,7 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
     if !send_json(&mut socket, hello).await
         || !send_snapshot(&host, &canvas, &mut socket).await
         || !send_json(&mut socket, crate::chat::history(&host, &canvas)).await
+        || !send_json(&mut socket, crate::chat::list_frame(&host, &canvas)).await
     {
         host.close_session(&info.id);
         return;
@@ -127,8 +128,10 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                 }
                 Some(Ok(Message::Text(t))) if let Some(m) = crate::chat::chat_frame(&t) => {
                     // chat.send / chat.stop: see chat.rs.
-                    if let Err(e) = crate::chat::handle_client(&host, &canvas, &name, &m).await {
-                        let _ = send_json(&mut socket, json!({"type": "error", "message": format!("{e:#}")})).await;
+                    match crate::chat::handle_client(&host, &canvas, &name, &m).await {
+                        Ok(Some(reply)) => { let _ = send_json(&mut socket, reply).await; }
+                        Ok(None) => {}
+                        Err(e) => { let _ = send_json(&mut socket, json!({"type": "error", "message": format!("{e:#}")})).await; }
                     }
                 }
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<ClientMsg>(&t) {

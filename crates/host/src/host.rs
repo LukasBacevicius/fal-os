@@ -87,6 +87,12 @@ pub enum Event {
         seq: u64,
         event: serde_json::Value,
     },
+    /// The chats of a canvas changed (see `chat.rs`).
+    #[serde(rename = "chat.list")]
+    ChatList {
+        canvas: String,
+        chats: serde_json::Value,
+    },
 }
 
 impl Event {
@@ -97,7 +103,8 @@ impl Event {
             | Event::ClaimRevoked { canvas, .. }
             | Event::AnnotationAssigned { canvas, .. }
             | Event::Job { canvas, .. }
-            | Event::ChatEvent { canvas, .. } => Some(canvas),
+            | Event::ChatEvent { canvas, .. }
+            | Event::ChatList { canvas, .. } => Some(canvas),
             Event::Presence { .. } | Event::SessionClosed { .. } => None,
         }
     }

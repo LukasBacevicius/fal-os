@@ -21,6 +21,10 @@ const token = opt("--token") ?? process.env.FALOS_TOKEN ?? "";
 const out = opt("--out") ?? ".";
 const canvas = opt("--canvas") ?? "main";
 const seedPrompt = opt("--seed-photo");
+/** Reference another chat with a `chat` chip (repeatable as comma list). */
+const chatChips = (opt("--chat-chip") ?? "").split(",").filter(Boolean);
+/** Follow every chat (cross-chat runs), finishing when all are idle. */
+const followAll = args.includes("--follow-all") ? (args.splice(args.indexOf("--follow-all"), 1), true) : false;
 let photo = opt("--photo");
 const text = args.join(" ") || "OPUS please direct me an ad for the headphones";
 mkdirSync(out, { recursive: true });
@@ -61,12 +65,16 @@ let docEvents = 0;
 const created = new Set<string>();
 const sessions = new Map<string, string>();
 let cost = 0;
+let lastList = "";
+const states = new Map<string, string>();
+let idleTimer: NodeJS.Timeout | undefined;
 
 ws.on("message", (data, isBinary) => {
   if (isBinary) return;
   const m = JSON.parse(String(data));
   if (m.type === "hello") {
-    ws.send(JSON.stringify({ type: "chat.send", text, context: productNode ? [{ kind: "node", node: productNode }] : [] }));
+    const context = [...(productNode ? [{ kind: "node", node: productNode }] : []), ...chatChips.map((c) => ({ kind: "chat", chat: c }))];
+    ws.send(JSON.stringify({ type: "chat.send", text, context }));
     console.log(`${ts()} → chat.send ${JSON.stringify(text)}${productNode ? ` + chip ${productNode}` : ""}`);
   } else if (m.type === "doc") {
     docEvents++;
@@ -78,10 +86,19 @@ ws.on("message", (data, isBinary) => {
     const s = m.session;
     if (s.presence?.status && sessions.get(s.id) !== s.presence.status) console.log(`${ts()}   ◉ ${s.agentName}: ${s.presence.status}`);
     sessions.set(s.id, s.presence?.status ?? "");
+  } else if (m.type === "chat.list") {
+    const line = m.chats.map((c: any) => `${c.title} [${c.state}${c.agents?.length ? ` · ${c.agents.map((a: any) => a.agent).join(",")}` : ""}] $${c.cost}`).join(" | ");
+    if (line !== lastList) console.log(`\n${ts()} LIST ${line}`);
+    lastList = line;
   } else if (m.type === "chat.event") {
     chat ??= m.chat;
     appendFileSync(logFile, JSON.stringify({ t: Date.now() - t0, ...m }) + "\n");
     const e = m.event;
+    if (m.chat !== chat) {
+      if (!followAll) return;
+      process.stdout.write(`\n${ts()} «${m.chat}» `);
+      if (e.kind === "status") states.set(m.chat, e.state);
+    }
     switch (e.kind) {
       case "text":
         process.stdout.write(e.delta);
@@ -105,7 +122,14 @@ ws.on("message", (data, isBinary) => {
         break;
       case "status":
         console.log(`\n${ts()} status ${e.state}${e.error ? ` (${e.error})` : ""}`);
-        if (e.state === "idle" || e.state === "error") finish(e.state === "error" ? 1 : 0);
+        states.set(m.chat, e.state);
+        if (!followAll) {
+          if (m.chat === chat && (e.state === "idle" || e.state === "error")) finish(e.state === "error" ? 1 : 0);
+        } else {
+          // Done when every chat we've seen is idle for a while (cross-chat replies may follow).
+          clearTimeout(idleTimer);
+          if ([...states.values()].every((s) => s !== "running")) idleTimer = setTimeout(() => finish(0), 45_000);
+        }
         break;
     }
   }

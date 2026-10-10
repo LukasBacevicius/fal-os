@@ -20,6 +20,21 @@ function send(msg: unknown) {
   else outbox.push(s);
 }
 
+let nextReq = 1;
+const waiting = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+
+/** Ask the host something (cross-chat ops); resolves with `result` or rejects with `error`. */
+export function hostRequest(op: string, args: Record<string, unknown>): Promise<any> {
+  const id = nextReq++;
+  return new Promise((resolve, reject) => {
+    waiting.set(id, { resolve, reject });
+    send({ type: "request", id, op, ...args });
+    setTimeout(() => {
+      if (waiting.delete(id)) reject(new Error(`host request ${op} timed out`));
+    }, 30_000);
+  });
+}
+
 function log(message: string) {
   console.log(`[runtime] ${message}`);
 }
@@ -30,7 +45,7 @@ async function start(frame: RunFrame) {
     queued.set(frame.chat, [...(queued.get(frame.chat) ?? []), frame]);
     return;
   }
-  const run = new ChatRun(frame, (event) => send({ type: "event", chat: frame.chat, event }));
+  const run = new ChatRun(frame, (event) => send({ type: "event", chat: frame.chat, event }), hostRequest);
   runs.set(frame.chat, run);
   log(`run ${frame.chat}: ${frame.text.slice(0, 80)}`);
   try {
@@ -59,7 +74,13 @@ function connect() {
     } catch {
       return;
     }
-    if (msg.type === "run") void start(msg as RunFrame);
+    if (msg.type === "reply") {
+      const w = waiting.get(msg.id);
+      if (w) {
+        waiting.delete(msg.id);
+        msg.ok ? w.resolve(msg.result) : w.reject(new Error(msg.error ?? "host request failed"));
+      }
+    } else if (msg.type === "run") void start(msg as RunFrame);
     else if (msg.type === "stop") {
       queued.delete(msg.chat);
       runs.get(msg.chat)?.stop();

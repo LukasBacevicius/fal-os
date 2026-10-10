@@ -51,6 +51,7 @@ async fn ws_handler(
 }
 
 async fn run(host: Arc<Host>, mut socket: WebSocket) {
+    host.chat.start_list_task(&host);
     let (id, mut rx) = host.chat.connect_runtime();
     tracing::info!("agent runtime connected");
     let hello = json!({"type": "hello", "project": host.dir().display().to_string()});
@@ -84,7 +85,7 @@ async fn run(host: Arc<Host>, mut socket: WebSocket) {
     host.chat.disconnect_runtime(&host, id);
 }
 
-fn handle(host: &Host, text: &str) {
+fn handle(host: &Arc<Host>, text: &str) {
     let Ok(msg) = serde_json::from_str::<Json>(text) else {
         tracing::warn!("runtime sent bad JSON");
         return;
@@ -104,6 +105,14 @@ fn handle(host: &Host, text: &str) {
             {
                 tracing::warn!("chat event dropped: {e:#}");
             }
+        }
+        // Cross-chat requests (chat.list / chat.read / chat.send): answered with a `reply`.
+        Some("request") => {
+            let host = host.clone();
+            tokio::spawn(async move {
+                let reply = crate::chat::handle_runtime_request(&host, &msg).await;
+                host.chat.to_runtime(reply.to_string());
+            });
         }
         Some("log") => tracing::info!("runtime: {}", msg["message"].as_str().unwrap_or_default()),
         _ => {}

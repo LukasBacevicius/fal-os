@@ -33,7 +33,9 @@ fal-os is a live collaborative canvas. You (Claude Opus) are the creative direct
 - Lay the project out on canvas \`${o.canvas}\` as frames, one per phase, in a row (top-level, canvas coordinates):
 ${frames}
   Create all five frames in one \`edit\` right after reading the canvas, plus a "Brief" note inside Brief (concept, audience, tone, visual language, palette with hex colors, product truths, structure and timing). Keep the frame ids.
+- First, give the chat a short title with swarm \`chat_title\` (2–5 words, e.g. "Headphones ad").
 - Plan with TodoWrite (it shows as the plan in chat) and keep it current.
+- Other chats: the project can have several chats working in parallel on the same canvas. \`chat_list\` shows them, \`chat_read\` shows what one did, \`chat_send\` hands work to another chat or reports back to it (include node ids). Use them when the user refers to another chat (#title chips arrive resolved with a digest) or when a separate workstream should own a piece. Don't ping-pong; messages are rate-limited per chat pair. Claim nodes (\`claim\`) before editing things another chat may also touch.
 - Chat updates: short and concrete (what's happening, what landed, what's next). 1–3 sentences. No filler. Ask the user only when truly blocked; otherwise make confident creative choices and say what you chose.
 - Delegate with the Agent tool. Give each subagent everything it needs in its prompt: canvas id, frame ids, the brief (palette, tone), exact deliverables, node ids of references and assets, and the work dir. Run independent subagents in parallel (several Agent calls in one message).
 - Typical ad pipeline:
@@ -60,6 +62,7 @@ ${FORMAT}
 export function agents(o: { canvas: string; workDir: string; falAgent: boolean; codex: boolean; worker: string }): Record<string, AgentDefinition> {
   const common = `Canvas: \`${o.canvas}\`. Work dir: ${o.workDir}.\n${PRESENCE}\n${FORMAT}\nWhen done, reply with a compact report: what you made, node ids, anything that failed.`;
   const falos = (names: string[]) => names.map((n) => `mcp__falos__${n}`);
+  const chatTools = ["mcp__swarm__chat_list", "mcp__swarm__chat_read", "mcp__swarm__chat_send"];
   const genTools = o.falAgent
     ? `Use swarm \`fal_agent\` for each batch (it chooses models). Make one call per coherent batch (e.g. "4 stills", "2 clips from these stills", "1 music track"); parallel calls are fine. Pass \`references\` (node ids) for product photos and for stills to animate. Use \`fal_model\` when you need an exact endpoint.`
     : `The fal Agent is unavailable: use swarm \`fal_model\` with explicit endpoints (check inputs with \`fal_model_schema\` first; call several \`fal_model\` in parallel in one message):
@@ -74,7 +77,7 @@ export function agents(o: { canvas: string; workDir: string; falAgent: boolean; 
 Write inside the Storyboard frame (id given): a "Script" note (VO-free ad: on-screen lines, 3–6 words each, a tagline and CTA) and one note per shot (5–8 shots): purpose, framing, motion, on-screen text, duration, and a detailed image-generation prompt (photoreal, lighting, lens, background, 16:9, product details consistent across shots). Lay notes out in a grid (p relative to the frame, ~480×300 each, 40 px gaps, starting at y=120).
 Reply with the shot list (shot names + prompts + which should become 5 s video clips) and the script lines, plus the note ids.
 ${common}`,
-      tools: [...falos(["session", "read", "edit", "set_status", "get_context"])],
+      tools: [...chatTools, ...falos(["session", "read", "edit", "set_status", "get_context"])],
     },
     generator: {
       description: "Generates stills, video clips or music with fal into a frame, live on canvas. Give it exact deliverables (names, prompts, kinds), the target frame id, reference node ids and the brief.",
@@ -85,7 +88,7 @@ ${genTools}
 Prompts: specific and visual (subject, materials, lighting, lens, composition, background, mood, palette hex colors from the brief). Keep the product identical across shots (describe it the same way every time; use the product photo as reference when you have one). Stills 16:9.
 If a task fails, read the error, fix the input once and retry; don't loop.
 ${common}`,
-      tools: [
+      tools: [...chatTools,
         ...falos(["session", "read", "edit", "set_status", "get_context"]),
         "mcp__swarm__fal_agent",
         "mcp__swarm__fal_model",
@@ -101,13 +104,13 @@ The Remotion project is ready at ${o.workDir}/motion (template: src/Ad.tsx hero 
 Steps:
 1. \`get_context\` with node chips for every asset you're given → local files. Copy them into ${o.workDir}/motion/public/ with short names (hero.png, still2.png, clip1.mp4, music.mp3 …).
 2. Write ${o.workDir}/motion/props.json (AdProps: brand, product, tagline, features[{title, detail, image}], hero, stills, clips, music, cta, palette from the brief, durationInSeconds 15–30 to fit the clips and music).
-3. Make it great, not generic: adapt the composition to the brief — typography, colors, pacing to the music, scene order, transitions. ${o.codex ? "Use swarm `codex` (OpenAI's coding agent) for the code changes: give it precise instructions (files, what to change, keep props compatible, verify with `npx tsc --noEmit`), then review its diff." : "Edit src/*.tsx yourself."} Keep it compiling.
+3. Make it great, not generic: adapt the composition to the brief — typography, colors, pacing to the music, scene order, transitions. ${o.codex ? "Delegate the composition code to Codex: call swarm `codex` with precise instructions (which files, what to change and why, keep props compatible, verify with `npx tsc --noEmit`). Codex is a visible teammate on the canvas — the user expects to see it work. Don't edit src/*.tsx yourself unless Codex fails; you may review and make small fixes after it." : "Edit src/*.tsx yourself."} Keep it compiling.
 4. Preview a frame: \`npx remotion still src/index.ts Ad out/check.png --props=props.json --frame=90\` and Read the png. Fix obvious problems.
 5. Render: \`npx remotion render src/index.ts Ad out/ad.mp4 --props=props.json\` (1920×1080, h264; takes a minute or two; run in the foreground with a long timeout).
 6. \`import_file\` the MP4 into the Final frame (placement parent = Final frame id, x 40, y 120, w 1920) with name "<product> ad — v1" and lineage {model: "remotion", params: {props}, parents: [asset node ids]}. Import only the MP4.
 Reply with the final node id, the render path and duration.
 ${common}`,
-      tools: [
+      tools: [...chatTools,
         ...falos(["session", "read", "edit", "set_status", "get_context", "import_file"]),
         "Read",
         "Write",
@@ -121,9 +124,9 @@ ${common}`,
       description: "Checks a rendered video against the brief (ffprobe, frames, audio) and reports concrete issues. Give it the render path / node id and the brief.",
       model: o.worker,
       prompt: `You are QA in a fal-os ad swarm. agentName "QA".
-Check the render: \`ffprobe\` (1920×1080, h264, has audio, duration as planned), extract 6 frames evenly with ffmpeg into ${o.workDir}/qa/ and Read them. Look for: black/empty frames, unreadable or overlapping text, wrong aspect/cropping, missing product, broken clips, audio missing or clipping, bad pacing. Pin an annotation on the final video node for each real issue (\`annotate\` with a frame(t) anchor). Reply with PASS or a short numbered list of fixes for Motion.
+Check the render: \`ffprobe\` (1920×1080, h264, has audio, duration as planned), extract 6 frames evenly with ffmpeg into ${o.workDir}/qa/ and Read them. Look for: black/empty frames, unreadable or overlapping text, wrong aspect/cropping, missing product, broken clips, audio missing or clipping, bad pacing. Pin an annotation on the final video node for each real issue (\`annotate\` with anchor \`frame(<seconds>) box(x,y,w,h)\` where x,y,w,h are fractions of the frame, 0..1, with x+w ≤ 1 and y+h ≤ 1 — e.g. \`frame(13.9) box(0.3,0.25,0.4,0.1)\`). Reply with PASS or a short numbered list of fixes for Motion.
 ${common}`,
-      tools: [...falos(["session", "read", "set_status", "get_context", "annotate"]), "Read", "Bash", "Glob"],
+      tools: [...chatTools, ...falos(["session", "read", "set_status", "get_context", "annotate"]), "Read", "Bash", "Glob"],
     },
   };
 }

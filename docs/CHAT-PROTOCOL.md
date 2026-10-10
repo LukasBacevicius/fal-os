@@ -52,6 +52,43 @@ Host → client, broadcast to every client on the chat's canvas:
 - `seq` is per chat and increases by 1.
 - `chat.history` covers the chats of this canvas, with up to 5000 events each.
 
+## Multiple chats
+A project can have many chats. They can **run concurrently**: each turn is its own SDK query, every subagent still has its own fal-os session and cursor, and claims prevent collisions on the canvas.
+
+Client → host:
+```jsonc
+{ "type": "chat.new" }                                   // → reply to the sender: {"type":"chat.created","chat":"c_…"}, then chat.list to everyone
+{ "type": "chat.rename", "chat": "c_…", "title": "…" }
+{ "type": "chat.archive", "chat": "c_…" }                // hidden from list/history; a running turn is stopped
+```
+Host → client, sent after `hello` (after `chat.history`) and again whenever anything changes:
+```jsonc
+{ "type": "chat.list", "canvas": "main", "chats": [{ "chat": "c_…", "canvas": "main", "title": "Headphones ad", "state": "running" | "idle" | "error",
+  "updated": 1760000000000, "agents": [{ "agent": "motion", "status": "rendering 0:07/0:15" }], "cost": 0.42 }] }   // newest activity first
+```
+- **Coalescing.** Changes are broadcast at most every 250 ms per canvas.
+- **`agents`** lists the agents working right now: their latest `agent` event is not done or failed.
+- **`cost`** is the chat's cumulative fal spend across turns.
+- **Titles.** A new chat starts as "New chat".
+  - The first message sets the title to its first words.
+  - The Director usually sets a short title early, through the swarm tool `chat_title`, which emits `{"kind":"title","text":"…"}`.
+  - `chat.rename` fixes the title.
+- **Persistence.** Everything is kept in `<project>/chats/index.json` (`chat, canvas, title, created, updated, archived, cost, state`) plus `<chat>.jsonl`.
+
+**Chats talking to each other.** Every Director and subagent has the swarm tools `chat_list()`, `chat_read(chat, last_n)` and `chat_send(chat, text)`. The runtime asks the host over `/runtime`:
+```jsonc
+{ "type": "request", "id": 7, "op": "chat.list" }
+{ "type": "request", "id": 8, "op": "chat.read", "chat": "c_b", "last_n": 30 }         // → {chat, title, digest}
+{ "type": "request", "id": 9, "op": "chat.send", "from": "c_a", "chat": "c_b", "text": "…" }
+// host → runtime: { "type": "reply", "id": 9, "ok": true, "result": {"delivered": true, "chat": "c_b", "seq": 12} } | { …, "ok": false, "error": "…" }
+```
+- **Delivery.** `chat.send` appends `{"kind":"user","author":"chat:c_a","from_title":"…","text":"…"}` to the target chat. It also sends a `run` with `"from":{"chat","title"}`. The run starts at once if the target is idle; otherwise it queues after the current turn.
+- **Replies.** The target Director is told to report back with `chat_send` when it's done.
+- **In the source chat**, the call shows as a normal `tool` event named `chat_send`.
+- **Loop guard.** At most 5 messages per minute per (from, to) pair. A chat can't message itself.
+
+**Chat chips.** `{ "kind": "chat", "chat": "c_…" }` references another chat; in the input it is written `#title`. It resolves to `{chip, chat, title, digest}`, where the digest covers the last ~20 events (user messages, Director text, agents, tools with node ids, results), truncated and wrapped as untrusted data.
+
 ## Runtime events (`event` payload)
 ```jsonc
 { "kind": "user", "text": "…", "context": [/* chips */], "author": "lukas" }
@@ -63,9 +100,10 @@ Host → client, broadcast to every client on the chat's canvas:
 { "kind": "tool", "agent": "generator-1", "id": "t1", "name": "generate", "summary": "flux-pro · hero shot 2",
   "state": "running" | "done" | "error", "nodes": ["x1y2z3"] }        // nodes touched → clickable in chat
 { "kind": "plan", "agent": "director", "steps": [{ "title": "Storyboard", "state": "done" }, …] }
-{ "kind": "cost", "usd": 0.42 }                                       // cumulative fal spend for the chat
+{ "kind": "cost", "usd": 0.42, "turn_usd": 0.12 }                     // cumulative fal spend for the chat (the host adds up turns; the runtime reports per turn)
 { "kind": "done", "summary": "…", "nodes": ["final01"] }
-{ "kind": "title", "title": "Headphones ad" }                         // optional; otherwise the title comes from the first user message
+{ "kind": "title", "text": "Headphones ad" }                          // Director's chat_title ("title" is accepted as the field name too)
+{ "kind": "user", "author": "chat:c_a", "from_title": "Logo", "text": "…" } // a message delivered from another chat
 ```
 Agents are labelled by subagent type (`storyboard`, `generator`, `generator-2`, `motion`, `qa`) and `codex`. `director` is the main agent. The runtime emits these event kinds:
 - `tool` events for canvas tools, with the touched `nodes`;

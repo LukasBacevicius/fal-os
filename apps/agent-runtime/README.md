@@ -14,7 +14,7 @@ The swarm behind the chat panel. You type "OPUS please direct me an ad for the h
 ```
 host ──ws /runtime──► runtime (this) ── Claude Agent SDK query per chat turn
                                         ├─ MCP falos  → http://127.0.0.1:<port>/mcp (canvas: session/read/edit/set_status/import_file/get_context/…)
-                                        └─ MCP swarm  (in-process): fal_agent · fal_model · fal_model_schema · media_url · codex
+                                        └─ MCP swarm  (in-process): fal_agent · fal_model · fal_model_schema · media_url · codex · chat_list/read/send/title
 ```
 
 ## Run
@@ -69,6 +69,17 @@ Anything on the canvas can be a reference or a direct model input: generated med
 - `fal_model_schema(model)`: input fields of an endpoint, from fal's public OpenAPI.
 - `media_url(sessionId, nodes)`: public URLs for canvas media.
 - `codex(task, dir?)`: a Codex thread (`workspace-write`, no approvals) in the chat workspace. It has its own "Codex" session and status.
+
+## Multiple chats
+- Chats run concurrently, one SDK query each. A follow-up to a busy chat queues behind its current turn.
+- Every Director and subagent can use these swarm tools:
+  - `chat_list`, `chat_read(chat, last_n)`: see what other chats are doing.
+  - `chat_send(chat, text)`: hand work to another chat or report back.
+  - `chat_title(title)`: Director only; names its own chat.
+- The host delivers `chat_send` as a user message from `chat:<id>` and starts a run in that chat. That chat's Director reports back with `chat_send`.
+- A loop guard limits each chat pair to 5 messages per minute.
+- A `#chat` chip in the user's message arrives as a digest of that chat.
+- See `docs/CHAT-PROTOCOL.md` → Multiple chats.
 
 ## Files
 - `<project>/chats/<chat>.jsonl`: chat events, written by the host.
