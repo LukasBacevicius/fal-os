@@ -67,6 +67,11 @@ struct App {
     reduce_motion: bool,
     /// Nodes highlighted from outside the canvas (layers row hover).
     highlight: Vec<String>,
+    /// Asset id → (source badge, uploaded to fal), refreshed when asset records change.
+    sources: HashMap<String, (u32, bool)>,
+    /// Lineage view: the nodes kept bright (the selection's ancestors and descendants);
+    /// everything else is dimmed. `None` = off.
+    lineage: Option<HashSet<String>>,
     palette: Palette,
     /// Generation nodes removed recently (id → ms): when a media node with the same id
     /// appears (the host converts a finished generation in place), it reveals with a crossfade.
@@ -336,6 +341,7 @@ impl App {
             return;
         }
         self.sink_apply(|scene, doc, sink| scene.apply(doc, &ch, sink));
+        self.refresh_sources(ch.assets);
         if self.ix.prune(&self.scene) {
             let sel = self.ix.selection.clone();
             self.emit("selection", json!(sel));
@@ -429,6 +435,35 @@ impl App {
             .collect();
         let claims: Vec<[f32; 4]> = self.claims.iter().filter_map(|id| self.scene.get(id)).map(|n| n.rect).collect();
         let dragging = self.ix.dragging();
+        let hover = self.ix.hover.as_deref();
+        let badges: Vec<overlay::BadgeView> = self
+            .scene
+            .iter()
+            .filter(|n| n.handle.is_some() && n.kind != NodeKind::Generation)
+            .filter_map(|n| {
+                let src = n.asset.as_ref().and_then(|a| self.sources.get(a)).copied();
+                let final_role = n.role.as_deref() == Some("final");
+                if src.is_none() && !final_role {
+                    return None;
+                }
+                Some(overlay::BadgeView {
+                    rect: n.rect,
+                    source: src.map(|s| s.0),
+                    uploaded: src.is_some_and(|s| s.1),
+                    final_role,
+                    force: !dragging && (hover == Some(n.id.as_str()) || self.ix.selection.iter().any(|s| s == &n.id)),
+                })
+            })
+            .collect();
+        let dim: Vec<[f32; 4]> = match &self.lineage {
+            Some(keep) => self
+                .scene
+                .iter()
+                .filter(|n| n.handle.is_some() && !matches!(n.kind, NodeKind::Frame | NodeKind::Group) && !keep.contains(&n.id))
+                .map(|n| n.rect)
+                .collect(),
+            None => Vec::new(),
+        };
         overlay::build(&OverlayInput {
             scene: &self.scene,
             palette: &self.palette,
@@ -442,6 +477,8 @@ impl App {
             cursors: &cursors,
             activity: &activity,
             highlight: &highlight,
+            badges: &badges,
+            dim: &dim,
             dpr: self.dpr,
             px_world: 1.0 / self.camera.zoom.max(1e-3),
         })
@@ -698,8 +735,22 @@ impl App {
         self.dirty = true;
     }
 
+    /// Fills the badge cache for assets seen on nodes (`all`: asset records changed, so
+    /// recompute everything).
+    fn refresh_sources(&mut self, all: bool) {
+        if all {
+            self.sources.clear();
+        }
+        let missing: Vec<String> = self.scene.iter().filter_map(|n| n.asset.clone()).filter(|a| !self.sources.contains_key(a)).collect();
+        for a in missing {
+            let rec = self.doc.asset(&a).and_then(|r| serde_json::to_value(r).ok()).unwrap_or(Json::Null);
+            self.sources.insert(a, overlay::badge_of(&rec));
+        }
+    }
+
     fn rebuild_scene(&mut self) {
         self.sink_apply(|scene, doc, sink| scene.rebuild(doc, sink));
+        self.refresh_sources(true);
         let _ = self.feed.take();
         self.ix.prune(&self.scene);
         self.dirty = true;
@@ -1131,6 +1182,8 @@ impl CanvasApp {
                 working: Vec::new(),
                 reduce_motion: false,
                 highlight: Vec::new(),
+                sources: HashMap::new(),
+                lineage: None,
                 palette: overlay::DARK,
                 gen_removed: HashMap::new(),
                 reveal: HashSet::new(),
@@ -1839,6 +1892,17 @@ impl CanvasApp {
         let mut a = self.app.borrow_mut();
         if a.highlight != ids {
             a.highlight = ids;
+            a.dirty = true;
+        }
+    }
+
+    /// Lineage view (docs/ASSETS-V1.md §5): nodes outside `ids` are dimmed; `null` turns it off.
+    #[wasm_bindgen(js_name = setLineage)]
+    pub fn set_lineage(&self, ids: JsValue) {
+        let keep: Option<HashSet<String>> = serde_json::from_value(from_js(&ids)).ok().flatten();
+        let mut a = self.app.borrow_mut();
+        if a.lineage != keep {
+            a.lineage = keep;
             a.dirty = true;
         }
     }

@@ -99,6 +99,45 @@ pub const fn with_alpha(c: u32, a: u8) -> u32 {
     (c & 0x00ff_ffff) | (a as u32) << 24
 }
 
+/// A node's provenance badges (docs/ASSETS-V1.md §5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BadgeView {
+    pub rect: [f32; 4],
+    /// `OverlayPrim::BADGE_*` source glyph (none for nodes without an asset).
+    pub source: Option<u32>,
+    /// An import that is uploaded to fal (`↑` dot).
+    pub uploaded: bool,
+    /// `role: final` (`★`).
+    pub final_role: bool,
+    /// Hovered or selected: shown at any size (else only on big tiles).
+    pub force: bool,
+}
+
+/// Source badge + uploaded flag of an asset record (JSON, so both the current and the
+/// Assets-v1 shapes work): `source` (import | generate | derive | render | capture), else the
+/// lineage kind, else the old generation lineage (`model: "import"` = an import).
+pub fn badge_of(asset: &serde_json::Value) -> (u32, bool) {
+    let lin = asset.get("lineage");
+    let src = asset
+        .get("source")
+        .and_then(|v| v.as_str().or_else(|| v.get("kind").and_then(|k| k.as_str())))
+        .or_else(|| lin.and_then(|l| l.get("kind")).and_then(|k| k.as_str()))
+        .unwrap_or_else(|| match lin.and_then(|l| l.get("model")).and_then(|m| m.as_str()) {
+            None | Some("import") | Some("") => "import",
+            Some(_) => "generate",
+        });
+    let glyph = match src {
+        "generate" => OverlayPrim::BADGE_GENERATE,
+        "derive" => OverlayPrim::BADGE_DERIVE,
+        "render" => OverlayPrim::BADGE_RENDER,
+        _ => OverlayPrim::BADGE_IMPORT,
+    };
+    let fal = asset.get("fal");
+    let uploaded = fal.is_some_and(|f| f.get("synced").and_then(|v| v.as_bool()) == Some(true) || f.get("assetRecordId").is_some_and(|v| !v.is_null()))
+        || (glyph == OverlayPrim::BADGE_IMPORT && asset.get("uri").and_then(|u| u.as_str()).is_some_and(|u| u.starts_with("https://")));
+    (glyph, uploaded)
+}
+
 pub struct OverlayInput<'a> {
     pub scene: &'a Scene,
     pub palette: &'a Palette,
@@ -117,6 +156,10 @@ pub struct OverlayInput<'a> {
     pub activity: &'a [ActivityFx],
     /// Rects highlighted from outside the canvas (layers row hover).
     pub highlight: &'a [[f32; 4]],
+    /// Provenance badges.
+    pub badges: &'a [BadgeView],
+    /// Lineage view: nodes outside the selected node's lineage, dimmed.
+    pub dim: &'a [[f32; 4]],
     pub dpr: f32,
     /// World units per physical pixel (1 / zoom).
     pub px_world: f32,
@@ -127,6 +170,13 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
     let p = i.palette;
     let mut out = Vec::new();
 
+    if !i.dim.is_empty() {
+        let b = p.bg;
+        let veil = rgba((b[0] * 255.0) as u8, (b[1] * 255.0) as u8, (b[2] * 255.0) as u8, 200);
+        for r in i.dim {
+            out.push(OverlayPrim::rect(*r, veil, 0, 0.0));
+        }
+    }
     for r in i.outlines {
         out.push(OverlayPrim::rect(*r, 0, p.line, d));
     }
@@ -171,6 +221,26 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
         // Subtle: clearly weaker than the selection outline.
         out.push(OverlayPrim::rect(h.rect, 0, (p.ink & 0x00ff_ffff) | (100 << 24), d));
     }
+    // Badges: tiny, dim glyphs at the top-left corner.
+    let px = 11.0 * d;
+    let fill = with_alpha(p.panel, 170);
+    for b in i.badges {
+        let size = if b.force { [1e9, 1e9] } else { [b.rect[2], b.rect[3]] };
+        let mut slot = 0.0;
+        if let Some(g) = b.source {
+            out.push(OverlayPrim::glyph(b.rect, size, g, slot, px, [fill, p.dim], d));
+            slot += 1.0;
+            if b.uploaded {
+                let mut dot = OverlayPrim::glyph(b.rect, size, OverlayPrim::BADGE_UPLOADED, 0.0, 5.0 * d, [0, p.dim], d);
+                dot.px_offset = [3.0 * d + slot * (px + d) - d, 3.0 * d];
+                out.push(dot);
+                slot += 0.5;
+            }
+        }
+        if b.final_role {
+            out.push(OverlayPrim::glyph(b.rect, size, OverlayPrim::BADGE_FINAL, slot, px, [fill, p.ink], d));
+        }
+    }
     for s in i.selection.iter().filter_map(|id| i.scene.get(id)) {
         out.push(OverlayPrim::rect(s.rect, 0, p.ink, d));
     }
@@ -213,6 +283,19 @@ mod tests {
         assert_eq!(parse_color("#7b93c480"), Some(rgba(0x7b, 0x93, 0xc4, 0x80)));
         assert_eq!(parse_color("blue"), None);
         assert_eq!(parse_color("#12"), None);
+    }
+
+    #[test]
+    fn badges_from_old_and_new_assets() {
+        use serde_json::json;
+        assert_eq!(badge_of(&json!({"id": "x"})), (OverlayPrim::BADGE_IMPORT, false));
+        assert_eq!(badge_of(&json!({"lineage": {"model": "import", "actor": "you"}})).0, OverlayPrim::BADGE_IMPORT);
+        assert_eq!(badge_of(&json!({"lineage": {"model": "fal-ai/flux", "actor": "a"}})).0, OverlayPrim::BADGE_GENERATE);
+        assert_eq!(badge_of(&json!({"source": "derive"})).0, OverlayPrim::BADGE_DERIVE);
+        assert_eq!(badge_of(&json!({"source": "render"})).0, OverlayPrim::BADGE_RENDER);
+        assert_eq!(badge_of(&json!({"lineage": {"kind": "derive", "op": "crop"}})).0, OverlayPrim::BADGE_DERIVE);
+        assert_eq!(badge_of(&json!({"source": "import", "fal": {"synced": true}})), (OverlayPrim::BADGE_IMPORT, true));
+        assert!(!badge_of(&json!({"source": "generate", "uri": "https://v3.fal.media/x.png"})).1);
     }
 
     #[test]

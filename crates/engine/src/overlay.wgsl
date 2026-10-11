@@ -53,6 +53,7 @@ const SHAPE_FLASH: u32 = 8u;
 const SHAPE_GHOST: u32 = 9u;
 const SHAPE_RAIN: u32 = 10u;
 const SHAPE_BLINK: u32 = 11u;
+const SHAPE_GLYPH: u32 = 12u;
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 
@@ -177,10 +178,74 @@ fn tri_sdf(p: vec2<f32>, p0: vec2<f32>, p1: vec2<f32>, p2: vec2<f32>) -> f32 {
     return -sqrt(d.x) * sign(d.y);
 }
 
+fn seg(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+/// iq's star SDF: `n` points, outer radius `r`, sharpness `m` (2 = sharpest, n = polygon).
+fn star_sdf(p0: vec2<f32>, r: f32, n: f32, m: f32) -> f32 {
+    let an = 3.141593 / n;
+    let en = 3.141593 / m;
+    let acs = vec2(cos(an), sin(an));
+    let ecs = vec2(cos(en), sin(en));
+    let a = atan2(p0.x, p0.y);
+    let bn = a - 2.0 * an * floor(a / (2.0 * an)) - an;
+    var p = length(p0) * vec2(cos(bn), abs(sin(bn)));
+    p = p - r * acs;
+    p = p + ecs * clamp(-dot(p, ecs), 0.0, r * acs.y / ecs.y);
+    return length(p) * sign(p.x);
+}
+
+/// Badge glyphs in normalized coordinates (-1..1, y down); `w`: half stroke width.
+fn glyph_sdf(id: u32, q: vec2<f32>, w: f32) -> f32 {
+    switch id {
+        case 0u: { // ↓ import
+            let d = min(seg(q, vec2(0.0, -0.62), vec2(0.0, 0.56)),
+                    min(seg(q, vec2(-0.42, 0.14), vec2(0.0, 0.58)), seg(q, vec2(0.42, 0.14), vec2(0.0, 0.58))));
+            return d - w;
+        }
+        case 1u: { // ✦ generated
+            return star_sdf(q, 0.78, 4.0, 2.3);
+        }
+        case 2u: { // ƒ derived
+            var d = seg(q, vec2(0.12, -0.42), vec2(-0.12, 0.6));
+            d = min(d, seg(q, vec2(0.12, -0.42), vec2(0.24, -0.62)));
+            d = min(d, seg(q, vec2(0.24, -0.62), vec2(0.48, -0.6)));
+            d = min(d, seg(q, vec2(-0.12, 0.6), vec2(-0.38, 0.64)));
+            d = min(d, seg(q, vec2(-0.34, -0.08), vec2(0.34, -0.08)));
+            return d - w;
+        }
+        case 3u: { // ▶ render
+            return tri_sdf(q, vec2(-0.42, -0.56), vec2(-0.42, 0.56), vec2(0.56, 0.0));
+        }
+        case 4u: { // ★ final
+            return star_sdf(vec2(q.x, -q.y), 0.82, 5.0, 2.6);
+        }
+        default: { // ↑ dot: uploaded to fal
+            return length(q) - 0.62;
+        }
+    }
+}
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let stroke_px = in.params.x;
     let shape = u32(in.params.z);
+    if shape == SHAPE_GLYPH {
+        // Only on nodes big enough on screen (the client passes a huge size to force it).
+        if in.anim.x * cam.zoom < 160.0 * cam.dpr || in.anim.y * cam.zoom < 72.0 * cam.dpr {
+            discard;
+        }
+        let bd = rounded_box_sdf(in.p, in.half, 2.0 * cam.dpr);
+        let ba = clamp(0.5 - bd, 0.0, 1.0) * in.fill.a;
+        let s = max(min(in.half.x, in.half.y) - cam.dpr, 1.0);
+        let gd = glyph_sdf(u32(in.anim.z + 0.5), in.p / s, stroke_px * 0.5 / s) * s;
+        let ga = clamp(0.5 - gd, 0.0, 1.0) * in.stroke.a;
+        return vec4(in.stroke.rgb * ga, ga) + vec4(in.fill.rgb * ba, ba) * (1.0 - ga);
+    }
     var d: f32;
     switch shape {
         case SHAPE_CIRCLE: {

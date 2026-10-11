@@ -16,6 +16,9 @@ import { theme } from '../theme';
 import { ProjectHeader } from './Projects';
 import { VideoLayer } from './VideoLayer';
 import { openFocus, pointerPressed } from '../video';
+import { openMenuAt } from './ContextMenu';
+import { dragOut, prepare } from '../out';
+import { isDesktop } from '../desktop';
 
 /** The local user. The host suffixes the actor id if several browsers connect. */
 const ME = { id: 'you', name: 'you' };
@@ -141,6 +144,8 @@ export function Stage() {
       app.pointerDown(x, y, e.button, e.shiftKey, e.altKey, meta(e));
       const sel = getState().selection;
       press = e.button === 0 && !e.altKey && getState().tool === 'select' && sel.length ? { x, y, node: app.hitTest(x, y) ?? null } : null;
+      // Files for a drag-out are prepared before the drag needs them.
+      if (press?.node) prepare(sel.includes(press.node) ? sel : [press.node], 0);
     };
     const move = (e: PointerEvent) => {
       const [x, y] = pos(e);
@@ -149,6 +154,25 @@ export function Stage() {
       if (press?.node) {
         const over = overChat(e);
         if (over !== getState().dragToChat) setState({ dragToChat: over });
+        // Desktop drag-out: the pointer left the window with the button down. The canvas move
+        // snaps back and a native file drag takes over (it needs the button still down, so
+        // the paths were materialized ahead of time).
+        const outside = e.clientX <= 0 || e.clientY <= 0 || e.clientX >= innerWidth - 1 || e.clientY >= innerHeight - 1;
+        if (outside && (e.buttons & 1) && isDesktop()) {
+          const sel = getState().selection;
+          const ids = sel.includes(press.node) ? sel : [press.node];
+          app.pointerMove(press.x, press.y, false, false, false);
+          app.pointerUp(press.x, press.y, false, false, false);
+          press = null;
+          if (getState().dragToChat) setState({ dragToChat: false });
+          try {
+            el.releasePointerCapture(e.pointerId);
+          } catch {
+            /* not captured */
+          }
+          dragOut(ids);
+          return;
+        }
       }
       const sync = hostSync();
       if (sync) {
@@ -188,7 +212,12 @@ export function Stage() {
       app.pinch(x, y, e.scale / lastScale);
       lastScale = e.scale;
     };
-    const ctx = (e: Event) => e.preventDefault();
+    // Right-click: the node menu (copy, open in, reveal, export, …).
+    const ctx = (e: MouseEvent) => {
+      e.preventDefault();
+      const [x, y] = pos(e);
+      openMenuAt(e.clientX, e.clientY, app.hitTest(x, y) ?? null);
+    };
     // Double-click: edit a note/text in place, or create a note on empty canvas.
     const dbl = (e: MouseEvent) => {
       const [x, y] = pos(e);
