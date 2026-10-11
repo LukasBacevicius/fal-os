@@ -577,7 +577,7 @@ export function createSwarmTools(ctx: ToolCtx) {
       frame: z.string().optional().describe("a frame id to export instead of nodes"),
       deliverables: z.boolean().optional().describe("export the project's deliverables (nodes marked final / the Deliverables frame)"),
       presets: z.array(z.string()).min(1).describe("e.g. [\"youtube-1080\", \"reel\"]"),
-      dir: z.string().optional(),
+      dir: z.string().optional().describe("destination (default: deliverables/ in the project)"),
       naming: z.string().optional(),
     },
     async (a) => {
@@ -590,7 +590,8 @@ export function createSwarmTools(ctx: ToolCtx) {
           canvas: ctx.canvas,
           ...target,
           presets: a.presets,
-          ...(a.dir ? { dir: a.dir } : {}),
+          // Deliverables land in <project>/deliverables/ (the host defaults node exports to exports/<date>/).
+          dir: a.dir ?? "deliverables",
           ...(a.naming ? { naming: a.naming } : {}),
         });
       } catch (e: any) {
