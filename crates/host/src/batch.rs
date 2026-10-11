@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use falos_doc::{Actor, Command, Lineage, NodeKind, Props};
+use falos_doc::{Actor, Command, Lineage, NodeKind, Parent, Props};
 use futures_util::StreamExt;
 use serde_json::{Value as Json, json};
 use tokio::sync::{Semaphore, watch};
@@ -47,6 +47,8 @@ pub struct Item {
     pub input: Json,
     pub name: String,
     pub nodes: Vec<String>,
+    /// Media inputs of the request (lineage parents).
+    pub parents: Vec<Parent>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -113,6 +115,8 @@ pub struct Request {
     pub label: Option<String>,
     /// Cell size; default from the input's aspect (`image_size`, `aspect_ratio`).
     pub cell: Option<(f64, f64)>,
+    /// Media inputs shared by every job (lineage parents).
+    pub parents: Vec<Parent>,
 }
 
 /// Cell size from a fal input's aspect hints (long side 320).
@@ -229,7 +233,7 @@ pub fn start(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canvas: &st
             });
             ids.push(id);
         }
-        items.push(Item { model: m.clone(), input: input.clone(), name: name.clone().unwrap_or_default(), nodes: ids });
+        items.push(Item { model: m.clone(), input: input.clone(), name: name.clone().unwrap_or_default(), nodes: ids, parents: req.parents.clone() });
     }
     host.mutate(&canvas, &actor.id, None, |c| c.apply(actor, None, &cmds))?;
     let nodes: Vec<String> = items.iter().flat_map(|i| i.nodes.clone()).collect();
@@ -306,6 +310,7 @@ impl Runner {
             input: item.input.clone(),
             backend: self.backend.clone(),
             requester: self.requester.clone(),
+            parents: item.parents.clone(),
         }
     }
 
@@ -466,13 +471,10 @@ impl Runner {
                     &self.host,
                     m,
                     Lineage {
-                        model: item.model.clone(),
-                        params: item.input.clone(),
                         seed,
-                        parents: vec![],
                         fal_request_id: Some(req.to_string()),
-                        cost: None,
-                        actor: self.requester.clone(),
+                        parents: item.parents.clone(),
+                        ..Lineage::generate(&item.model, item.input.clone(), &self.requester)
                     },
                 )
                 .await?;

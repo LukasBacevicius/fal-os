@@ -620,19 +620,180 @@ fn assets_with_lineage() {
         id: "sha256:9f86d0".into(),
         mime: Some("image/png".into()),
         uri: Some("https://v3.fal.media/files/x.png".into()),
+        source: Source::Generate,
         lineage: Some(Lineage {
-            model: "fal-ai/flux/dev".into(),
-            params: json!({"prompt": "red car", "steps": 28}),
             seed: Some(42),
-            parents: vec!["sha256:0000".into()],
+            parents: vec![Parent::new("sha256:0000", Some("ref1"), ParentRole::Reference)],
             fal_request_id: Some("req_123".into()),
             cost: Some(0.04),
-            actor: "claude".into(),
+            ..Lineage::generate(
+                "fal-ai/flux/dev",
+                json!({"prompt": "red car", "steps": 28}),
+                "claude",
+            )
         }),
+        ..Default::default()
     };
     c.apply(&claude(), None, &[Command::PutAsset(asset.clone())])
         .unwrap();
-    assert_eq!(c.asset("sha256:9f86d0"), Some(asset));
+    assert_eq!(c.asset("sha256:9f86d0"), Some(asset.clone()));
+    // Later records fill in missing facts (uri, media, origin) but never lineage/source.
+    let later = Asset {
+        id: "sha256:9f86d0".into(),
+        media: Some(Media { w: Some(1024.0), h: Some(768.0), ..Default::default() }),
+        source: Source::Import,
+        ..Default::default()
+    };
+    c.apply(&claude(), None, &[Command::PutAsset(later)]).unwrap();
+    let got = c.asset("sha256:9f86d0").unwrap();
+    assert_eq!(got.source, Source::Generate);
+    assert_eq!(got.lineage, asset.lineage);
+    assert_eq!(got.media.unwrap().w, Some(1024.0));
+}
+
+/// A canvas written before provenance (old `Lineage{model, params, parents: [sha]}`,
+/// committed as a synthetic fixture) reads in the new shape.
+#[test]
+fn legacy_snapshot_migrates() {
+    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-assets.loro")).unwrap();
+    let c = Canvas::from_snapshot(&bytes).unwrap();
+    let car = c
+        .asset("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+        .unwrap();
+    assert_eq!(car.source, Source::Generate);
+    let l = car.lineage.unwrap();
+    assert_eq!(l.kind, LineageKind::Generate);
+    assert_eq!(l.op, "fal-ai/flux/dev");
+    assert_eq!(l.recipe["prompt"], "red car");
+    assert_eq!(l.parents.len(), 1);
+    assert_eq!(l.parents[0].role, ParentRole::Input);
+    assert!(l.parents[0].asset.starts_with("sha256:2222"));
+    let photo = c
+        .asset("sha256:2222222222222222222222222222222222222222222222222222222222222222")
+        .unwrap();
+    assert_eq!(photo.source, Source::Import);
+    let paste = c
+        .asset("sha256:3333333333333333333333333333333333333333333333333333333333333333")
+        .unwrap();
+    assert_eq!((paste.source, paste.lineage), (Source::Import, None));
+    let text = read(&c);
+    assert!(text.contains("src(gen) by(@claude) ← gen:fal-ai/flux/dev{7} of 222222 by @claude"), "{text}");
+    assert!(text.contains("\"photo\""), "{text}");
+    // Old imports print no lineage summary.
+    let photo_row = text.lines().find(|l| l.contains("\"photo\"")).unwrap();
+    assert!(photo_row.contains("src(import)") && !photo_row.contains('←'), "{photo_row}");
+    // Echoing the projection back is a no-op (src/← are read-only).
+    let mut c2 = c;
+    let r = c2.apply_edit(&text, &claude(), None).unwrap();
+    assert!(r.touched.is_empty(), "{:?}", r.touched);
+}
+
+/// The user's real demo canvas (if present on this machine) is copied read-only into a
+/// temp dir and must load with every asset readable in the new shape.
+#[test]
+fn real_snapshot_migrates_if_present() {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let src = std::path::Path::new(&home).join("fal-os-projects/demo/canvases/main.loro");
+    if !src.is_file() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("main.loro");
+    std::fs::copy(&src, &copy).unwrap();
+    let c = Canvas::from_snapshot(&std::fs::read(&copy).unwrap()).unwrap();
+    let ids: Vec<String> = c.doc().get_map("assets").keys().map(|k| k.to_string()).collect();
+    for id in &ids {
+        let a = c.asset(id).unwrap_or_else(|| panic!("asset {id} no longer deserializes"));
+        if let Some(l) = &a.lineage {
+            assert!(!l.op.is_empty(), "{id}: lineage without op");
+        }
+    }
+    read(&c);
+}
+
+#[test]
+fn provenance_props_and_projection() {
+    let mut c = Canvas::new("c1", "x");
+    let src_id = "sha256:aaaaaa0000000000000000000000000000000000000000000000000000000000";
+    let out_id = "sha256:bbbbbb0000000000000000000000000000000000000000000000000000000000";
+    c.apply(
+        &lukas(),
+        None,
+        &[Command::PutAsset(Asset { id: src_id.into(), source: Source::Import, ..Default::default() })],
+    )
+    .unwrap();
+    let r = c
+        .apply_edit(
+            &format!("in1 image \"photo\" s(100,100) asset({src_id}) role(input) protected\n"),
+            &lukas(),
+            None,
+        )
+        .unwrap();
+    assert!(r.warnings.iter().all(|w| !w.contains("unknown prop")), "{:?}", r.warnings);
+    assert!(c.node("in1").unwrap().is_protected());
+    assert_eq!(c.node("in1").unwrap().role(), Some("input"));
+    // Bad role values are rejected.
+    assert!(c.apply_edit("in1 role(best)", &lukas(), None).is_err());
+    let derived = Asset {
+        id: out_id.into(),
+        source: Source::Derive,
+        lineage: Some(Lineage {
+            kind: LineageKind::Derive,
+            op: "reframe".into(),
+            recipe: json!({"args": {"aspect": "9:16", "mode": "pad-blur"}}),
+            parents: vec![Parent::input(src_id, Some("in1"))],
+            actor: "motion".into(),
+            deterministic: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    c.apply(&claude(), None, &[Command::PutAsset(derived)]).unwrap();
+    c.apply_edit(
+        &format!("out1 image \"vertical\" s(56,100) asset({out_id}) role(final) export([{{\"preset\":\"reel\"}}])\n"),
+        &claude(),
+        None,
+    )
+    .unwrap();
+    let text = read(&c);
+    let row = text.lines().find(|l| l.starts_with("out1")).unwrap();
+    assert_eq!(
+        row,
+        format!("out1 image \"vertical\" s(56,100) asset(\"{out_id}\") role(final) export([{{\"preset\":\"reel\"}}]) src(derive) by(@claude) ← op:reframe{{9:16,pad-blur}} of in1 by @motion")
+            .replace(&format!("asset(\"{out_id}\")"), &format!("asset({out_id})"))
+    );
+    let in_row = text.lines().find(|l| l.starts_with("in1")).unwrap();
+    assert!(in_row.contains("role(input) protected src(import)"), "{in_row}");
+    // Round trip on a fresh doc keeps role/protected/export and ignores src/←.
+    let mut b = Canvas::new("c2", "y");
+    b.apply_edit(&text, &lukas(), None).unwrap();
+    assert_eq!(b.node("out1").unwrap().role(), Some("final"));
+    assert!(b.node("in1").unwrap().is_protected());
+}
+
+#[test]
+fn agents_cannot_touch_protected_inputs() {
+    let mut c = Canvas::new("c1", "x");
+    c.apply_edit(
+        "f1 frame \"refs\" s(800,600)\n  in1 image \"photo\" s(100,100) asset(sha256:aa) protected\nf2 frame \"other\"\n",
+        &lukas(),
+        None,
+    )
+    .unwrap();
+    let err = |r: Result<EditResult>| r.unwrap_err().to_string();
+    let e = err(c.apply_edit("delete(in1)", &claude(), None));
+    assert!(e.contains("protected input asset — derive instead"), "{e}");
+    // Deleting the frame around it would delete it too.
+    assert!(err(c.apply_edit("delete(f1)", &claude(), None)).contains("derive instead"));
+    assert!(err(c.apply_edit("in1 asset(sha256:bb)", &claude(), None)).contains("overwrite"));
+    assert!(err(c.apply_edit("in1 parent(f2)", &claude(), None)).contains("move"));
+    assert!(err(c.apply_edit("in1 protected(false)", &claude(), None)).contains("unprotect"));
+    // Moving it within its frame, renaming and echoing it back are fine.
+    c.apply_edit("in1 p(20,20) name(\"photo 2\") protected", &claude(), None).unwrap();
+    // Humans can do anything.
+    c.apply_edit("in1 parent(f2)", &lukas(), None).unwrap();
+    c.apply_edit("delete(in1)", &lukas(), None).unwrap();
+    assert!(c.node("in1").is_none());
 }
 
 const SAMPLE: &str = r##"frame "Moodboard" s(2000,1200)

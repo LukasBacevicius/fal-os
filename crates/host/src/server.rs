@@ -208,7 +208,7 @@ async fn guard_inner(g: Guard, req: Request, next: Next) -> Response {
     }
     // CORS preflight (no credentials on it by spec) for the asset routes.
     if req.method() == axum::http::Method::OPTIONS
-        && (req.uri().path().starts_with("/assets/") || req.uri().path() == "/import/url")
+        && (req.uri().path().starts_with("/assets/") || req.uri().path() == "/import/url" || req.uri().path().starts_with("/api/"))
     {
         return (
             StatusCode::NO_CONTENT,
@@ -283,6 +283,7 @@ pub fn router(space: Arc<Workspace>, token: &str, ct: CancellationToken) -> Rout
         )
         .route("/import/url", axum::routing::post(crate::assets::import_url))
         .merge(crate::runtime::routes())
+        .merge(crate::ops::rest::routes())
         .with_state(space)
         .nest_service("/mcp", mcp)
         .layer(middleware::from_fn_with_state(

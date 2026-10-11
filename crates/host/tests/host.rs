@@ -567,7 +567,7 @@ async fn generate_runs_fal_queue_job() {
         .unwrap();
     let l = asset.lineage.unwrap();
     assert_eq!(
-        (l.model.as_str(), l.actor.as_str(), l.seed),
+        (l.op.as_str(), l.actor.as_str(), l.seed),
         ("fal-ai/mock", "claude", Some(7))
     );
     assert_eq!(l.fal_request_id.as_deref(), Some("req-1"));

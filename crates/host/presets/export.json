@@ -1,0 +1,26 @@
+{
+  "version": "2026-10-11",
+  "naming": "{project}_{name}_{preset}_{w}x{h}_v{n}.{ext}",
+  "note": "Platform limits drift: keep presets as data and bump `version` when they change. Video presets never upscale; an aspect mismatch reframes first (pad-blur by default) into a role:final node.",
+  "presets": [
+    {"id": "original", "kind": "any", "label": "Original file (bytes as-is)", "copy": true},
+
+    {"id": "reel", "kind": "video", "label": "Instagram Reel 9:16", "w": 1080, "h": 1920, "container": "mp4", "vcodec": "h264", "video_bitrate": "12M", "maxrate": "16M", "fps_max": 60, "audio_bitrate": "192k", "lufs": -14, "max_seconds": 180},
+    {"id": "tiktok", "kind": "video", "label": "TikTok 9:16", "w": 1080, "h": 1920, "container": "mp4", "vcodec": "h264", "video_bitrate": "12M", "maxrate": "16M", "fps_max": 60, "audio_bitrate": "192k", "lufs": -14, "max_seconds": 600},
+    {"id": "short", "kind": "video", "label": "YouTube Short 9:16", "w": 1080, "h": 1920, "container": "mp4", "vcodec": "h264", "video_bitrate": "12M", "maxrate": "16M", "fps_max": 60, "audio_bitrate": "192k", "lufs": -14, "max_seconds": 180},
+    {"id": "ig-feed-45", "kind": "video", "label": "Instagram feed 4:5", "w": 1080, "h": 1350, "container": "mp4", "vcodec": "h264", "video_bitrate": "10M", "maxrate": "14M", "fps_max": 60, "audio_bitrate": "192k", "lufs": -14},
+    {"id": "square", "kind": "video", "label": "Square 1:1", "w": 1080, "h": 1080, "container": "mp4", "vcodec": "h264", "video_bitrate": "10M", "maxrate": "14M", "fps_max": 60, "audio_bitrate": "192k", "lufs": -14},
+    {"id": "youtube-1080", "kind": "video", "label": "YouTube 1080p", "w": 1920, "h": 1080, "container": "mp4", "vcodec": "h264", "video_bitrate": "12M", "maxrate": "16M", "fps_max": 60, "audio_bitrate": "384k", "lufs": -14},
+    {"id": "youtube-4k", "kind": "video", "label": "YouTube 4K", "w": 3840, "h": 2160, "container": "mp4", "vcodec": "h264", "video_bitrate": "45M", "maxrate": "60M", "fps_max": 60, "audio_bitrate": "384k", "lufs": -14},
+    {"id": "x", "kind": "video", "label": "X (Twitter) 16:9", "w": 1920, "h": 1080, "container": "mp4", "vcodec": "h264", "video_bitrate": "8M", "maxrate": "10M", "fps_max": 60, "audio_bitrate": "192k", "lufs": -14, "max_seconds": 140},
+    {"id": "linkedin", "kind": "video", "label": "LinkedIn 16:9", "w": 1920, "h": 1080, "container": "mp4", "vcodec": "h264", "video_bitrate": "8M", "maxrate": "10M", "fps_max": 60, "audio_bitrate": "192k", "lufs": -14, "max_seconds": 600},
+    {"id": "master-prores", "kind": "video", "label": "Master ProRes 422 HQ (source size)", "container": "mov", "vcodec": "prores_hq", "audio": "pcm_s24le"},
+    {"id": "overlay-alpha", "kind": "video", "label": "Overlay with alpha (ProRes 4444)", "container": "mov", "vcodec": "prores_4444", "audio": "pcm_s24le"},
+    {"id": "gif-web", "kind": "video", "label": "Small looping GIF", "container": "gif", "w": 480, "fps": 12},
+
+    {"id": "web-image", "kind": "image", "label": "Web image", "formats": ["webp", "avif", "jpg", "png"], "format": "webp", "quality": 85, "scale": "1x", "scales": ["1x", "2x", "3x"], "scale_grammar": "2x | 0.5x | 1080p (height) | 512w | 512h; 1x = the node's size on the canvas"},
+
+    {"id": "wav", "kind": "audio", "label": "WAV 48 kHz / 24-bit", "container": "wav"},
+    {"id": "mp3", "kind": "audio", "label": "MP3 320 kbps", "container": "mp3"}
+  ]
+}

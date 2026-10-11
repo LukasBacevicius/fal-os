@@ -5,6 +5,7 @@
 mod canvas;
 mod model;
 mod project;
+mod provenance;
 mod text;
 
 pub use canvas::{
@@ -12,6 +13,7 @@ pub use canvas::{
 };
 pub use model::*;
 pub use project::{CanvasEntry, Project};
+pub use provenance::*;
 pub use text::{ReadOpts, anchor_to_text, parse_anchor_text};
 
 pub use loro;

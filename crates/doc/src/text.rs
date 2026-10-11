@@ -8,6 +8,7 @@ use serde_json::Value as Json;
 
 use crate::canvas::Tx;
 use crate::model::{Actor, Anchor, Annotation, Camera, Node, NodeKind, Region, Status};
+use crate::provenance::{Asset, COMMON_PROPS, LineageKind};
 use crate::{Canvas, EditResult, Error, Props, Result, Version};
 
 #[derive(Clone, Debug)]
@@ -182,7 +183,14 @@ fn anchor(a: &Anchor) -> String {
     }
 }
 
-fn node_row(n: &Node, hidden: usize, o: &ReadOpts) -> String {
+/// Read-only provenance printed on a media node's row: `src(...)` and the lineage summary.
+#[derive(Default)]
+struct Prov {
+    src: Option<&'static str>,
+    lineage: Option<String>,
+}
+
+fn node_row(n: &Node, hidden: usize, o: &ReadOpts, prov: &Prov) -> String {
     let mut parts = vec![n.id.clone(), n.kind.to_string()];
     if !n.name.is_empty() {
         parts.push(quote(&n.name));
@@ -199,11 +207,20 @@ fn node_row(n: &Node, hidden: usize, o: &ReadOpts) -> String {
     if n.locked {
         parts.push("locked".into());
     }
-    let known: Vec<&str> = n.kind.props().iter().map(|(k, _)| *k).collect();
+    let known: Vec<&str> = n
+        .kind
+        .props()
+        .iter()
+        .chain(COMMON_PROPS)
+        .map(|(k, _)| *k)
+        .collect();
     for k in &known {
         if let Some(v) = n.props.get(*k) {
             parts.push(prop(k, v));
         }
+    }
+    if let Some(src) = prov.src {
+        parts.push(format!("src({src})"));
     }
     for (k, v) in n.props.iter().filter(|(k, _)| !known.contains(&k.as_str())) {
         parts.push(prop(k, v));
@@ -219,6 +236,10 @@ fn node_row(n: &Node, hidden: usize, o: &ReadOpts) -> String {
         if !n.updated_by.is_empty() && n.updated_by != n.created_by {
             parts.push(format!("upd(@{})", n.updated_by));
         }
+    }
+    // Last: everything after `←` is a read-only comment for the parser.
+    if let Some(l) = &prov.lineage {
+        parts.push(l.clone());
     }
     parts.join(" ")
 }
@@ -307,12 +328,34 @@ impl Canvas {
         if body.is_empty() && o.filter.as_deref().is_some_and(|f| !matches(&n, f)) {
             return None;
         }
-        let mut s = format!("{}{}\n", "  ".repeat(depth), node_row(&n, hidden, o));
+        let prov = self.prov(&n);
+        let mut s = format!("{}{}\n", "  ".repeat(depth), node_row(&n, hidden, o, &prov));
         for a in anns.get(&n.id).into_iter().flatten() {
             ann_rows(a, depth + 1, o, &mut s);
         }
         s.push_str(&body);
         Some(s)
+    }
+
+    fn prov(&self, n: &Node) -> Prov {
+        let Some(a) = n.asset_id().and_then(|id| self.asset(id)) else {
+            return Prov::default();
+        };
+        let lineage = a
+            .lineage
+            .as_ref()
+            .filter(|l| l.kind != LineageKind::Import)
+            .map(|l| {
+                l.summary(|p| {
+                    p.node
+                        .clone()
+                        .unwrap_or_else(|| Asset::short_id(&p.asset))
+                })
+            });
+        Prov {
+            src: Some(a.source.short()),
+            lineage,
+        }
     }
 
     /// Apply an edit in the text format as one transaction (one undo step) by `actor`.
@@ -358,6 +401,9 @@ fn tokenize(line: &str) -> Result<Vec<Tok>, String> {
     while let Some(&c) = it.peek() {
         if c.is_whitespace() {
             it.next();
+        } else if c == '←' {
+            // `← op:… of … by @…`: the read-only lineage summary ends the row.
+            break;
         } else if c == '"' {
             it.next();
             toks.push(Tok::Str(unescape(&mut it)?));
@@ -745,7 +791,7 @@ fn parse_node(toks: &[Tok]) -> Result<NodeRow, String> {
                     };
                     r.parent = Some(((p != "root").then_some(p), idx));
                 }
-                "by" | "upd" | "more" => {}
+                "by" | "upd" | "more" | "src" => {}
                 _ => {
                     r.props.insert(n.clone(), parse_value(a)?);
                 }
