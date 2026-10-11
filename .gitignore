@@ -12,3 +12,4 @@ node_modules
 /apps/web/public/samples
 *.tsbuildinfo
 /.vite
+/dist

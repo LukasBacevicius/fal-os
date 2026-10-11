@@ -230,11 +230,30 @@ pub async fn export(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canv
     std::fs::create_dir_all(&tmp)?;
     let mut files = vec![];
     let mut warnings: Vec<String> = vec![];
+    // Several sources × explicit presets with a frame size (e.g. 16:9 + 9:16 finals with
+    // `youtube-1080` + `reel`): each sized preset goes only to the source whose aspect fits it
+    // best, instead of every source getting every preset as letterboxed cross-aspect copies.
+    let owner: Vec<Option<usize>> = if inputs.len() > 1 && !o.presets.is_empty() {
+        rows_of(&o.presets)?
+            .iter()
+            .map(|row| {
+                let (pw, ph) = (row.preset["w"].as_f64()?, row.preset["h"].as_f64()?);
+                inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, i)| i.rect.filter(|r| r[2] > 0.0 && r[3] > 0.0).map(|r| (k, ((r[2] / r[3]) / (pw / ph)).ln().abs())))
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(k, _)| k)
+            })
+            .collect()
+    } else {
+        vec![]
+    };
     let r: Result<()> = async {
         for (k, input) in inputs.iter().enumerate() {
             let node = host.read(&canvas, |c| input.node.as_ref().and_then(|n| c.node(n)))?;
             let items: Vec<Json> = if !o.presets.is_empty() {
-                o.presets.clone()
+                o.presets.iter().enumerate().filter(|(j, _)| owner.get(*j).copied().flatten().is_none_or(|own| own == k)).map(|(_, v)| v.clone()).collect()
             } else {
                 node.as_ref().and_then(|n| n.props.get("export")).and_then(Json::as_array).cloned().unwrap_or_else(|| vec![json!("original")])
             };
