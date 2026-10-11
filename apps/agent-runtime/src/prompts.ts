@@ -249,7 +249,7 @@ Prompts: specific and visual (subject, materials, lighting, lens, composition, b
 If a task fails, read the error, fix the input once and retry; don't loop.
 ${common}`,
       tools: [...chatTools,
-        ...falos([...base, ...knowledge, "generate", "generate_batch", "await_batch", "find_space", ...libTools]),
+        ...falos([...base, ...knowledge, "generate", "generate_batch", "await_batch", "find_space", ...libTools, ...(a.ops ? ["inspect"] : [])]),
         "mcp__swarm__fal_agent",
         "mcp__swarm__fal_model",
         "mcp__swarm__fal_model_schema",
