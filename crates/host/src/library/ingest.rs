@@ -68,7 +68,7 @@ fn str_at<'a>(v: &'a Json, path: &[&str]) -> Option<&'a str> {
 
 /// `asset.source`, else the lineage kind, else inferred from the old lineage shape.
 pub fn source_of(rec: &Json) -> String {
-    const OK: [&str; 4] = ["import", "generate", "derive", "render"];
+    const OK: [&str; 5] = ["import", "generate", "derive", "render", "capture"];
     if let Some(s) = rec["source"].as_str().filter(|s| OK.contains(s)) {
         return s.into();
     }
@@ -120,7 +120,17 @@ fn is_fal_url(u: &str) -> bool {
 }
 
 /// An `Ingested` from a canvas asset record (raw JSON).
-pub fn from_record(rec: &Json) -> Option<Ingested> {
+pub fn from_record(raw: &Json) -> Option<Ingested> {
+    // The doc model's reading (migrates old records: `model` → `op`, `params` → `recipe`,
+    // source inferred), falling back to the raw JSON for anything it doesn't know.
+    let mut canon = raw.clone();
+    if let Ok(a) = serde_json::from_value::<falos_doc::Asset>(raw.clone()) {
+        canon["source"] = json!(a.source.as_str());
+        if let Some(l) = a.lineage.as_ref().and_then(|l| serde_json::to_value(l).ok()) {
+            canon["lineage"] = l;
+        }
+    }
+    let rec = &canon;
     let sha = crate::assets::parse_id(rec["id"].as_str()?)?;
     let mime = rec["mime"].as_str().map(str::to_string);
     let media = rec.get("media").filter(|m| m.is_object()).cloned();
@@ -145,7 +155,7 @@ pub fn from_record(rec: &Json) -> Option<Ingested> {
         created,
         origin,
         media,
-        record: Some(rec.clone()),
+        record: Some(raw.clone()),
         sha,
         ..Default::default()
     })

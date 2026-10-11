@@ -42,22 +42,34 @@ export async function probeCapabilities(opts: { refreshNet?: boolean } = {}): Pr
   if (key) {
     const fa = await falAgentAvailable(opts.refreshNet);
     has("fal-agent", fa.ok, fa.ok ? "" : `the fal key lacks the AGENT preset (${fa.reason}); create one with the AGENT preset at fal.ai/dashboard/keys`);
-  } else has("fal-agent", false, "put FAL_KEY=… (AGENT preset) in ~/.fal-os/fal.env");
-  has("fal-models", key, "put FAL_KEY=… in ~/.fal-os/fal.env");
+  } else has("fal-agent", false, config.packaged ? "add a fal key (AGENT preset) in fal-os → Setup" : "put FAL_KEY=… (AGENT preset) in ~/.fal-os/fal.env");
+  has("fal-models", key, config.packaged ? "add a fal key in fal-os → Setup" : "put FAL_KEY=… in ~/.fal-os/fal.env");
 
-  const codexAuth = codexAuthAvailable();
+  const codexBin = !config.packaged || Boolean(config.codexPath);
+  const codexAuth = codexBin && codexAuthAvailable();
   const mcp = codexAuth ? await hostMcpWorks() : false;
-  has("codex", codexAuth && mcp, codexAuth ? "the host's MCP endpoint isn't reachable for Codex (restart falos-host)" : "run `npx codex login`");
+  has(
+    "codex",
+    codexAuth && mcp,
+    !codexBin
+      ? "install the Codex CLI (`npm i -g @openai/codex`), run `codex login`, restart fal-os"
+      : codexAuth
+        ? "the host's MCP endpoint isn't reachable for Codex (restart falos-host)"
+        : "run `npx codex login`",
+  );
 
   const ffmpeg = Boolean(which("ffmpeg") && which("ffprobe"));
   has("ffmpeg", ffmpeg, "install ffmpeg (`brew install ffmpeg`)");
 
   const remotionDeps = existsSync(join(config.motionTemplate, "node_modules", "remotion"));
   const chrome = remotionChrome();
+  const setup = "install the motion tools in fal-os → Setup";
   has(
     "remotion",
     remotionDeps && Boolean(chrome),
-    !remotionDeps
+    config.packaged
+      ? setup
+      : !remotionDeps
       ? "run `pnpm --dir apps/agent-runtime/motion-template install`"
       : "run `npx remotion browser ensure` in apps/agent-runtime/motion-template",
   );
@@ -65,13 +77,13 @@ export async function probeCapabilities(opts: { refreshNet?: boolean } = {}): Pr
   has(
     "hyperframes",
     hfDeps && Boolean(chrome) && ffmpeg,
-    !hfDeps ? "run `pnpm --dir apps/agent-runtime/hyperframes-template install --ignore-workspace`" : !chrome ? "install Remotion's browser first (it renders with the same chrome-headless-shell)" : "install ffmpeg",
+    config.packaged && (!hfDeps || !chrome) ? setup : !hfDeps ? "run `pnpm --dir apps/agent-runtime/hyperframes-template install --ignore-workspace`" : !chrome ? "install Remotion's browser first (it renders with the same chrome-headless-shell)" : "install ffmpeg",
   );
 
   const plugins: Capabilities["plugins"] = [];
   for (const name of ["remotion", "hyperframes"] as const) {
     const p = skillPlugin(name);
-    has(`${name}-skills` as CapName, Boolean(p), "run `apps/agent-runtime/scripts/install-skills.sh`");
+    has(`${name}-skills` as CapName, Boolean(p), config.packaged ? setup : "run `apps/agent-runtime/scripts/install-skills.sh`");
     if (p) plugins.push({ name, path: p });
   }
   return { available, missing, plugins };

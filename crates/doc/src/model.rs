@@ -385,32 +385,3 @@ pub struct Annotation {
     pub created_at: i64,
 }
 
-/// Content-addressed asset record with generation lineage.
-#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-pub struct Asset {
-    /// Content hash, e.g. `sha256:9f86d0…`.
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uri: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage: Option<Lineage>,
-}
-
-#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-pub struct Lineage {
-    pub model: String,
-    #[serde(default)]
-    pub params: Json,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<i64>,
-    #[serde(default)]
-    pub parents: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fal_request_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<f64>,
-    /// Actor id that triggered the generation.
-    pub actor: String,
-}

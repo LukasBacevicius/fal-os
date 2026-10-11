@@ -348,7 +348,7 @@ pub fn items(c: &Connection, keys: &[String], project: Option<&str>) -> Result<V
         roles.entry(r.0).or_default().push((r.1, r.2, r.3));
     }
     let mut st = c.prepare_cached(
-        "SELECT sha,kind,mime,w,h,duration,source,prompt,model,caption,palette,favorite,fal_id,fal_url,fal_synced,created,name,local_only,path,bytes,thumb,fal_request_id
+        "SELECT sha,kind,mime,w,h,duration,source,prompt,model,caption,palette,favorite,fal_id,fal_url,fal_synced,created,name,local_only,path,bytes,thumb,fal_request_id,lineage
          FROM assets WHERE sha IN (SELECT value FROM json_each(?))",
     )?;
     let mut by: HashMap<String, Json> = HashMap::new();
@@ -363,10 +363,15 @@ pub fn items(c: &Connection, keys: &[String], project: Option<&str>) -> Result<V
         let thumb: i64 = r.get(20)?;
         Ok((sha, kind, source, palette, fal_id, fal_url, path, thumb, r.get::<_, Option<String>>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, Option<f64>>(5)?,
             r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?, r.get::<_, Option<String>>(9)?, r.get::<_, i64>(11)?, r.get::<_, i64>(14)?, r.get::<_, i64>(15)?,
-            r.get::<_, Option<String>>(16)?, r.get::<_, i64>(17)?, r.get::<_, Option<i64>>(19)?, r.get::<_, Option<String>>(21)?))
+            r.get::<_, Option<String>>(16)?, r.get::<_, i64>(17)?, r.get::<_, Option<i64>>(19)?, r.get::<_, Option<String>>(21)?, r.get::<_, Option<String>>(22)?))
     })?;
     for row in rows.flatten() {
-        let (sha, kind, source, palette, fal_id, fal_url, path, thumb, mime, w, h, duration, prompt, model, caption, favorite, synced, created, name, local_only, bytes, _req) = row;
+        let (sha, kind, source, palette, fal_id, fal_url, path, thumb, mime, w, h, duration, prompt, model, caption, favorite, synced, created, name, local_only, bytes, _req, lineage) = row;
+        // The doc model's one-line lineage summary (op, recipe brief, parents, actor).
+        let lineage = lineage
+            .and_then(|l| serde_json::from_str::<falos_doc::Lineage>(&l).ok())
+            .filter(|l| l.kind != falos_doc::LineageKind::Import)
+            .map(|l| l.summary(|p| falos_doc::Asset::short_id(&p.asset)));
         let default_role = if source == "import" { "input" } else { "candidate" };
         let role = roles.get(&sha).and_then(|ps| {
             ps.iter()
@@ -387,7 +392,7 @@ pub fn items(c: &Connection, keys: &[String], project: Option<&str>) -> Result<V
             "thumb": format!("/thumbs/{sha}-256.webp"), "thumb_lg": format!("/thumbs/{sha}-1024.webp"),
             "created": created,
             "name": name, "tags": tags.remove(&sha).unwrap_or_default(), "local_only": local_only != 0,
-            "local": local, "src": src, "bytes": bytes, "nodes": nodes,
+            "local": local, "src": src, "bytes": bytes, "nodes": nodes, "lineage": lineage,
             "thumb_state": match thumb { 1 => "ok", 2 => "failed", 3 => "none", _ => "pending" },
         });
         if kind == "video" {

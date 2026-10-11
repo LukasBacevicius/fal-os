@@ -33,7 +33,15 @@ export interface State {
   outlineOpen: boolean | null;
   /** Modal overlay: command palette, the shortcut list, "connect your agent" or the project
    *  picker (⌘O). */
-  overlay: 'palette' | 'help' | 'connect' | 'projects' | null;
+  overlay: 'palette' | 'help' | 'connect' | 'projects' | 'export' | 'setup' | null;
+  /** Node context menu (right-click) at a screen point. */
+  menu: { x: number; y: number; ids: string[] } | null;
+  /** Nodes the export panel works on (empty = every node with saved export settings). */
+  exportIds: string[];
+  /** Lineage view: everything outside the selection's ancestors/descendants is dimmed. */
+  lineage: boolean;
+  /** Buttons on the current toast (e.g. `[reveal]` after an export). */
+  toastActions: { label: string; run: () => void }[];
   /** Projects from the host's `/workspace` socket (newest first). */
   projects: import('./projects').ProjectInfo[];
   /** The open project; null = a host without `/workspace` (single canvas `main`). */
@@ -101,6 +109,10 @@ let state: State = {
     }
   })(),
   overlay: null,
+  menu: null,
+  exportIds: [],
+  lineage: false,
+  toastActions: [],
   projects: [],
   project: null,
   workspace: 'unknown',
@@ -165,8 +177,8 @@ export function useStore<T>(select: (s: State) => T): T {
 }
 
 let toastTimer = 0;
-export function toast(msg: string) {
-  setState({ toast: msg });
+export function toast(msg: string, actions: { label: string; run: () => void }[] = []) {
+  setState({ toast: msg, toastActions: actions });
   window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => setState({ toast: null }), 3200);
+  toastTimer = window.setTimeout(() => setState({ toast: null, toastActions: [] }), actions.length ? 8000 : 3200);
 }

@@ -41,7 +41,8 @@ use loro::{
 };
 use serde_json::Value as Json;
 
-use crate::model::{Actor, Anchor, Annotation, Asset, Message, Node, NodeKind, Region, Status};
+use crate::model::{Actor, ActorKind, Anchor, Annotation, Message, Node, NodeKind, Region, Status};
+use crate::provenance::Asset;
 use crate::{Error, Result};
 
 const META: &str = "meta";
@@ -91,6 +92,7 @@ impl FromStr for Version {
 
 /// One mutation. A slice of commands passed to [`Canvas::apply`] is one transaction.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     CreateNode {
         /// Explicit id (must be unused); generated when `None`.
@@ -807,6 +809,13 @@ fn short_id(peer: u64, counter: i32, salt: u64) -> String {
 
 const FAKE_PEER: u64 = u64::MAX - 1;
 
+fn common_prop_type(k: &str) -> Option<crate::model::PropType> {
+    crate::provenance::COMMON_PROPS
+        .iter()
+        .find(|(n, _)| *n == k)
+        .map(|(_, t)| *t)
+}
+
 /// A transaction in progress on an actor's replica. In `dry` mode it validates against
 /// an overlay index and writes nothing.
 pub(crate) struct Tx<'a> {
@@ -939,6 +948,30 @@ impl<'a> Tx<'a> {
             .ok_or_else(|| Error::UnknownNode(id.into()))
     }
 
+    fn is_protected(&self, t: TreeID) -> bool {
+        t.peer != FAKE_PEER
+            && self.tree.get_meta(t).is_ok_and(|m| {
+                matches!(m.get("protected"), Some(ValueOrContainer::Value(LoroValue::Bool(true))))
+            })
+    }
+
+    /// Agents can't delete, overwrite or move protected (input) nodes; they derive instead.
+    fn guard_protected(&self, t: TreeID, what: &str) -> Result<()> {
+        if self.actor.kind != ActorKind::Agent || !self.is_protected(t) {
+            return Ok(());
+        }
+        let id = self
+            .tree
+            .get_meta(t)
+            .ok()
+            .and_then(|m| get_str(&m, "id"))
+            .unwrap_or_default();
+        Err(Error::Invalid(format!(
+            "`{id}` is a protected input asset — derive instead: agents can't {what} protected nodes \
+             (run an op such as transform/compose on it, or import_file with lineage, to make a new node)"
+        )))
+    }
+
     fn gen_id(&self, peer: u64, counter: i32) -> String {
         (0..)
             .map(|salt| short_id(peer, counter, salt))
@@ -983,7 +1016,7 @@ impl<'a> Tx<'a> {
                 ("id" | "type" | "created_by" | "updated_by" | "text", _) => {
                     return Err(Error::Invalid(format!("`{k}` can't be set as a prop")));
                 }
-                _ => match kind.prop_type(k) {
+                _ => match kind.prop_type(k).or_else(|| common_prop_type(k)) {
                     Some(t) => Some(to_loro(&t.coerce(k, v.clone())?)),
                     None => {
                         if !k
@@ -1084,6 +1117,15 @@ impl<'a> Tx<'a> {
         if vals.is_empty() {
             return Ok(());
         }
+        if vals.iter().any(|(k, _)| k == "asset") {
+            self.guard_protected(t, "overwrite")?;
+        }
+        if vals
+            .iter()
+            .any(|(k, v)| k == "protected" && *v != Some(LoroValue::Bool(true)))
+        {
+            self.guard_protected(t, "unprotect")?;
+        }
         self.touched.insert(id.into());
         if !self.dry {
             self.write_props(&self.tree.get_meta(t)?, vals)?;
@@ -1138,6 +1180,9 @@ impl<'a> Tx<'a> {
             }
             cur = self.tree.parent(p).unwrap_or(TreeParentId::Root);
         }
+        if t.peer != FAKE_PEER && self.tree.parent(t) != Some(target) {
+            self.guard_protected(t, "move")?;
+        }
         self.touched.insert(id.into());
         if !self.dry {
             match index {
@@ -1171,6 +1216,9 @@ impl<'a> Tx<'a> {
                 stack.push(c);
             }
         }
+        for g in &gone {
+            self.guard_protected(*g, "delete")?;
+        }
         self.nodes.retain(|_, (x, _)| !gone.contains(x));
         self.touched.insert(id.into());
         if !self.dry {
@@ -1183,17 +1231,29 @@ impl<'a> Tx<'a> {
         if a.id.is_empty() {
             return Err(Error::Invalid("asset id is empty".into()));
         }
-        // Content-addressed and immutable: the first record wins. The one exception is a
-        // missing `uri` (where the same bytes live remotely, e.g. after a fal storage
-        // upload), which a later record may fill in.
+        // Content-addressed and immutable: the first record wins (source and lineage never
+        // change). The exceptions are facts a later record may fill in when missing: `uri`
+        // (where the same bytes live remotely, e.g. after a fal storage upload), probed
+        // `media` and the import `origin`.
         let assets = self.doc.get_map(ASSETS);
         let record = match assets.get(&a.id) {
             None => Some(a.clone()),
-            Some(ValueOrContainer::Value(v)) if a.uri.is_some() => {
+            Some(ValueOrContainer::Value(v))
+                if a.uri.is_some() || a.media.is_some() || a.origin.is_some() =>
+            {
                 match serde_json::from_value::<Asset>(to_json(&v)) {
-                    Ok(mut cur) if cur.uri.is_none() => {
-                        cur.uri = a.uri.clone();
-                        Some(cur)
+                    Ok(mut cur) => {
+                        let before = cur.clone();
+                        if cur.uri.is_none() {
+                            cur.uri = a.uri.clone();
+                        }
+                        if cur.media.is_none() {
+                            cur.media = a.media.clone();
+                        }
+                        if cur.origin.is_none() {
+                            cur.origin = a.origin.clone();
+                        }
+                        (cur != before).then_some(cur)
                     }
                     _ => None,
                 }

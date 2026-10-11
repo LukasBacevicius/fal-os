@@ -462,6 +462,9 @@ export class HostSync {
 
   private auth() { return { Authorization: `Bearer ${this.host.token}` }; }
 
+  /** A tokened URL of a stored asset (downloads, `DownloadURL` drags, `<img>`). */
+  assetHref(id: string) { return this.assetUrl(id, true); }
+
   /** Uploads a locally imported asset unless the host already has it (dedupe by sha256). */
   async upload(id: string) {
     if (!id.startsWith('sha256:') || this.uploaded.has(id)) return;

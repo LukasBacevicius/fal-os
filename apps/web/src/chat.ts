@@ -260,7 +260,28 @@ export type Item =
   /** A question from the agent (e.g. the fal driver's pending input): numbered options,
    *  answered by number key or by typing (a normal message). */
   | { type: 'question'; key: string; agent: string; prompt: string; options: string[]; answered: boolean }
-  | { type: 'done'; key: string; summary: string; nodes: string[]; turn: string | null; reverted: boolean };
+  | { type: 'done'; key: string; summary: string; nodes: string[]; turn: string | null; reverted: boolean }
+  /** Exported / produced files (`files` event, docs/ASSETS-V1.md §7): shown as file cards. */
+  | { type: 'files'; key: string; files: OutFile[]; dir: string };
+
+/** One file of a `files` chat event. */
+export interface OutFile { path: string; name: string; node?: string; preset?: string; w?: number; h?: number; bytes?: number; sha256?: string }
+
+/** `files` event payload → cards (tolerates partial rows: a name is derived from the path). */
+export function filesOf(e: { files?: unknown }): OutFile[] {
+  return (Array.isArray(e.files) ? e.files : [])
+    .filter((f: any) => f && typeof f.path === 'string')
+    .map((f: any) => ({
+      path: f.path,
+      name: typeof f.name === 'string' && f.name ? f.name : f.path.split('/').pop(),
+      node: typeof f.node === 'string' ? f.node : undefined,
+      preset: typeof f.preset === 'string' ? f.preset : undefined,
+      w: typeof f.w === 'number' ? f.w : undefined,
+      h: typeof f.h === 'number' ? f.h : undefined,
+      bytes: typeof f.bytes === 'number' ? f.bytes : undefined,
+      sha256: typeof f.sha256 === 'string' ? f.sha256 : undefined,
+    }));
+}
 
 export interface SwarmRow { agent: string; role: string; status: string; tools: number }
 
@@ -528,6 +549,12 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
         }
         break;
       }
+      case 'files': {
+        if (view !== null && !mine(e.agent)) break;
+        const files = filesOf(e);
+        if (files.length) items.push({ type: 'files', key, files, dir: String(e.dir ?? '') });
+        break;
+      }
       case 'queued':
         queued.set(String(e.id), String(e.text ?? ''));
         break;
@@ -590,7 +617,7 @@ export function groupTurns(items: Item[]): Turn[] {
       continue;
     }
     const t: Turn = cur ?? start(`t${it.key}`, null);
-    if (it.type === 'text' || it.type === 'question') t.final.push(it);
+    if (it.type === 'text' || it.type === 'question' || it.type === 'files') t.final.push(it);
     else if (it.type === 'error') t.errors.push(it);
     else if (it.type === 'done') t.done = it;
     else {

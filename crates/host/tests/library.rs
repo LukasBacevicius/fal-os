@@ -196,6 +196,7 @@ async fn library_end_to_end() {
     let gen_q = query(&mut w, "q3", json!({"project": "demo", "source": ["generate"]})).await;
     assert_eq!(gen_q["items"][0]["model"], "fal-ai/flux/dev");
     assert_eq!(gen_q["items"][0]["role"], "candidate");
+    assert!(gen_q["items"][0]["lineage"].as_str().unwrap_or("").contains("gen:fal-ai/flux/dev"), "{gen_q}");
     let fox = gen_q["items"][0]["sha"].as_str().unwrap().to_string();
     let txt = query(&mut w, "q4", json!({"text": "fox snow", "semantic": false})).await;
     assert_eq!(txt["items"][0]["sha"], fox);
@@ -205,7 +206,16 @@ async fn library_end_to_end() {
     let mp4 = sha_of(&all, "video");
     let wav = sha_of(&all, "audio");
     for (k, size) in [(&png, "256"), (&png, "1024"), (&mp4, "256"), (&mp4, "strip"), (&wav, "256")] {
-        let (status, body) = http_get(port, &format!("/thumbs/{k}-{size}.webp")).await;
+        // A slow generation answers 503 (still generating): retry like the grid does.
+        let mut got = http_get(port, &format!("/thumbs/{k}-{size}.webp")).await;
+        for _ in 0..20 {
+            if got.0 != 503 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            got = http_get(port, &format!("/thumbs/{k}-{size}.webp")).await;
+        }
+        let (status, body) = got;
         assert_eq!(status, 200, "{k}-{size}: {}", String::from_utf8_lossy(&body));
         assert_eq!(&body[..4], b"RIFF");
     }

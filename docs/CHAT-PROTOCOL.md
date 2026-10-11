@@ -301,6 +301,7 @@ never the label again (not `motion · motion · …`).
 { "kind": "plan", "agent": "director", "steps": [{ "title": "Storyboard", "state": "done" }, …] }
 { "kind": "cost", "usd": 0.42, "turn_usd": 0.12 }                     // cumulative fal spend for the chat (the host adds up turns; the runtime reports per turn)
 { "kind": "done", "summary": "…", "nodes": ["final01"] }
+{ "kind": "files", "files": [{ "path": "/…/exports/2026-10-11/p_hero_reel_1080x1920_v1.mp4", "name": "…", "node": "a1b2c3", "preset": "reel", "w": 1080, "h": 1920, "bytes": 123, "sha256": "…" }], "dir": "/…" }  // host: an agent session in this chat exported files (file cards)
 { "kind": "title", "text": "Headphones ad" }                          // Director's chat_title ("title" is accepted as the field name too)
 { "kind": "user", "author": "chat:c_a", "from_title": "Logo", "text": "…" } // a message delivered from another chat
 ```

@@ -109,17 +109,17 @@ fn edit_project_json(dir: &Path, f: impl FnOnce(&mut serde_json::Map<String, Jso
     Ok(())
 }
 
-/// Copy a folder; files are hard-linked when `link` (content-addressed assets), else cloned
-/// or copied.
-fn copy_dir(from: &Path, to: &Path, link: bool) -> Result<()> {
+/// Copy a folder: APFS clonefile (copy-on-write) where possible, else a byte copy. Never
+/// hardlinks: an app editing one copy would corrupt the other project's content-addressed store.
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from).into_iter().flatten().flatten() {
         let (src, dst) = (e.path(), to.join(e.file_name()));
         let ty = e.file_type()?;
         if ty.is_dir() {
-            copy_dir(&src, &dst, link)?;
-        } else if ty.is_file() && !(link && std::fs::hard_link(&src, &dst).is_ok()) {
-            std::fs::copy(&src, &dst)?;
+            copy_dir(&src, &dst)?;
+        } else if ty.is_file() {
+            crate::ops::export::clone_or_copy(&src, &dst)?;
         }
     }
     Ok(())
@@ -524,9 +524,9 @@ impl Workspace {
         let _g = self.ops.lock().unwrap();
         let new = Self::free_id(&root, &name);
         let dst = root.join(&new);
-        copy_dir(&src.join("canvases"), &dst.join("canvases"), false)?;
+        copy_dir(&src.join("canvases"), &dst.join("canvases"))?;
         if src.join("assets").is_dir() {
-            copy_dir(&src.join("assets"), &dst.join("assets"), true)?;
+            copy_dir(&src.join("assets"), &dst.join("assets"))?;
         }
         let mut p = falos_doc::Project::load(&src)?;
         p.id = new.clone();

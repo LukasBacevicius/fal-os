@@ -84,6 +84,26 @@ Videos play muted while hovered or selected (tiles big enough on screen show `�
 
 Agents never move your camera; only your own clicks (a node id, a chip, a batch line) pan.
 
+## Out: files into other apps
+Selected media can go to Finder, Premiere, Slack, Mail and other apps as real files
+(docs/ASSETS-V1.md §4). The desktop app hands out human-named copies from `<project>/.out/`
+(APFS clones, never hardlinks into the asset store).
+
+| Keys | Action |
+|---|---|
+| Drag a node out of the window | Desktop: a native file drag of the selection (the move on the canvas snaps back) |
+| Drag `[⇲]` by the selection | The same from a handle. Web build: Chrome drags the file (`DownloadURL`), a click downloads |
+| Right-click a node | Menu: copy file, copy image, open in… (pinned creative apps first), reveal in Finder, export…, mark final, show lineage, more… (⌘K) |
+| ⌘⇧C | Copy the selection as files (⌘V pastes them in Finder, Slack, Premiere, Mail). Web: links |
+| ⌘⇧E | Export panel for the selection: rows of preset · scale (`2x`, `1080p`, `512w`) · format, naming tokens, destination, files / zip / pdf, "save on node". ⏎ exports. With nothing selected: export every node with saved export settings |
+| ⌘K | Also: copy fal URL / prompt / recipe, mark candidate / rejected, rerun, rerun with changes, apply recipe to selection, "export as <preset>", and ops on the selection (remove background, upscale, reframe to 9:16 / 1:1 / 4:5, trim, extract frames, make GIF, convert) |
+| Esc | Leave the lineage view (deselects) |
+
+Chat file cards (an agent's export) drag out like nodes and have `[reveal]`, `[open in]` and
+`[copy]`. Dropping a node into a frame named "Deliverables" marks it final. Badges at a tile's
+top-left show where it came from (`↓` import with a dot when uploaded to fal, `✦` generated,
+`ƒ` derived, `▶` render, `★` final), on hover, on selection or on big tiles.
+
 ## Layers and properties (left panel)
 | Keys | Action |
 |---|---|
@@ -94,6 +114,9 @@ Agents never move your camera; only your own clicks (a node id, a chip, a batch 
 | ⏎ or double-click | Rename |
 | ⌫ / Delete | Delete the selection |
 | ⌘F | Filter layers by name |
+| inputs · generated · derived · finals · rejected | Filter chips under the header (combine with the name filter) |
+| Properties → role | Set input / candidate / wip / final / rejected on the selection |
+| Properties → provenance | Source and the `← op of <parent>` chain, "upstream changed", `[rerun] [rerun with changes] [copy recipe] [apply to selection]` |
 | Drag | Reorder, or drop onto a frame or group to move into it (world position is kept); drop on the chat to attach |
 | Properties fields | ⏎ applies, Esc reverts, ↑ ↓ step by 1 (⇧: 10) |
 

@@ -217,6 +217,7 @@ function QuickLook() {
       <div className="lib-ql-info">
         <div>{[GLYPH[it.source] + ' ' + it.source, it.kind, dims, it.duration ? fmtDur(it.duration) : '', it.model ?? '', it.role ?? ''].filter(Boolean).join(' · ')}{it.fal?.synced ? ' · ↑fal' : ''}</div>
         {(it.prompt || it.caption) && <div className="dim lib-ql-prompt">{it.prompt ?? it.caption}</div>}
+        {it.lineage && <div className="dim">{it.lineage}</div>}
         <div className="faint">{[it.palette?.join(' '), it.tags.length ? '#' + it.tags.join(' #') : '', it.projects.join(', '), it.sha.slice(0, 12)].filter(Boolean).join(' · ')}</div>
       </div>
     </div>

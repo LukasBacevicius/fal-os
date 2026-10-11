@@ -3,6 +3,8 @@ import { useStore } from '../store';
 import type { NodeView } from '../types';
 import { sendChatMessage } from '../chatActions';
 import { openPrompt } from './SelectionPrompt';
+import { download, dragOut, outNodes, setDownloadUrl } from '../out';
+import { isDesktop } from '../desktop';
 
 type Rect = [number, number, number, number];
 
@@ -18,6 +20,37 @@ function worldRects(nodes: NodeView[]): Map<string, Rect> {
 }
 
 const GENERATING = new Set(['queued', 'running', '']);
+
+/** `[⇲]` by the selection: drag the selection's files out to Finder or any app (desktop:
+ *  native drag on press; web: Chrome `DownloadURL` drag, click downloads). */
+function Grip({ left, top }: { left: number; top: number }) {
+  const selection = useStore((s) => s.selection);
+  const nodes = useStore((s) => s.nodes);
+  const media = useMemo(() => outNodes(selection), [selection, nodes]);
+  if (!media.length) return null;
+  const desk = isDesktop();
+  return (
+    <button
+      className="link sparkle grip"
+      title={desk ? 'drag out to Finder or any app' : 'drag out (Chrome) or click to download'}
+      style={{ transform: `translate(${left}px, ${top}px)` }}
+      draggable={!desk && media.length === 1}
+      onDragStart={(e) => {
+        if (!setDownloadUrl(e, media[0])) e.preventDefault();
+      }}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        if (desk && e.button === 0) {
+          e.preventDefault();
+          dragOut(selection);
+        }
+      }}
+      onClick={() => !desk && void download(selection)}
+    >
+      [⇲]
+    </button>
+  );
+}
 
 /**
  * DOM text over engine-drawn nodes: frame titles above frames, prompt/model on a hovered
@@ -159,6 +192,7 @@ export function NodeOverlays() {
           [✦]
         </button>
       )}
+      {selBox && visible(selBox) && !promptOpen && !editing && <Grip left={Math.min(selBox.left + selBox.width + 4, camera.width - 22)} top={Math.max(2, selBox.top - 18) + 16} />}
     </div>
   );
 }
