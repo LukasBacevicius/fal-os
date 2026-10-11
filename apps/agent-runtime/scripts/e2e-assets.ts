@@ -24,6 +24,8 @@ const projectName = opt("--project") ?? `Assets e2e ${new Date().toISOString().s
 const inputs = (opt("--inputs") ?? "").split(",").filter(Boolean);
 const expect = (opt("--expect") ?? "1920x1080,1080x1920").split(",").map((s) => s.split("x").map(Number));
 const timeout = Number(opt("--timeout") ?? 2400);
+/** `<projectId>/<chat>`: a follow-up turn in an existing chat (e.g. after a host restart). */
+const resume = opt("--resume");
 const workspace = opt("--workspace") ?? process.env.FALOS_WORKSPACE ?? "";
 const text = args.join(" ") || "make a 10s product teaser from my clip and photos, deliver 16:9 and 9:16";
 mkdirSync(out, { recursive: true });
@@ -61,28 +63,43 @@ function next(ws: WebSocket, pred: (m: any) => boolean): Promise<any> {
 // ---- project + the user's inputs ----------------------------------------------------------
 const w = await open("/workspace");
 await next(w, (m) => m.type === "projects");
-w.send(JSON.stringify({ type: "project.create", name: projectName }));
-const id: string = (await next(w, (m) => m.type === "project.created")).id;
+let id: string;
+if (resume) id = resume.split("/")[0];
+else {
+  w.send(JSON.stringify({ type: "project.create", name: projectName }));
+  id = (await next(w, (m) => m.type === "project.created")).id;
+}
 w.send(JSON.stringify({ type: "project.touch", id }));
 const host = new HostMcp(`${hostUrl}/mcp`, token, { "x-falos-project": id });
 const s0 = await host.call("session", { agentName: "Lukas (import)", canvas: "main" });
 const sid = s0.sessionId as string;
 const projectDir = workspace ? join(workspace, id) : "";
-const frame = (await host.call("edit", { sessionId: sid, canvas: "main", text: `frame "My inputs" p(0,-1400) s(2200,1000)` })).created[0];
 const imported: { node: string; file: string; sha: string; name: string; row?: string }[] = [];
-for (const [i, f] of inputs.entries()) {
-  const r = await host.call("import_file", { sessionId: sid, canvas: "main", path: f, name: basename(f), placement: { parent: frame, x: 40 + i * 720, y: 120, w: 640 } });
-  imported.push({ node: r.node, file: f, sha: sha(f), name: basename(f) });
-  console.log(`${ts()} imported ${basename(f)} → ${r.node}`);
+let frame: string;
+if (resume) {
+  // Follow-up turn in an existing chat: the inputs are already in the "My inputs" frame.
+  const all = await host.callText("read", { sessionId: sid, canvas: "main" });
+  frame = all.match(/^\s*([a-z0-9]{6,12}) frame "My inputs"/m)?.[1] ?? "";
+  for (const f of inputs) {
+    const node = all.match(new RegExp(`^\\s*([a-z0-9]{6,12}) (?:image|video|audio) "${basename(f).replace(/\./g, "\\.")}"`, "m"))?.[1];
+    if (node) imported.push({ node, file: f, sha: sha(f), name: basename(f) });
+  }
+} else {
+  frame = (await host.call("edit", { sessionId: sid, canvas: "main", text: `frame "My inputs" p(0,-1400) s(2200,1000)` })).created[0];
+  for (const [i, f] of inputs.entries()) {
+    const r = await host.call("import_file", { sessionId: sid, canvas: "main", path: f, name: basename(f), placement: { parent: frame, x: 40 + i * 720, y: 120, w: 640 } });
+    imported.push({ node: r.node, file: f, sha: sha(f), name: basename(f) });
+    console.log(`${ts()} imported ${basename(f)} → ${r.node}`);
+  }
 }
 const rowsBefore = await host.callText("read", { sessionId: sid, canvas: "main", root: frame });
 
 // ---- the chat ------------------------------------------------------------------------------
 const s = await open(`/sync/${encodeURIComponent(id)}?actor=lukas&name=Lukas`);
 await next(s, (m) => m.type === "chat.list");
-s.send(JSON.stringify({ type: "chat.send", text, context: imported.map((x) => ({ kind: "node", node: x.node })) }));
+let chat = resume?.split("/")[1] ?? "";
+s.send(JSON.stringify({ type: "chat.send", text, ...(chat ? { chat } : { context: imported.map((x) => ({ kind: "node", node: x.node })) }) }));
 console.log(`${ts()} → ${text}`);
-let chat = "";
 const filesEvents: any[] = [];
 const capabilities: any[] = [];
 let done: () => void;
