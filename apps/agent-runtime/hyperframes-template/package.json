@@ -1,0 +1,14 @@
+{
+  "name": "falos-hyperframes-template",
+  "private": true,
+  "version": "0.1.0",
+  "description": "HyperFrames (HTML + GSAP → MP4, Apache-2.0, by HeyGen) template for typography-heavy kinetic pieces. Copied to <project>/work/<chat>/hyperframes by the runtime.",
+  "scripts": {
+    "check": "hyperframes lint && hyperframes check",
+    "render": "hyperframes render --output out/film.mp4 --fps 30 --quality high"
+  },
+  "dependencies": {
+    "gsap": "3.15.0",
+    "hyperframes": "0.8.146"
+  }
+}

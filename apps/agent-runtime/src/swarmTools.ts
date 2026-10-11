@@ -27,6 +27,8 @@ export type ToolCtx = {
   request: (op: string, args: Record<string, unknown>) => Promise<any>;
   /** Tell the host which agent a fal-os session belongs to. */
   reportSession?: (sessionId: string, agent: string) => void;
+  /** Headers for MCP clients this run starts (Codex): X-Falos-Chat / X-Falos-Project. */
+  mcpHeaders?: Record<string, string>;
 };
 
 type Kind = "image" | "video" | "audio";
@@ -233,7 +235,7 @@ export function createSwarmTools(ctx: ToolCtx) {
           await ctx.host
             .call("edit", { sessionId: a.sessionId, canvas: ctx.canvas, text: ids.map((id) => `${id} status(failed) error(${JSON.stringify(String(e.message).slice(0, 200))})`).join("\n") })
             .catch(() => {});
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_agent", summary: `fal Agent failed: ${String(e.message).slice(0, 120)}`, state: "error", nodes: ids });
+        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_agent", summary: `failed: ${String(e.message).slice(0, 120)}`, state: "error", nodes: ids });
         return fail(`fal Agent task failed: ${e.message}`);
       }
     },
@@ -362,11 +364,16 @@ export function createSwarmTools(ctx: ToolCtx) {
       const agent = "codex";
       ctx.reportSession?.(sid, agent);
       const toolId = `cx_${Date.now().toString(36)}`;
-      ctx.emit({ kind: "agent", agent, role: "Codex (code)", parent: "motion", state: "started", status: a.task.slice(0, 100) });
+      ctx.emit({ kind: "agent", agent, role: "code", parent: "motion", state: "started", status: a.task.slice(0, 100) });
       ctx.emit({ kind: "tool", agent, id: toolId, name: "codex", summary: a.task.slice(0, 100), state: "running" });
       try {
         const { Codex } = await import("@openai/codex-sdk");
-        const thread = new Codex().startThread({
+        // Codex gets its own MCP connection to *this* host (chat + project headers), not
+        // whatever its config.toml points at; a fresh MCP session per call, so a long-idle
+        // session can't 404 ("Session not found").
+        const thread = new Codex({
+          config: { mcp_servers: { "fal-os": { url: `${config.hostUrl}/mcp`, http_headers: { Authorization: `Bearer ${config.token}`, ...(ctx.mcpHeaders ?? {}) } } } },
+        }).startThread({
           workingDirectory: dir,
           skipGitRepoCheck: true,
           sandboxMode: "workspace-write",
@@ -397,7 +404,7 @@ export function createSwarmTools(ctx: ToolCtx) {
         ctx.emit({ kind: "agent", agent, state: "done", status: final.slice(0, 120) });
         return ok({ summary: final, changedFiles: [...changed] });
       } catch (e: any) {
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "codex", summary: `Codex failed: ${String(e.message).slice(0, 120)}`, state: "error" });
+        ctx.emit({ kind: "tool", agent, id: toolId, name: "codex", summary: `failed: ${String(e.message).slice(0, 120)}`, state: "error" });
         ctx.emit({ kind: "agent", agent, state: "failed", status: String(e.message).slice(0, 120) });
         const msg = String(e.message);
         if (/auth|login|401|unauthorized/i.test(msg) && !codexWarned) {

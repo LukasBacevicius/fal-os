@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use falos_host::register::{self, Client};
 use falos_host::server::{self, HostFile};
+use falos_host::workspace::Workspace;
 use falos_host::{Host, HostOptions};
 
 #[derive(Parser)]
@@ -18,10 +19,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Serve a project folder (created if missing).
+    /// Serve a workspace of projects (default ~/fal-os-projects), or one project folder.
     Serve {
+        /// Workspace folder: one subfolder per project (created if missing).
+        #[arg(long, conflicts_with = "project")]
+        workspace: Option<PathBuf>,
+        /// Single-project mode: serve only this project folder (created if missing).
         #[arg(long)]
-        project: PathBuf,
+        project: Option<PathBuf>,
         /// Preferred port; the next free one is used if busy.
         #[arg(long, default_value_t = server::DEFAULT_PORT)]
         port: u16,
@@ -62,31 +67,45 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     match Cli::parse().cmd {
-        Cmd::Serve { project, port, runtime, no_runtime } => {
+        Cmd::Serve { workspace, project, port, runtime, no_runtime } => {
             let token = server::load_or_create_token()?;
-            let host = Host::open(&project, HostOptions::default())?;
-            let running = server::serve(host.clone(), port, &token).await?;
+            let space = match project {
+                Some(p) => Workspace::single(Host::open(&p, HostOptions::default())?),
+                None => {
+                    let root = match workspace {
+                        Some(w) => w,
+                        None => std::env::var_os("HOME")
+                            .map(PathBuf::from)
+                            .context("HOME is not set")?
+                            .join("fal-os-projects"),
+                    };
+                    Workspace::open(&root, HostOptions::default)?
+                }
+            };
+            let default = space.default_host()?;
+            let running = server::serve_workspace(space.clone(), port, &token).await?;
             let port = running.addr.port();
             HostFile {
                 port,
                 url: server::mcp_url(port),
                 token: token.clone(),
                 pid: std::process::id(),
-                project: host.dir().display().to_string(),
+                project: default.dir().display().to_string(),
+                workspace: space.root().map(|r| r.display().to_string()),
             }
             .save()?;
             tracing::info!(
-                "serving {} — MCP {} · sync ws://127.0.0.1:{port}/sync/<canvas> · token in {}",
-                host.dir().display(),
+                "serving {} — MCP {} · workspace ws://127.0.0.1:{port}/workspace · sync ws://127.0.0.1:{port}/sync/<project> · token in {}",
+                space.root().unwrap_or(default.dir()).display(),
                 server::mcp_url(port),
                 server::home_dir().join("host.json").display()
             );
-            if host.opts.fal_key.is_none() && !falos_host::fal_relay::Relay::available() {
+            if default.opts.fal_key.is_none() && !falos_host::fal_relay::Relay::available() {
                 tracing::warn!("not signed in to fal: run `falos-host login` so agents can `generate`");
             }
             match (no_runtime, runtime.or_else(falos_host::runtime::detect)) {
                 (false, Some(dir)) => {
-                    falos_host::runtime::supervise(host.clone(), dir, port, token, running.cancel.clone())
+                    falos_host::runtime::supervise(space.clone(), dir, port, token, running.cancel.clone())
                 }
                 (false, None) => tracing::warn!("no agent runtime found (pass --runtime <apps/agent-runtime>): chat is disabled"),
                 _ => {}

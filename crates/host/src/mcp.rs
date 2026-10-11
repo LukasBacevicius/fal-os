@@ -24,9 +24,13 @@ use crate::context::untrusted;
 use crate::host::Host;
 use crate::{fal, knowledge};
 
+/// One MCP connection. Each tool call runs against one project's host: the session's
+/// project (by `sessionId`), or for `session` the `project` argument / `X-Falos-Project`
+/// header / the most recently used project.
 #[derive(Clone)]
 pub struct CanvasMcp {
     host: Arc<Host>,
+    ws: Arc<crate::workspace::Workspace>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -39,6 +43,8 @@ pub struct CallMeta {
     pub chat: Option<String>,
     /// `X-Falos-From: stdio` when relayed by `falos-host mcp`.
     pub from: Option<String>,
+    /// `X-Falos-Project`: the project the runtime's agents work in.
+    pub project: Option<String>,
 }
 
 tokio::task_local! {
@@ -68,7 +74,7 @@ fn header(ctx: &RequestContext<RoleServer>, name: &str) -> Option<String> {
 pub struct SessionArgs {
     /// Your name as humans should see it, e.g. "Claude Code", "Codex", "Cursor".
     pub agent_name: String,
-    /// Project id or name (optional; the host serves one project).
+    /// Project id or name (see list_projects); default: the most recently used project.
     pub project: Option<String>,
     /// Canvas to work on; created if it doesn't exist.
     pub canvas: Option<String>,
@@ -378,11 +384,37 @@ To hand work to an in-app agent swarm the user watches: `chat_new` / `chat_send`
 with `get_knowledge` (\"generation\", \"collaboration\").";
 
 impl CanvasMcp {
-    pub fn new(host: Arc<Host>) -> Self {
-        Self {
+    pub fn new(ws: Arc<crate::workspace::Workspace>) -> Result<Self> {
+        let host = ws.default_host()?;
+        Ok(Self {
             host,
-            tool_router: Self::tool_router() + Self::chat_tools(),
+            ws,
+            tool_router: Self::tool_router() + Self::chat_tools() + Self::workspace_tools(),
+        })
+    }
+
+    pub(crate) fn workspace(&self) -> &Arc<crate::workspace::Workspace> {
+        &self.ws
+    }
+
+    /// The project host a tool call runs against.
+    fn route(&self, tool: &str, args: &Json, meta: &CallMeta) -> Result<Arc<Host>> {
+        if let Some(sid) = args["sessionId"].as_str() {
+            // Unknown sessions fall through to the default host, which reports them.
+            return Ok(self.ws.host_for_session(sid).unwrap_or_else(|| self.host.clone()));
         }
+        if tool == "session" {
+            let key = args["project"]
+                .as_str()
+                .filter(|p| !p.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| meta.project.clone());
+            return match key {
+                Some(k) => self.ws.host_for_frame(Some(&k)),
+                None => self.ws.default_host(),
+            };
+        }
+        Ok(self.host.clone())
     }
 
     /// Run a tool body; errors become tool errors, and the session's pending notices are
@@ -452,8 +484,9 @@ impl CanvasMcp {
                 bail!("agentName is required");
             }
             let project = self.host.project();
-            if let Some(p) = &a.project
-                && p != &project.id
+            if let Some(p) = a.project.as_deref().filter(|p| !p.trim().is_empty())
+                && p != project.id
+                && p != self.host.id
                 && !p.eq_ignore_ascii_case(&project.name)
             {
                 bail!(
@@ -508,7 +541,7 @@ impl CanvasMcp {
                 "sessionId": info.id,
                 "actor": format!("@{}", info.actor),
                 "color": info.color,
-                "project": {"id": project.id, "name": project.name},
+                "project": {"id": self.host.id, "name": project.name},
                 "canvas": canvas,
                 "chat": chat,
                 "canvases": project.canvases.iter().map(|c| json!({"id": c.id, "name": c.name})).collect::<Vec<_>>(),
@@ -1247,14 +1280,27 @@ impl ServerHandler for CanvasMcp {
             client_name: context.peer.peer_info().map(|i| i.client_info.name.clone()),
             chat: header(&context, "x-falos-chat"),
             from: header(&context, "x-falos-from"),
+            project: header(&context, "x-falos-project"),
         };
         let name = request.name.to_string();
         let args = Json::Object(request.arguments.clone().unwrap_or_default());
-        let ext = crate::transcript::ext_start(&self.host, &name, &args);
-        let tcc = ToolCallContext::new(self, request, context);
-        let res = CALL_META.scope(meta, self.tool_router.call(tcc)).await;
+        // Run the call against its project's host.
+        let host = match self.route(&name, &args, &meta) {
+            Ok(h) => h,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!("error: {e:#}"))]).into());
+            }
+        };
+        let target = CanvasMcp {
+            host: host.clone(),
+            ws: self.ws.clone(),
+            tool_router: self.tool_router.clone(),
+        };
+        let ext = crate::transcript::ext_start(&host, &name, &args);
+        let tcc = ToolCallContext::new(&target, request, context);
+        let res = CALL_META.scope(meta, target.tool_router.call(tcc)).await;
         if let Some(ext) = ext {
-            crate::transcript::ext_end(&self.host, ext, &name, &args, &res);
+            crate::transcript::ext_end(&host, ext, &name, &args, &res);
         }
         res
     }

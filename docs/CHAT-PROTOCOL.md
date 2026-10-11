@@ -197,6 +197,97 @@ run fresh with the transcript as context; the `run` frame says `previous_driver`
   message, and the run auto-resumes once in the same SDK session; if that fails too it ends
   with `status: error` + `actions: ["continue"]`.
 
+## Projects, steering, capabilities (v1.1)
+Additive to everything above.
+
+### Projects
+A **project** is one folder = one canvas = one fal Agent project, with many chats.
+`falos-host serve --workspace <dir>` (default `~/fal-os-projects`) serves every project folder
+in `<dir>`; `--project <dir>` keeps single-project mode. Project id = folder name; the label is
+`project.json` `name`. Existing project folders load unchanged.
+
+`GET /workspace?token=…` → WebSocket. Server → client, on connect and whenever anything changes
+(create/rename/duplicate/delete/touch, running counts, recency; polled every 1 s):
+```jsonc
+{ "type": "projects", "projects": [{ "id": "demo", "name": "demo", "updated": 1760000000000 /* ms: max(touched, project.json, chats/index.json) */,
+  "running": 1 /* running chats */, "fal_project": "…" | null, "thumb": "/assets/<sha>?project=demo" | null /* newest image; add &token= */ }] }  // newest first
+```
+Client → server (errors → `{"type":"error","message"}` to the sender):
+```jsonc
+{ "type": "project.create", "name": "Launch film" }   // → {"type":"project.created","id":"launch-film"} + a new list
+{ "type": "project.rename", "id": "…", "name": "…" }   // id stays
+{ "type": "project.duplicate", "id": "…" }             // canvas + assets (hard links) → "<name> copy"; not chats/work/fal_project
+                                                       // → {"type":"project.created","id":"<new>","from":"<id>"} + a new list
+{ "type": "project.delete", "id": "…" }                // moves the folder to <workspace>/.trash/<id>-<ms> (never rm); its chats stop,
+                                                       // its /sync clients get {"type":"error","message":"this project was deleted"} and close
+{ "type": "project.touch", "id": "…" }                 // recency (the default project for agents)
+```
+- **Sync:** `/sync/<project>` (its first canvas; `&canvas=` for another). `/sync/<canvas>` still
+  works (single-project mode; in a workspace it means that canvas of the default project).
+- **Assets:** `/assets/<sha>?project=<id>`. Without `project`, PUT goes to the default project and
+  GET also searches the others.
+- **Isolation:** each project has its own canvas, sessions, claims, activity, chats
+  (`<project>/chats/`), turns and runtime work dirs (`<project>/work/<chat>/`). Chat events and
+  `chat.list` on `/sync/<project>` are only that project's.
+- **Default project** (MCP `session` without `project`, older clients): the most recently
+  updated / touched one; an empty workspace gets an "Untitled" project.
+- **fal Agent project:** `project.json` `fal_project`. The first fal-driver chat in a project
+  creates (or reuses, by name) a fal Agent project named after it and reports it
+  (`project.fal`, below); every fal-driver chat in the project then runs as a conversation in it
+  (shared memory, characters, assets). Duplicates start without one.
+
+### Steering
+Client → host:
+```jsonc
+{ "type": "chat.steer", "chat": "c_…", "id": "q_…" }                      // send a queued message now
+{ "type": "chat.steer", "chat": "c_…", "text": "…", "context": [], "agent": "motion" }  // or new text; agent optional
+```
+"Deliver now": the runtime interrupts the current step and continues the **same session** with
+the message as the next user message — also while the director is blocked on a subagent
+(foreground subagents and commands move to the background and keep running).
+- Host emits (when it came from the queue) `{"kind":"dequeued","id","reason":"steer"}`, then
+  `{"kind":"user","text","context","author","queued":"q_…","steer":true,"agent"?:"motion"}`
+  (`queued` = it joins the running turn; `agent` = the subagent it was sent to).
+- `agent` given and that subagent running: it gets the message in its own context after its next
+  tool call (or as it is about to stop); the director gets an FYI. Not running: the director
+  gets it as "message for <agent>" and relays it.
+- No running turn: an ordinary message (starts a run).
+- fal driver: answers a pending fal Agent question, else cancels the running task and continues
+  the same conversation with it. Codex driver: aborts the Codex turn and continues the thread.
+- Queued messages (`chat.send` while running) now also reach the director while it waits for
+  background subagents (it is between turns), not only at its next tool call.
+
+### Capabilities
+At the start of every run the runtime emits:
+```jsonc
+{ "kind": "capabilities", "available": ["claude", "fal-agent", "fal-models", "codex", "remotion", "hyperframes", "ffmpeg", "remotion-skills", "hyperframes-skills"],
+  "missing": [{ "name": "codex", "fix": "run `npx codex login`" }] }
+```
+`claude` always; `fal-agent` = FAL_KEY with the AGENT preset (cached `GET /agent/projects`);
+`fal-models` = FAL_KEY; `codex` = Codex sign-in **and** the host's MCP answering on a fresh
+session; `remotion` = template deps + chrome-headless-shell; `hyperframes` = its template deps +
+that browser + ffmpeg; `*-skills` = the official agent skills installed
+(`apps/agent-runtime/scripts/install-skills.sh`). The same list goes into the director's and
+every subagent's system prompt; missing tools are never planned with. In the opus driver Opus
+writes code itself; Codex only when the user asks (or picks the codex driver).
+
+### Summaries
+`tool` `summary` strings and `agent` `status` lines start with exactly one verb and never repeat
+the tool or agent name: `built a contact sheet` (not `ran ran Build a contact sheet`), `agent`
+`role` is a description (`edit & render`, `fal media`, `script & shots`, `render check`, `code`),
+never the label again (not `motion · motion · …`).
+
+### Host ↔ runtime (projects)
+- Every frame both ways carries `project` (the project id). Host → runtime `run` also has
+  `project_dir`, `project_name`, `fal_project`; older runtimes used `project` as the folder.
+  The runtime keys runs by (project, chat); `request` frames carry `project`.
+- Host → runtime `{"type":"steer","project","chat","id","text","author","agent","context":[resolved],"chips":[raw]}`.
+- Runtime → host `{"type":"steer.failed","project","chat","id","text","author","chips"}` when no run
+  was active (the host starts a run with it, without a second `user` event), and
+  `{"type":"project.fal","project","fal_project"}` (stored in `project.json`).
+- The runtime's MCP connections send `X-Falos-Project: <id>` (with `X-Falos-Chat`); Codex gets
+  an explicit MCP config with both headers.
+
 ## Runtime events (`event` payload)
 ```jsonc
 { "kind": "user", "text": "…", "context": [/* chips */], "author": "lukas" }

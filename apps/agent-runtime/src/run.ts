@@ -5,10 +5,10 @@ import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { query, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { codexAuthAvailable, config, falKey } from "./config.ts";
+import { type Capabilities, type CapName, capabilityEvent, capabilityPrompt, probeCapabilities } from "./capabilities.ts";
+import { config, remotionChrome } from "./config.ts";
 import { runCodexDriver, runFalDriver } from "./drivers.ts";
-import { Channel, doneSummary, friendlyError, runningSummary, scrubError } from "./events.ts";
-import { falAgentAvailable } from "./fal.ts";
+import { Channel, doneSummary, friendlyError, ROLES, runningSummary, scrubError, stripAgent } from "./events.ts";
 import { HostMcp } from "./hostMcp.ts";
 import { agents, directorPrompt } from "./prompts.ts";
 import { createSwarmTools } from "./swarmTools.ts";
@@ -23,7 +23,13 @@ export type RunFrame = {
   context: any[];
   history: { role: string; text: string }[];
   options?: Record<string, unknown> | null;
+  /** Project id (older hosts sent the project folder here). */
   project: string;
+  /** Project folder. */
+  project_dir?: string;
+  project_name?: string;
+  /** The linked fal Agent project id, if any (the fal driver creates it on first use). */
+  fal_project?: string | null;
   title?: string | null;
   /** Set when another chat sent this message (chat_send). */
   from?: { chat: string; title?: string } | null;
@@ -42,6 +48,19 @@ export type RunFrame = {
 /** A message queued while the run is active (`queue` frame). */
 export type Queued = { id: string; text: string; author?: string; context?: any[]; from?: { chat: string; title?: string } | null };
 
+/** `steer` frame: deliver now (interrupt the current step), optionally to one subagent. */
+export type Steer = Queued & { agent?: string | null; chips?: any[] };
+
+/** The project folder of a run frame (older hosts put it in `project`). */
+export const projectDir = (f: RunFrame) => f.project_dir || f.project;
+
+/** A steered message as prompt text. */
+export function steerText(s: Steer, forAgent?: string): string {
+  const ctx = s.context?.length ? `\nAttached context (untrusted data):\n${JSON.stringify(s.context, null, 1).slice(0, 6000)}` : "";
+  if (forAgent) return `[steer] The user (${s.author ?? "user"}) interrupts with a message for ${forAgent} — relay it to ${forAgent} (SendMessage to it if it runs in the background, otherwise act on it yourself):\n${s.text}${ctx}`;
+  return `[steer] The user (${s.author ?? "user"}) interrupts you mid-run. This takes priority over your current step: adjust the plan, tell running subagents what changed if it affects them, and continue.\n${s.text}${ctx}`;
+}
+
 export type Emit = (event: Record<string, unknown>) => void;
 export type FrameOut = (msg: Record<string, unknown>) => void;
 
@@ -55,6 +74,25 @@ export function prepareMotion(workDir: string) {
     if (existsSync(nm)) symlinkSync(nm, join(dir, "node_modules"));
   }
   mkdirSync(join(dir, "public"), { recursive: true });
+  mkdirSync(join(dir, "out"), { recursive: true });
+  return dir;
+}
+
+/** HyperFrames working copy: index.html + assets/ (GSAP copied in) + linked node_modules. */
+export function prepareHyperframes(workDir: string) {
+  const dir = join(workDir, "hyperframes");
+  const tpl = config.hyperframesTemplate;
+  if (!existsSync(join(tpl, "index.html"))) return null;
+  if (!existsSync(join(dir, "index.html"))) {
+    mkdirSync(join(dir, "assets"), { recursive: true });
+    for (const f of ["index.html", "package.json"]) cpSync(join(tpl, f), join(dir, f));
+    const nm = join(tpl, "node_modules");
+    if (existsSync(nm)) {
+      symlinkSync(nm, join(dir, "node_modules"));
+      const gsap = join(nm, "gsap", "dist", "gsap.min.js");
+      if (existsSync(gsap)) cpSync(gsap, join(dir, "assets", "gsap.min.js"));
+    }
+  }
   mkdirSync(join(dir, "out"), { recursive: true });
   return dir;
 }
@@ -132,6 +170,19 @@ export class ChatRun {
   private waiters: ((q: Queued | null) => void)[] = [];
   private accepting = true;
   private input: Channel<SDKUserMessage> | null = null;
+  /** Steered messages pushed with priority "now" whose turn hasn't run yet. */
+  private steerPending = 0;
+  /** The director finished its turn but the session stays open (background subagents). */
+  private idle = false;
+  /** Drivers without an SDK query (fal, codex) handle steers themselves. */
+  steerHandler: ((s: Steer) => void) | null = null;
+  /** Steers for one subagent, delivered by hook after its next tool call. */
+  private mail = new Map<string, string[]>();
+  private agentIds = new Map<string, string>(); // SDK agent_id / task_id → label
+  private running = new Set<string>(); // subagent labels currently working
+  private taskTool = new Map<string, string>(); // task_id → Agent tool_use id
+  /** Capabilities probed for this run. */
+  caps: Capabilities | null = null;
   readonly workDir: string;
   readonly emit: Emit;
 
@@ -141,7 +192,7 @@ export class ChatRun {
     private request: (op: string, args: Record<string, unknown>) => Promise<any>,
     readonly frameOut: FrameOut = () => {},
   ) {
-    this.workDir = join(frame.project, "work", frame.chat);
+    this.workDir = join(projectDir(frame), "work", frame.chat);
     // Every event is attributed: the director unless it says otherwise; subagents get their parent.
     this.emit = (e) => {
       const ev: Record<string, unknown> = { ...e };
@@ -176,7 +227,100 @@ export class ChatRun {
       return true;
     }
     this.pending.push(q);
+    // The director is between turns while subagents work: deliver now (starts its next turn).
+    if (this.idle) this.inject();
     return true;
+  }
+
+  /** Hand `q` to a driver waiting for an answer (a fal Agent question); false if none waits. */
+  enqueueAnswer(q: Queued): boolean {
+    const w = this.waiters.shift();
+    if (!w) return false;
+    // A steer: the host already showed it (no `injected` frame).
+    w(q);
+    return true;
+  }
+
+  // ---- steering ------------------------------------------------------------------------------
+
+  /** A `steer` frame: deliver it now. Without a running turn → `steer.failed` (host re-delivers). */
+  steer(s: Steer): boolean {
+    if (!this.accepting) {
+      this.frameOut({ type: "steer.failed", chat: this.frame.chat, id: s.id, text: s.text, author: s.author, chips: s.chips ?? [] });
+      return false;
+    }
+    if (this.steerHandler) {
+      this.steerHandler(s);
+      return true;
+    }
+    if (!this.input || this.input.isClosed) {
+      this.frameOut({ type: "steer.failed", chat: this.frame.chat, id: s.id, text: s.text, author: s.author, chips: s.chips ?? [] });
+      return false;
+    }
+    void this.steerOpus(s);
+    return true;
+  }
+
+  private async steerOpus(s: Steer) {
+    const target = s.agent && s.agent !== "director" ? s.agent : null;
+    if (target && this.running.has(target)) {
+      // Straight into that subagent's context after its next tool call (PostToolUse hook), and
+      // the director hears about it without being interrupted.
+      this.mail.set(target, [...(this.mail.get(target) ?? []), s.text]);
+      this.emit({ kind: "agent", agent: target, state: "working", status: "message from you: delivering at its next step" });
+      this.pushUser(`(FYI: the user sent ${target} a message directly; it gets it at its next step. No need to relay.) ${s.text}`, "next");
+      return;
+    }
+    // Unblock the director first: foreground subagents / commands move to the background (they
+    // keep running), then the message interrupts the current step and runs as the next turn.
+    this.steerPending++;
+    try {
+      await this.q?.backgroundTasks();
+    } catch {}
+    this.pushUser(steerText(s, target ?? undefined), "now");
+  }
+
+  private pushUser(text: string, priority: "now" | "next") {
+    if (!this.input || this.input.isClosed) return;
+    this.idle = false;
+    this.input.push({ type: "user", message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, priority } as SDKUserMessage);
+  }
+
+  /** Hook: a steer waiting for the subagent that just used a tool (or is about to stop). */
+  private labelOfAgent(agentId: string | undefined, agentType: string | undefined): string | undefined {
+    let label = agentId ? this.agentIds.get(agentId) : undefined;
+    if (!label && agentId && agentType) {
+      // First sighting of this agent id: the newest running subagent of that type.
+      label = [...this.running].reverse().find((l) => (l === agentType || l.startsWith(`${agentType}-`)) && ![...this.agentIds.values()].includes(l));
+      if (label) this.agentIds.set(agentId, label);
+    }
+    return label;
+  }
+
+  private takeMail(agentId: string | undefined, agentType: string | undefined): string | null {
+    const label = this.labelOfAgent(agentId, agentType);
+    if (!label) return null;
+    const m = this.mail.get(label);
+    if (!m?.length) return null;
+    this.mail.delete(label);
+    this.emit({ kind: "agent", agent: label, state: "working", status: "got your message" });
+    return `Message from the user, sent to you (${label}) while you work — it takes priority; adjust what you're doing:\n${m.join("\n\n")}`;
+  }
+
+  private hooks() {
+    const post = async (input: any) => {
+      const text = this.takeMail(input.agent_id, input.agent_type);
+      return text ? { hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: text } } : {};
+    };
+    const start = async (input: any) => {
+      this.labelOfAgent(input.agent_id, input.agent_type);
+      return {};
+    };
+    return {
+      PostToolUse: [{ hooks: [post] }],
+      SubagentStop: [{ hooks: [post] }],
+      SubagentStart: [{ hooks: [start] }],
+    } as any;
   }
 
   unqueue(id: string) {
@@ -265,6 +409,11 @@ export class ChatRun {
   };
 
   /** Tell the host which subagent a fal-os session belongs to (cursor labels, activity). */
+  /** Headers for this run's host MCP connections: chat + project. */
+  hostHeaders(): Record<string, string> {
+    return { "x-falos-chat": this.frame.chat, "x-falos-project": this.frame.project };
+  }
+
   reportSession(session: string, agent: string) {
     this.sessionAgent.set(session, agent);
     this.frameOut({ type: "session.agent", chat: this.frame.chat, session, agent, parent: this.parents.get(agent) ?? (agent === "director" ? null : "director") });
@@ -276,6 +425,12 @@ export class ChatRun {
     const f = this.frame;
     mkdirSync(this.workDir, { recursive: true });
     this.emit({ kind: "status", state: "running" });
+    try {
+      this.caps = await probeCapabilities({ refreshNet: true });
+      this.emit(capabilityEvent(this.caps));
+    } catch (e: any) {
+      console.error(`[runtime] capability probe failed: ${e?.message ?? e}`);
+    }
     try {
       if (f.driver === "fal") await runFalDriver(this);
       else if (f.driver === "codex") await runCodexDriver(this);
@@ -292,14 +447,14 @@ export class ChatRun {
   private async runOpus() {
     const f = this.frame;
     prepareMotion(this.workDir);
-    if (!falKey()) this.emit({ kind: "text", agent: "director", delta: "No fal key found: put `FAL_KEY=…` in ~/.fal-os/fal.env so the swarm can generate media.\n" });
-    const fa = falKey() ? await falAgentAvailable(true) : ({ ok: false, reason: "no FAL_KEY" } as const);
-    if (!fa.ok && falKey())
-      this.emit({ kind: "text", agent: "director", delta: `(fal Agent unavailable: ${fa.reason}. Generating with direct fal model calls instead.)\n` });
-    const codex = codexAuthAvailable();
-    if (!codex) this.emit({ kind: "text", agent: "director", delta: "(Codex isn't signed in: run `npx codex login` to enable Codex. Continuing with Claude.)\n" });
+    prepareHyperframes(this.workDir);
+    // Missing tools show as one `capabilities` line in the UI; agents get the list in their prompts.
+    const caps = this.caps ?? (await probeCapabilities());
+    const has = (n: CapName) => caps.available.includes(n);
+    const fa = has("fal-agent") ? ({ ok: true } as const) : ({ ok: false, reason: caps.missing.find((m) => m.name === "fal-agent")?.fix ?? "unavailable" } as const);
+    const codex = has("codex");
 
-    const host = new HostMcp(undefined, undefined, { "x-falos-chat": f.chat });
+    const host = new HostMcp(undefined, undefined, this.hostHeaders());
     const swarm = createSwarmTools({
       host,
       canvas: f.canvas,
@@ -311,6 +466,7 @@ export class ChatRun {
       chat: f.chat,
       request: this.request,
       reportSession: (sid, agent) => this.reportSession(sid, agent),
+      mcpHeaders: { "X-Falos-Chat": f.chat, "X-Falos-Project": f.project },
     });
 
     // Resume the SDK session for follow-ups on the same driver; start fresh after a switch.
@@ -319,8 +475,22 @@ export class ChatRun {
     const resume = sameDriver && existsSync(sessionPath) ? JSON.parse(readFileSync(sessionPath, "utf8")).sessionId : undefined;
     const { blocks, notes } = await chipImages(f.context, this.workDir);
     const prompt = promptText(f, { resume: Boolean(resume), notes });
-    const sysPrompt = directorPrompt({ canvas: f.canvas, workDir: this.workDir, falAgent: fa, codex });
-    const agentDefs = agents({ canvas: f.canvas, workDir: this.workDir, falAgent: fa.ok, codex, worker: config.workerModel });
+    const capText = capabilityPrompt(caps);
+    const sysPrompt = directorPrompt({ canvas: f.canvas, workDir: this.workDir, falAgent: fa, codex, caps: capText });
+    const agentDefs = agents({
+      canvas: f.canvas,
+      workDir: this.workDir,
+      falAgent: fa.ok,
+      codex,
+      worker: config.workerModel,
+      caps: capText,
+      remotion: has("remotion"),
+      hyperframes: has("hyperframes"),
+      remotionSkills: has("remotion-skills"),
+      hyperframesSkills: has("hyperframes-skills"),
+      qa: config.motionQa,
+    });
+    const chrome = remotionChrome();
 
     const attempt = async (content: any[], resumeId: string | undefined) => {
       const input = new Channel<SDKUserMessage>();
@@ -332,7 +502,7 @@ export class ChatRun {
           model: config.directorModel,
           effort: "high",
           cwd: this.workDir,
-          additionalDirectories: [join(f.project, "assets")],
+          additionalDirectories: [join(projectDir(f), "assets")],
           resume: resumeId,
           abortController: this.abort,
           includePartialMessages: true,
@@ -344,14 +514,26 @@ export class ChatRun {
           maxTurns: config.maxTurns,
           pathToClaudeCodeExecutable: config.claudePath,
           systemPrompt: { type: "preset", preset: "claude_code", append: sysPrompt },
-          tools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent", "TodoWrite"],
+          tools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent", "TodoWrite", "SendMessage", ...(caps.plugins.length ? ["Skill"] : [])],
+          // Remotion's / HyperFrames' official agent skills (fetched by scripts/install-skills.sh).
+          plugins: caps.plugins.map((p) => ({ type: "local" as const, path: p.path })),
+          // A steer interrupts only the current turn; background subagents keep running.
+          perTaskStopAffordance: true,
+          hooks: this.hooks(),
           mcpServers: {
-            // X-Falos-Chat ties every agent session on this connection to the chat (color, turn, revert).
-            falos: { type: "http", url: `${config.hostUrl}/mcp`, headers: { Authorization: `Bearer ${config.token}`, "X-Falos-Chat": f.chat }, alwaysLoad: true },
+            // X-Falos-Chat ties every agent session on this connection to the chat (color, turn,
+            // revert); X-Falos-Project keeps it in this chat's project.
+            falos: { type: "http", url: `${config.hostUrl}/mcp`, headers: { Authorization: `Bearer ${config.token}`, "X-Falos-Chat": f.chat, "X-Falos-Project": f.project }, alwaysLoad: true },
             swarm,
           },
           agents: agentDefs,
-          env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "fal-os-agent-runtime/0.1" },
+          env: {
+            ...process.env,
+            CLAUDE_AGENT_SDK_CLIENT_APP: "fal-os-agent-runtime/0.1",
+            HYPERFRAMES_NO_TELEMETRY: "1",
+            DO_NOT_TRACK: "1",
+            ...(chrome ? { HYPERFRAMES_BROWSER_PATH: chrome } : {}),
+          },
           stderr: (d) => process.stderr.write(`[claude] ${d}`),
         },
       });
@@ -362,14 +544,24 @@ export class ChatRun {
         if (m.type === "system" && m.subtype === "init") writeFileSync(sessionPath, JSON.stringify({ sessionId: m.session_id }));
         if (m.type === "result") {
           summary = (m as any).result ?? summary;
+          const r: any = m;
+          if (this.steerPending > 0) {
+            // The turn a steer interrupted (or one that ended just before it): the steered
+            // message runs next in this same session.
+            this.steerPending--;
+            continue;
+          }
           if (m.subtype !== "success") {
-            console.error(`[runtime] ${f.chat}: SDK result ${m.subtype}: ${JSON.stringify((m as any).errors ?? [])}`);
+            if (/aborted/.test(String(r.terminal_reason ?? "")) && (r.queued_turn_count ?? 0) > 0) continue;
+            console.error(`[runtime] ${f.chat}: SDK result ${m.subtype}: ${JSON.stringify(r.errors ?? [])}`);
             failure = m.subtype;
             input.close();
             continue;
           }
+          if ((r.queued_turn_count ?? 0) > 0) continue;
           // Queued messages that missed the last tool call start the next turn now.
           if (this.inject()) continue;
+          this.idle = true;
           // Background subagents still running: keep the session open; their completion
           // starts another Director turn (and another result).
           if (this.background.size === 0) {
@@ -426,6 +618,7 @@ export class ChatRun {
         break;
       }
       case "assistant": {
+        if (!parent) this.idle = false;
         for (const b of (m as any).message?.content ?? []) {
           if (b.type === "tool_use") this.onToolUse(b, parent);
           // Subagent text goes to that subagent's own transcript.
@@ -440,15 +633,24 @@ export class ChatRun {
       }
       case "system": {
         const s: any = m;
+        // A subagent task's id is its agent id in hook inputs (steers to that subagent).
+        if (s.subtype === "task_started" && s.task_id && s.tool_use_id) {
+          this.taskTool.set(s.task_id, s.tool_use_id);
+          const label = this.labels.get(s.tool_use_id);
+          if (label) this.agentIds.set(s.task_id, label);
+          if (s.is_backgrounded && label) this.background.add(s.tool_use_id);
+        }
         if (s.subtype === "task_progress" && s.tool_use_id && s.summary) {
           const agent = this.labels.get(s.tool_use_id);
-          if (agent) this.emit({ kind: "agent", agent, state: "working", status: s.summary.slice(0, 140) });
+          if (agent) this.emit({ kind: "agent", agent, state: "working", status: stripAgent(s.summary, agent, ROLES[agent.replace(/-\d+$/, "")]).slice(0, 140) });
         }
         if (s.subtype === "task_notification" && s.tool_use_id) {
           this.background.delete(s.tool_use_id);
           const agent = this.labels.get(s.tool_use_id);
-          if (agent)
-            this.emit({ kind: "agent", agent, state: s.status === "completed" ? "done" : "failed", status: String(s.summary ?? s.status).replace(/\s+/g, " ").slice(0, 160) });
+          if (agent) {
+            this.running.delete(agent);
+            this.emit({ kind: "agent", agent, state: s.status === "completed" ? "done" : "failed", status: stripAgent(String(s.summary ?? s.status).replace(/\s+/g, " "), agent).slice(0, 160) });
+          }
         }
         break;
       }
@@ -469,7 +671,10 @@ export class ChatRun {
       const label = this.label(type);
       this.labels.set(b.id, label);
       this.parents.set(label, agent);
-      this.emit({ kind: "agent", agent: label, role: type, parent: agent, state: "started", status: String(input.description ?? "").slice(0, 140) });
+      this.running.add(label);
+      // `role` is a description, never the label again ("motion · motion · …").
+      const role = ROLES[type] ?? (type === label ? "subagent" : type);
+      this.emit({ kind: "agent", agent: label, role, parent: agent, state: "started", status: stripAgent(String(input.description ?? ""), label, type).slice(0, 140) });
       return;
     }
     if (name === "TodoWrite" && agent === "director") {
@@ -490,14 +695,15 @@ export class ChatRun {
     const label = this.labels.get(id);
     if (label) {
       // A background subagent: this is only the launch ack; it ends with a task_notification.
-      if (/^Async agent launched/i.test(text.trim())) {
+      if (/^Async agent launched|running in the background/i.test(text.trim().slice(0, 300))) {
         this.background.add(id);
         this.emit({ kind: "agent", agent: label, state: "working", status: "running in the background" });
         return;
       }
+      this.running.delete(label);
       // Drop the SDK's hand-back preamble paragraph; keep the subagent's own report.
       const report = text.startsWith("[Subagent hand-back]") ? text.split(/\n\s*\n/).slice(1).join("\n") || text : text;
-      this.emit({ kind: "agent", agent: label, state: b.is_error ? "failed" : "done", status: report.replace(/\s+/g, " ").trim().slice(0, 160) });
+      this.emit({ kind: "agent", agent: label, state: b.is_error ? "failed" : "done", status: stripAgent(report.replace(/\s+/g, " ").trim(), label).slice(0, 160) });
       return;
     }
     const caller = this.toolAgent.get(id);

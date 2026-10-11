@@ -23,7 +23,7 @@ The user's current selection is their focus: \`get_selection\` shows it ("this",
 
 const BATCH = `Many outputs: when a request needs more than ~3 generations (e.g. "200 images of pizza", "variations"), make ONE fal-os \`generate_batch\` call (\`count\` + \`variations\` for prompt variety, \`num_images\` in the input when the model supports it, or explicit \`jobs\`). It places every placeholder at once in a grid in free space, runs all jobs in parallel and returns immediately; \`await_batch\` only if you need the results. NEVER call \`generate\` or \`fal_model\` in a loop for a batch. For "quick"/"fast" requests use a fast model (fal-ai/flux/schnell).`;
 
-export function directorPrompt(o: { canvas: string; workDir: string; falAgent: { ok: boolean; reason?: string }; codex: boolean }) {
+export function directorPrompt(o: { canvas: string; workDir: string; falAgent: { ok: boolean; reason?: string }; codex: boolean; caps?: string }) {
   const frames = Object.entries(LAYOUT)
     .map(([k, v]) => `  ${k}: p(${v.x},${v.y}) s(${v.w},${v.h})`)
     .join("\n");
@@ -45,11 +45,12 @@ ${frames}
   1. You: read the canvas (\`read\` detail "blurry", then details), look at referenced media (Read the local image files from get_context; for videos extract a frame with ffmpeg into ${o.workDir}/look/ and Read it), write the brief.
   2. storyboard: script + shot list as notes in the Storyboard frame (returns shots with image prompts).
   3. generator(s): stills in the Assets frame (hero product shots + lifestyle/detail shots, 16:9, consistent product look; use the user's product photo as reference when there is one). Then, in parallel: a generator for video clips (image-to-video from the best stills, 5 s each) and a generator for music (instrumental, matching length). Video takes minutes.
-  4. motion: builds the Remotion edit from the canvas assets (hero reveal, kinetic feature callouts, clip montage, end card, music), renders 1920×1080 MP4 and imports it into the Final frame.
-  5. qa: checks the render (ffprobe + frames); if it finds real problems, send motion back once with the QA notes.
+  4. motion: builds the edit from the canvas assets (hero reveal, kinetic feature callouts, clip montage, end card, music) in Remotion — or HyperFrames for typography-led kinetic pieces — renders 1920×1080 30 fps with audio at -14 LUFS, runs the motion QA (contact sheet, beat timing, typography) and fixes what it finds, then imports it into the Final frame.
+  5. qa: an independent check of the render (motion-qa report + contact sheet + frames); if it finds real problems, send motion back once with the QA notes.
   6. You: final chat message with what was made and the final node id.
 - Generation: ${o.falAgent.ok ? "the fal Agent is available (swarm `fal_agent`): it picks models and runs multi-step media tasks. `fal_model` runs one exact endpoint." : `the fal Agent is NOT available (${o.falAgent.reason}). Generators must use swarm \`fal_model\` with explicit endpoints (see their prompt).`} Spend is not capped, but don't waste: one good attempt, retry only on failure. A circuit breaker stops generation after repeated failures — if you hit it, tell the user what failed.
-- Codex: ${o.codex ? "available via swarm `codex` (OpenAI's coding agent); motion uses it for composition code." : "not signed in. If the user wants Codex, tell them to run `npx codex login`."}
+- Code: you and your subagents (Opus) write code yourselves. Codex: ${o.codex ? "available via swarm `codex`, but use it ONLY when the user asks for Codex (then tell motion to delegate composition code to it)." : "not available. If the user wants Codex, tell them to run `npx codex login`."}
+- Steering: a user message starting with [steer] interrupted you mid-run — it overrides the current plan. Subagents keep running in the background; use SendMessage to tell a running subagent what changed (or stop/restart it) when the steer affects its work. Subagents run in the background by default, so you stay responsive; you're notified when each finishes.
 - User media: anything on the canvas (the user's own photos, videos, audio) can be a reference or a direct model input. \`get_context\` gives local files; \`media_url\` gives public URLs (uploads local-only media to fal storage once).
 - Context chips the user attached arrive with resolved rows, files and crops; image chips are attached as images.
 - ${BATCH}
@@ -60,12 +61,50 @@ ${frames}
 ${PRESENCE}
 Your agentName is "Director".
 
+${o.caps ?? ""}
+Plan only with the tools above; if something the request needs is missing, say so in one line (with its fix) and do the best version without it.
+
 ${FORMAT}
 `;
 }
 
-export function agents(o: { canvas: string; workDir: string; falAgent: boolean; codex: boolean; worker: string }): Record<string, AgentDefinition> {
-  const common = `Canvas: \`${o.canvas}\`. Work dir: ${o.workDir}.\n${PRESENCE}\n${FORMAT}\nWhen done, call \`finish_working\`, then reply with a compact report: what you made, node ids, anything that failed.`;
+/** Motion design rules: what makes an edit feel premium rather than generic. */
+const MOTION_CRAFT = `Craft (make it great, not generic):
+- Structure: hook in the first 1.5 s, one idea per beat, a clear peak, a held end card (≥ 2 s) with brand + CTA.
+- Timing: cut and land accents on the music's beats (motion-qa reports BPM and the beat grid; use multiples of the beat period for scene lengths). Ease in/out (expo/cubic), no linear moves; overlap transitions (no dead air or black gaps between scenes).
+- Typography: ≤ 2 typefaces, headline ≥ 96 px, body ≥ 40 px, ≤ 6 words per line, inside the 5% title-safe area, contrast ≥ 4.5:1 (scrim over busy footage), each line on screen ≥ 1.2 s + 0.25 s/word.
+- Footage: Ken Burns / parallax on stills, trim clips to their best 1–2 s, match the brief's palette in backgrounds and accents.
+- Sound: music bed with fades, optional whooshes on transitions; master to -14 LUFS integrated, true peak ≤ -1 dBTP.
+- Output: 1920×1080, 30 fps, h264 yuv420p, AAC 48 kHz.
+- Fonts: use installed system fonts (macOS: "Helvetica Neue", "Avenir Next", "SF Pro Display" via -apple-system, files in /System/Library/Fonts and /Library/Fonts) or a font file you copy into the project. Never search the whole disk (no \`find /\`, no \`mdfind\` over everything): it takes minutes.`;
+
+export type AgentOpts = {
+  canvas: string;
+  workDir: string;
+  falAgent: boolean;
+  codex: boolean;
+  worker: string;
+  /** Capability block (capabilities.ts). */
+  caps?: string;
+  remotion?: boolean;
+  hyperframes?: boolean;
+  remotionSkills?: boolean;
+  hyperframesSkills?: boolean;
+  /** Path of scripts/motion-qa.mjs. */
+  qa?: string;
+};
+
+export function agents(o: AgentOpts): Record<string, AgentDefinition> {
+  const common = `Canvas: \`${o.canvas}\`. Work dir: ${o.workDir}.\n${PRESENCE}\n${FORMAT}\n${o.caps ?? ""}\nWhen done, call \`finish_working\`, then reply with a compact report: what you made, node ids, anything that failed.`;
+  const qa = `node ${o.qa ?? "scripts/motion-qa.mjs"}`;
+  const remotion = o.remotion !== false;
+  const hyper = Boolean(o.hyperframes);
+  const renderers = [
+    remotion &&
+      `- Remotion (default; edits with footage, stills, music): project ${o.workDir}/motion (template src/Ad.tsx: hero reveal → kinetic feature callouts → clip montage → end card; props in src/props.ts; node_modules linked). Assets go in motion/public/. Preview: \`npx remotion still src/index.ts Ad out/check.png --props=props.json --frame=90\`. Render: \`npx remotion render src/index.ts Ad out/ad.mp4 --props=props.json --codec=h264 --crf=16 --pixel-format=yuv420p --audio-codec=aac --audio-bitrate=320k\` (foreground, long timeout).${o.remotionSkills ? " Load the Skill `remotion:remotion-best-practices` first (then remotion-markup for animation/timing/audio rules, remotion-render, remotion-multimedia as needed) and follow it." : ""}`,
+    hyper &&
+      `- HyperFrames (HTML + GSAP; best for typography-led kinetic text, motion graphics, title sequences): project ${o.workDir}/hyperframes (index.html: data-* timing on .clip elements, one paused GSAP timeline in window.__timelines["main"], BEATS array for the beat grid; GSAP at assets/gsap.min.js). Put media in hyperframes/assets/. Check: \`npx hyperframes lint && npx hyperframes check\` (layout, contrast, motion). Snapshot frames: \`npx hyperframes snapshot\`. Render: \`npx hyperframes render --output out/film.mp4 --fps 30 --quality high\`.${o.hyperframesSkills ? " Load the Skill `hyperframes:hyperframes` first (then hyperframes:motion-graphics / hyperframes-animation / hyperframes-audio as needed) and follow it." : ""}`,
+  ].filter(Boolean);
   const base = ["session", "read", "edit", "set_status", "get_context", "finish_working", "get_selection"];
   const falos = (names: string[]) => names.map((n) => `mcp__falos__${n}`);
   const chatTools = ["mcp__swarm__chat_list", "mcp__swarm__chat_read", "mcp__swarm__chat_send"];
@@ -104,18 +143,24 @@ ${common}`,
       ],
     },
     motion: {
-      description: "Builds and renders the Remotion edit (motion graphics as code) from canvas assets and imports the MP4 into the Final frame. Give it the brief, script lines, asset node ids (stills, clips, music), and frame ids.",
+      description: "Builds and renders the edit (motion graphics as code: Remotion, or HyperFrames for typography-led kinetic pieces) from canvas assets, runs the motion QA (contact sheet, beat timing, typography, loudness) and imports the MP4 into the Final frame. Give it the brief, script lines, asset node ids (stills, clips, music), frame ids, and the renderer if it matters.",
       model: o.worker,
+      ...(o.remotionSkills || o.hyperframesSkills
+        ? { skills: [...(o.remotionSkills ? ["remotion:remotion-best-practices"] : []), ...(o.hyperframesSkills && hyper ? ["hyperframes:hyperframes"] : [])] }
+        : {}),
       prompt: `You are Motion, the motion designer/editor of a fal-os ad swarm. agentName "Motion".
-The Remotion project is ready at ${o.workDir}/motion (template: src/Ad.tsx hero reveal → kinetic feature callouts → clip montage → end card, props in src/props.ts; node_modules linked).
+Renderers (pick one per piece; Remotion unless the piece is mostly kinetic typography / motion graphics):
+${renderers.join("\n") || "- none available: tell the director (see the capability list)."}
+${MOTION_CRAFT}
 Steps:
-1. \`get_context\` with node chips for every asset you're given → local files. Copy them into ${o.workDir}/motion/public/ with short names (hero.png, still2.png, clip1.mp4, music.mp3 …).
-2. Write ${o.workDir}/motion/props.json (AdProps: brand, product, tagline, features[{title, detail, image}], hero, stills, clips, music, cta, palette from the brief, durationInSeconds 15–30 to fit the clips and music).
-3. Make it great, not generic: adapt the composition to the brief — typography, colors, pacing to the music, scene order, transitions. ${o.codex ? "Delegate the composition code to Codex: call swarm `codex` with precise instructions (which files, what to change and why, keep props compatible, verify with `npx tsc --noEmit`). Codex is a visible teammate on the canvas — the user expects to see it work. Don't edit src/*.tsx yourself unless Codex fails; you may review and make small fixes after it." : "Edit src/*.tsx yourself."} Keep it compiling.
-4. Preview a frame: \`npx remotion still src/index.ts Ad out/check.png --props=props.json --frame=90\` and Read the png. Fix obvious problems.
-5. Render: \`npx remotion render src/index.ts Ad out/ad.mp4 --props=props.json\` (1920×1080, h264; takes a minute or two; run in the foreground with a long timeout).
-6. \`import_file\` the MP4 into the Final frame (placement parent = Final frame id, x 40, y 120, w 1920) with name "<product> ad — v1" and lineage {model: "remotion", params: {props}, parents: [asset node ids]}. Import only the MP4.
-Reply with the final node id, the render path and duration.
+1. \`get_context\` with node chips for every asset you're given → local files. Copy them into the project's public/ (Remotion) or assets/ (HyperFrames) with short names (hero.png, still2.png, clip1.mp4, music.mp3 …). If there is music, run \`${qa} <music file> --out ${o.workDir}/qa/music\` once to get its BPM / beat grid and cut to it.
+2. Remotion: write ${o.workDir}/motion/props.json (AdProps: brand, product, tagline, features[{title, detail, image}], hero, stills, clips, music, cta, palette from the brief, durationInSeconds 15–30 to fit the clips and music) and adapt src/*.tsx to the brief. HyperFrames: edit index.html (copy, palette variables, BEATS, scenes, data-duration on the root).
+3. Write the code yourself${o.codex ? " (only if the director says the user asked for Codex: delegate composition code to swarm `codex` with precise instructions, then review)" : ""}. Keep it compiling (\`npx tsc --noEmit\` for Remotion; \`npx hyperframes lint\` for HyperFrames).
+4. Preview frames (a still / snapshot at the hook, a feature beat and the end card) and Read them. Fix obvious problems.
+5. Render 1920×1080 at 30 fps (commands above).
+6. QA before import — mandatory: \`${qa} <render.mp4> --master --fps 30 --duration <planned s>\`. It checks resolution/fps/codec/duration, masters the audio to -14 LUFS (writes <name>.master.mp4 — import that one), finds black/frozen stretches, scores cuts against the beat grid and writes a contact sheet. Read the contact sheet and check the typography checklist it prints. Fix every ✗ and every real ! (off-beat cuts, dead air, text too small / off the safe area / low contrast / overlapping), re-render and re-run QA. At most 3 render rounds.
+7. \`import_file\` the mastered MP4 into the Final frame (placement parent = Final frame id, x 40, y 120, w 1920) with name "<product> ad — v1" and lineage {model: "remotion" | "hyperframes", params: {props or composition summary, qa: {lufs, bpm, cuts_on_beat}}, parents: [asset node ids]}. Import only the final MP4.
+Reply with the final node id, the render path, duration, and the QA summary line (LUFS, BPM, cuts on beat).
 ${common}`,
       tools: [...chatTools,
         ...falos([...base, "import_file"]),
@@ -124,14 +169,15 @@ ${common}`,
         "Edit",
         "Bash",
         "Glob",
+        ...(o.remotionSkills || o.hyperframesSkills ? ["Skill"] : []),
         ...(o.codex ? ["mcp__swarm__codex"] : []),
       ],
     },
     qa: {
-      description: "Checks a rendered video against the brief (ffprobe, frames, audio) and reports concrete issues. Give it the render path / node id and the brief.",
+      description: "Independent check of a rendered video against the brief (motion-qa report, contact sheet, frames, audio) and reports concrete issues. Give it the render path / node id and the brief.",
       model: o.worker,
       prompt: `You are QA in a fal-os ad swarm. agentName "QA".
-Check the render: \`ffprobe\` (1920×1080, h264, has audio, duration as planned), extract 6 frames evenly with ffmpeg into ${o.workDir}/qa/ and Read them. Look for: black/empty frames, unreadable or overlapping text, wrong aspect/cropping, missing product, broken clips, audio missing or clipping, bad pacing. Pin an annotation on the final video node for each real issue (\`annotate\` with anchor \`frame(<seconds>) box(x,y,w,h)\` where x,y,w,h are fractions of the frame, 0..1, with x+w ≤ 1 and y+h ≤ 1 — e.g. \`frame(13.9) box(0.3,0.25,0.4,0.1)\`). Reply with PASS or a short numbered list of fixes for Motion.
+Check the render: run \`${qa} <render.mp4> --fps 30 --out ${o.workDir}/qa\` (resolution, fps, codec, duration, audio loudness ≈ -14 LUFS, black/frozen stretches, cuts vs. the beat grid, contact sheet). Read the contact sheet, and extract and Read 2–4 full-size frames at moments it flags. Look for: black/empty frames, unreadable, tiny, overlapping or off-safe-area text, low contrast, wrong aspect/cropping, missing product, broken clips, audio missing or clipping, off-beat cuts, dead air, bad pacing. Pin an annotation on the final video node for each real issue (\`annotate\` with anchor \`frame(<seconds>) box(x,y,w,h)\` where x,y,w,h are fractions of the frame, 0..1, with x+w ≤ 1 and y+h ≤ 1 — e.g. \`frame(13.9) box(0.3,0.25,0.4,0.1)\`). Reply with PASS or a short numbered list of fixes for Motion.
 ${common}`,
       tools: [...chatTools, ...falos(["session", "read", "set_status", "get_context", "annotate", "finish_working"]), "Read", "Bash", "Glob"],
     },
