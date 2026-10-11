@@ -33,7 +33,7 @@ export interface State {
   outlineOpen: boolean | null;
   /** Modal overlay: command palette, the shortcut list, "connect your agent" or the project
    *  picker (⌘O). */
-  overlay: 'palette' | 'help' | 'connect' | 'projects' | null;
+  overlay: 'palette' | 'help' | 'connect' | 'projects' | 'setup' | null;
   /** Projects from the host's `/workspace` socket (newest first). */
   projects: import('./projects').ProjectInfo[];
   /** The open project; null = a host without `/workspace` (single canvas `main`). */

@@ -14,6 +14,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 serde_json = "1"
+# The fal key lives in the macOS Keychain (fallback: $FALOS_HOME/fal.env, 0600).
+keyring = { version = "3", features = ["apple-native"] }
 
 [features]
 # `cargo build --features custom-protocol` (what `cargo tauri build` does) serves
