@@ -1239,13 +1239,13 @@ pub async fn steer(
         return Ok(());
     }
     if id.is_some() {
-        hub.append(host, chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "steered"}))?;
+        hub.append(host, chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "steer"}))?;
     }
     // `queued` keeps the turn's spend running (the message joins this turn).
     let mut ev = json!({"kind": "user", "text": q.text, "context": q.chips, "author": q.author,
                         "queued": q.id, "steer": true});
     if let Some(a) = &agent {
-        ev["to"] = Json::from(a.clone());
+        ev["agent"] = Json::from(a.clone());
     }
     hub.append(host, chat, None, ev)?;
     let mut resolved = Vec::new();

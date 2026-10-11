@@ -396,7 +396,7 @@ async fn steering_interrupts_with_queued_or_new_messages() {
     assert_eq!(next_of(&mut rt, "queue").await["id"], qid);
     send(&mut ui, json!({"type": "chat.steer", "chat": chat, "id": qid})).await;
     let d = next_event(&mut ui, &chat, "dequeued").await;
-    assert_eq!((d["id"].as_str(), d["reason"].as_str()), (Some(qid.as_str()), Some("steered")));
+    assert_eq!((d["id"].as_str(), d["reason"].as_str()), (Some(qid.as_str()), Some("steer")));
     let u = next_event(&mut ui, &chat, "user").await;
     assert_eq!((u["text"].as_str(), u["steer"].as_bool(), u["queued"].as_str()), (Some("make it darker"), Some(true), Some(qid.as_str())));
     let s = next_of(&mut rt, "steer").await;
@@ -408,7 +408,7 @@ async fn steering_interrupts_with_queued_or_new_messages() {
     // New text, for a subagent.
     send(&mut ui, json!({"type": "chat.steer", "chat": chat, "text": "use the red logo", "agent": "motion"})).await;
     let u = next_event(&mut ui, &chat, "user").await;
-    assert_eq!((u["to"].as_str(), u["steer"].as_bool()), (Some("motion"), Some(true)));
+    assert_eq!((u["agent"].as_str(), u["steer"].as_bool()), (Some("motion"), Some(true)));
     let s = next_of(&mut rt, "steer").await;
     assert_eq!((s["agent"].as_str(), s["text"].as_str()), (Some("motion"), Some("use the red logo")));
     let sid = s["id"].as_str().unwrap().to_string();
