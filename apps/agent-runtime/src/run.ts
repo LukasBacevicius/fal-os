@@ -8,7 +8,7 @@ import { query, type Query, type SDKMessage, type SDKUserMessage } from "@anthro
 import { type Capabilities, type CapName, capabilityEvent, capabilityPrompt, probeCapabilities } from "./capabilities.ts";
 import { config, remotionChrome } from "./config.ts";
 import { runCodexDriver, runFalDriver } from "./drivers.ts";
-import { Channel, doneSummary, friendlyError, ROLES, runningSummary, scrubError, stripAgent } from "./events.ts";
+import { Channel, doneSummary, filesEvent, filesOf, friendlyError, ROLES, runningSummary, scrubError, stripAgent } from "./events.ts";
 import { HostMcp } from "./hostMcp.ts";
 import { agents, directorPrompt } from "./prompts.ts";
 import { createSwarmTools } from "./swarmTools.ts";
@@ -164,7 +164,10 @@ export class ChatRun {
   private flushTimer: NodeJS.Timeout | null = null;
   private cost = 0;
   private finalNodes: string[] = [];
+  private markedFinal = false;
   private background = new Set<string>(); // Agent tool_use ids of background subagents
+  /** Non-ambient background task ids (SDK `background_tasks_changed`, replace semantics). */
+  private liveTasks = new Set<string>();
   /** Messages queued by the host, waiting for the next tool call. */
   private pending: Queued[] = [];
   private waiters: ((q: Queued | null) => void)[] = [];
@@ -467,6 +470,8 @@ export class ChatRun {
       request: this.request,
       reportSession: (sid, agent) => this.reportSession(sid, agent),
       mcpHeaders: { "X-Falos-Chat": f.chat, "X-Falos-Project": f.project },
+      projectDir: projectDir(f),
+      assets: caps.assets,
     });
 
     // Resume the SDK session for follow-ups on the same driver; start fresh after a switch.
@@ -476,7 +481,8 @@ export class ChatRun {
     const { blocks, notes } = await chipImages(f.context, this.workDir);
     const prompt = promptText(f, { resume: Boolean(resume), notes });
     const capText = capabilityPrompt(caps);
-    const sysPrompt = directorPrompt({ canvas: f.canvas, workDir: this.workDir, falAgent: fa, codex, caps: capText });
+    const assetCtx = { assets: caps.assets, projectDir: projectDir(f), projectName: f.project_name, qa: config.motionQa };
+    const sysPrompt = directorPrompt({ canvas: f.canvas, workDir: this.workDir, falAgent: fa, codex, caps: capText, ...assetCtx });
     const agentDefs = agents({
       canvas: f.canvas,
       workDir: this.workDir,
@@ -488,7 +494,9 @@ export class ChatRun {
       hyperframes: has("hyperframes"),
       remotionSkills: has("remotion-skills"),
       hyperframesSkills: has("hyperframes-skills"),
-      qa: config.motionQa,
+      ...assetCtx,
+      otio: config.otio,
+      hostTools: caps.hostTools,
     });
     const chrome = remotionChrome();
 
@@ -564,7 +572,7 @@ export class ChatRun {
           this.idle = true;
           // Background subagents still running: keep the session open; their completion
           // starts another Director turn (and another result).
-          if (this.background.size === 0) {
+          if (this.background.size === 0 && this.liveTasks.size === 0 && this.running.size === 0) {
             this.closeQueue();
             input.close();
           }
@@ -634,6 +642,23 @@ export class ChatRun {
       case "system": {
         const s: any = m;
         // A subagent task's id is its agent id in hook inputs (steers to that subagent).
+        // Live background work (subagents, also ones resumed by SendMessage, and shell tasks):
+        // while any runs, the input stays open — the in-process swarm MCP answers over it.
+        if (s.subtype === "background_tasks_changed" && Array.isArray(s.tasks)) {
+          // (No eager close here: a finished task still wakes the director for one more turn,
+          // whose `result` closes the input.)
+          this.liveTasks = new Set(s.tasks.filter((t: any) => !t.ambient).map((t: any) => t.task_id));
+        }
+        if (s.subtype === "task_started" && s.task_id && s.tool_use_id && !this.labels.has(s.tool_use_id) && s.subagent_type) {
+          // A subagent resumed by SendMessage: same label as before (else a new one).
+          const type = String(s.subagent_type);
+          const label = [...this.labels.values()].reverse().find((l) => l === type || l.startsWith(`${type}-`)) ?? this.label(type);
+          this.labels.set(s.tool_use_id, label);
+          this.running.add(label);
+          // A resumed subagent always runs in the background (older CLIs leave is_backgrounded unset).
+          this.background.add(s.tool_use_id);
+          this.emit({ kind: "agent", agent: label, state: "working", status: "resumed" });
+        }
         if (s.subtype === "task_started" && s.task_id && s.tool_use_id) {
           this.taskTool.set(s.task_id, s.tool_use_id);
           const label = this.labels.get(s.tool_use_id);
@@ -644,6 +669,7 @@ export class ChatRun {
           const agent = this.labels.get(s.tool_use_id);
           if (agent) this.emit({ kind: "agent", agent, state: "working", status: stripAgent(s.summary, agent, ROLES[agent.replace(/-\d+$/, "")]).slice(0, 140) });
         }
+        if (s.subtype === "task_notification" && s.task_id) this.liveTasks.delete(s.task_id);
         if (s.subtype === "task_notification" && s.tool_use_id) {
           this.background.delete(s.tool_use_id);
           const agent = this.labels.get(s.tool_use_id);
@@ -695,7 +721,7 @@ export class ChatRun {
     const label = this.labels.get(id);
     if (label) {
       // A background subagent: this is only the launch ack; it ends with a task_notification.
-      if (/^Async agent launched|running in the background/i.test(text.trim().slice(0, 300))) {
+      if (/^Async agent launched|running in the background|"resumedAgentId"|Resuming agent/i.test(text.trim().slice(0, 300))) {
         this.background.add(id);
         this.emit({ kind: "agent", agent: label, state: "working", status: "running in the background" });
         return;
@@ -716,7 +742,21 @@ export class ChatRun {
     }
     if (["fal_agent", "fal_model", "codex", "TodoWrite"].includes(caller.name)) return;
     const nodes = nodesOf(json);
-    if (caller.name === "import_file" && json?.type === "video" && json.node) this.finalNodes = [json.node];
+    if (caller.name === "import_file" && json?.type === "video" && json.node && !this.markedFinal) this.finalNodes = [json.node];
+    // Nodes an agent marked final (`<id> role(final)`) are the run's result.
+    if (caller.name === "edit" && !b.is_error) {
+      const finals = [...String(caller.input.text ?? "").matchAll(/^\s*([a-z0-9]{6,12})\b[^\n]*\brole\(final\)/gm)].map((m) => m[1]);
+      if (finals.length) {
+        if (!this.markedFinal) this.finalNodes = [];
+        this.markedFinal = true;
+        this.finalNodes = [...new Set([...this.finalNodes, ...finals])];
+      }
+    }
+    // File cards: the host posts them for `export` itself; `package` (a zip) gets one here.
+    if ((caller.name === "package" || (caller.name === "export" && json?.emitted === false)) && !b.is_error) {
+      const { files, dir } = filesOf(json);
+      if (files.length) this.emit(filesEvent(files, dir, caller.agent));
+    }
     this.emit({
       kind: "tool",
       agent: caller.agent,

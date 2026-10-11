@@ -308,7 +308,10 @@ never the label again (not `motion · motion · …`).
 Agents are labelled by subagent type (`storyboard`, `generator`, `generator-2`, `motion`, `qa`) and `codex`. `director` is the main agent. The runtime emits these event kinds:
 - `tool` events for canvas tools, with the touched `nodes`;
 - `tool` events for the swarm tools: `fal_agent`, `fal_model`, `codex`;
-- `cost` events from fal Agent `usage.cost`, or from list-price estimates for direct model calls.
+- `cost` events from fal Agent `usage.cost`, or from list-price estimates for direct model calls;
+- `files` events (file cards, Assets v1): `{"kind":"files","agent","files":[{path,name,node?,preset?,w?,h?,duration?,bytes,sha256}],"dir"}` : the host appends them for agent `export`s (including the one inside swarm `deliver`); the runtime posts them for swarm `share_files` and fal-os `package` zips (and for an `export` result with `"emitted": false`).
+
+Assets v1 adds the subagents `editor` (cuts & reframes) and `finisher` (export & delivery), and the capabilities `asset-ops`, `asset-export`, `asset-library`, `media-inputs`, `provenance`, probed from the host's MCP `tools/list` (missing ones carry the host-upgrade fix and the fallback the agents use meanwhile).
 
 ## Host ↔ runtime (`/runtime` WebSocket)
 The runtime connects to the host as a client with two credentials:

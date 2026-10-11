@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Motion QA for a rendered film (run by the motion / qa agents before import):
-//   node motion-qa.mjs <video.mp4> [--out <dir>] [--fps 30] [--duration <s>] [--master] [--lufs -14]
-// Checks: 1920×1080, fps, h264/yuv420p, duration, audio present, loudness (EBU R128 integrated
+//   node motion-qa.mjs <video.mp4> [--out <dir>] [--fps 30] [--duration <s>] [--master] [--lufs -14] [--size 1080x1920]
+// Checks: resolution (--size, default 1920×1080), fps, h264/yuv420p, duration, audio present, loudness (EBU R128 integrated
 // LUFS + true peak), black / frozen stretches, cut timing vs. the music's beat grid. Writes a
 // contact sheet (12 frames, 4×3) and qa.json to --out (default: <video dir>/qa), prints a
 // summary and exits 1 when a hard check fails. --master normalizes the audio to -14 LUFS /
@@ -16,7 +16,7 @@ const BIG = { maxBuffer: 512 * 1024 * 1024 };
 
 function args() {
   const a = process.argv.slice(2);
-  const o = { video: "", out: "", fps: 30, duration: undefined, master: false, lufs: -14 };
+  const o = { video: "", out: "", fps: 30, duration: undefined, master: false, lufs: -14, w: 1920, h: 1080 };
   for (let i = 0; i < a.length; i++) {
     const k = a[i];
     if (k === "--out") o.out = a[++i];
@@ -24,10 +24,11 @@ function args() {
     else if (k === "--duration") o.duration = Number(a[++i]);
     else if (k === "--lufs") o.lufs = Number(a[++i]);
     else if (k === "--master") o.master = true;
+    else if (k === "--size") [o.w, o.h] = a[++i].split(/[x×:]/).map(Number);
     else if (!o.video) o.video = k;
   }
   if (!o.video) {
-    console.error("usage: node motion-qa.mjs <video.mp4> [--out dir] [--fps 30] [--duration s] [--master] [--lufs -14]");
+    console.error("usage: node motion-qa.mjs <video.mp4> [--out dir] [--fps 30] [--duration s] [--master] [--lufs -14] [--size 1920x1080]");
     process.exit(2);
   }
   o.video = resolve(o.video);
@@ -190,7 +191,7 @@ async function main() {
     console.log(`  report ${join(o.out, "qa.json")}`);
     return;
   }
-  if (p.width !== 1920 || p.height !== 1080) fails.push(`resolution ${p.width}×${p.height}, expected 1920×1080`);
+  if (p.width !== o.w || p.height !== o.h) fails.push(`resolution ${p.width}×${p.height}, expected ${o.w}×${o.h}`);
   if (Math.abs(p.fps - o.fps) > 0.05) fails.push(`fps ${p.fps}, expected ${o.fps}`);
   if (p.codec !== "h264") warns.push(`video codec ${p.codec} (h264 plays everywhere)`);
   if (p.pix_fmt && p.pix_fmt !== "yuv420p") warns.push(`pixel format ${p.pix_fmt} (use yuv420p)`);

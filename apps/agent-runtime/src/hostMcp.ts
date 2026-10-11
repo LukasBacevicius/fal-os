@@ -5,6 +5,8 @@ import { config } from "./config.ts";
 /** The host dropped our MCP session (idle expiry, host restart): reconnect and retry. */
 const SESSION_GONE = /\b404\b|session not found|unknown session/i;
 
+export type HostTool = { name: string; inputSchema?: unknown };
+
 export class HostMcp {
   private session: string | null = null;
   private nextId = 1;
@@ -93,11 +95,24 @@ export class HostMcp {
 
   /** Call a tool; returns its text (throws on tool errors). */
   async callText(name: string, args: Record<string, unknown>): Promise<string> {
+    return (await this.callContent(name, args)).map((c: any) => c.text ?? "").join("\n");
+  }
+
+  /** Call a tool; all its content blocks (text and MCP image blocks). Throws on tool errors. */
+  async callContent(name: string, args: Record<string, unknown>): Promise<any[]> {
     const r = await this.request("tools/call", { name, arguments: args });
     if (r?.error) throw new Error(`${name}: ${r.error.message ?? JSON.stringify(r.error)}`);
-    const text = (r?.result?.content ?? []).map((c: any) => c.text ?? "").join("\n");
-    if (r?.result?.isError) throw new Error(`${name}: ${text.slice(0, 500)}`);
-    return text;
+    const content: any[] = r?.result?.content ?? [];
+    if (r?.result?.isError) throw new Error(`${name}: ${content.map((c: any) => c.text ?? "").join("\n").slice(0, 500)}`);
+    return content;
+  }
+
+  /** The host's MCP tools (name + input schema): what this host build can do. */
+  async listTools(): Promise<HostTool[]> {
+    const r = await this.request("tools/list", {});
+    const tools = r?.result?.tools;
+    if (!Array.isArray(tools)) throw new Error(`host MCP tools/list: ${JSON.stringify(r?.error ?? r).slice(0, 200)}`);
+    return tools.map((t: any) => ({ name: String(t.name), inputSchema: t.inputSchema }));
   }
 
   /** Call a tool whose result is JSON (notices after the JSON are dropped). */

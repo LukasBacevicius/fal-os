@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { capabilityEvent, capabilityPrompt } from "../src/capabilities.ts";
+import { assetCapsFrom, capabilityEvent, capabilityPrompt } from "../src/capabilities.ts";
 import { actionPhrase, doneSummary, runningSummary, stripAgent } from "../src/events.ts";
 import { HostMcp } from "../src/hostMcp.ts";
 import { agents, directorPrompt } from "../src/prompts.ts";
@@ -72,7 +72,7 @@ test("steer text: interrupt for the director, relay for a subagent", () => {
 });
 
 test("capabilities: prompt block and event", () => {
-  const caps = { available: ["claude", "fal-models", "remotion", "ffmpeg"] as any, missing: [{ name: "codex" as const, fix: "run `npx codex login`" }], plugins: [] };
+  const caps = { available: ["claude", "fal-models", "remotion", "ffmpeg"] as any, missing: [{ name: "codex" as const, fix: "run `npx codex login`" }], plugins: [], hostTools: [], assets: assetCapsFrom([]) };
   const p = capabilityPrompt(caps);
   assert.match(p, /Remotion/);
   assert.match(p, /NOT available[\s\S]*codex \(fix: run `npx codex login`\)/);
