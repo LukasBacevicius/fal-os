@@ -214,12 +214,12 @@ function Capabilities({ caps }: { caps: Transcript['caps'] }) {
     void navigator.clipboard?.writeText(fix).then(() => toast('copied'), () => toast(fix));
   };
   const line = (m: { name: string; fix: string }) => (
-    <div key={m.name} className="caps-line" title={m.fix ? `${m.name} unavailable — ${m.fix} (click to copy)` : `${m.name} unavailable`}>
+    <div key={m.name} className="caps-line" onClick={() => m.fix && copy(m.fix)} title={m.fix ? `${m.name} unavailable — ${m.fix} (click to copy)` : `${m.name} unavailable`}>
       · {m.name} unavailable
       {m.fix && (
         <>
           {' — '}
-          <button className="link md-code caps-fix" onClick={() => copy(m.fix)}>
+          <button className="link md-code caps-fix">
             {/^(run|install|set|sign|log)\b/i.test(m.fix) ? m.fix : `run ${m.fix}`}
           </button>
         </>
@@ -353,7 +353,7 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
             )}
             {!subView && <Capabilities caps={main.caps} />}
             {subView
-              ? <div className="sub-log">{t.items.map((it) => <Row key={it.key} item={it} ids={ids} chat={chat.active!} kindOf={kindOf} />)}</div>
+              ? <div className="sub-log">{t.items.map((it) => <Row key={it.key} item={it.type === 'user' ? { ...it, to: undefined } : it} ids={ids} chat={chat.active!} kindOf={kindOf} />)}</div>
               : turns.map((tn, i) => (
                   <TurnView key={tn.key} turn={tn} live={t.running && i === turns.length - 1} ids={ids} chat={chat.active!} kindOf={kindOf} />
                 ))}

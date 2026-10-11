@@ -499,9 +499,10 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .queued-line:focus { outline: none; background: var(--panel); }
 .queued-line:focus .queued-text { color: var(--text); }
 .caps { margin-bottom: 4px; }
-.caps-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.caps-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.caps-line:hover { color: var(--dim); }
 .caps-fix { color: var(--dim); }
-.act-line { display: flex; gap: 0; white-space: nowrap; min-width: 0; }
+.act-line { display: flex; column-gap: 1ch; white-space: nowrap; min-width: 0; }
 .act-line > * { flex: none; }
 .act-line > .act-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .act-line.open { flex-wrap: wrap; white-space: normal; }
