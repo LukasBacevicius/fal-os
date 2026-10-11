@@ -10,6 +10,7 @@ import { ProjectPicker } from './components/Projects';
 import { VideoFocus } from './components/VideoLayer';
 import { ContextMenu } from './components/ContextMenu';
 import { ExportPanel } from './components/ExportPanel';
+import { Setup, maybeOpenSetup } from './components/Setup';
 
 function stored(key: string, fallback: number) {
   try {
@@ -29,6 +30,11 @@ export function App() {
   const overlay = useStore((s) => s.overlay);
   const layers = useStore((s) => s.outlineOpen ?? s.nodes.length > 0);
   const [chatWidth, setChatWidth] = useState(() => stored('falos.chatWidth', 360));
+
+  // Packaged desktop app: first-run setup (fal key, Claude Code) until it's done.
+  useEffect(() => {
+    void maybeOpenSetup();
+  }, []);
 
   useEffect(() => {
     try {
@@ -52,6 +58,7 @@ export function App() {
       {overlay === 'projects' && <ProjectPicker />}
       {overlay === 'export' && <ExportPanel />}
       {menu && <ContextMenu />}
+      {overlay === 'setup' && <Setup />}
       <VideoFocus />
       <ActivitySync />
       {toast && (

@@ -39,6 +39,9 @@ function actions(): Entry[] {
     { label: 'switch project…', hint: '⌘O', run: () => setState({ overlay: 'projects' }) },
     { label: 'new project…', hint: 'project', run: () => setState({ overlay: 'projects' }) },
     { label: 'connect agent (Claude Code, Codex, Cursor, …)', hint: 'mcp', run: () => setState({ overlay: 'connect' }) },
+    ...((window as any).__TAURI_INTERNALS__
+      ? [{ label: 'setup (fal key, Claude Code, motion tools)…', hint: 'app', run: () => setState({ overlay: 'setup' as const }) }]
+      : []),
     { label: 'ask about the selection', hint: '/', run: openPrompt },
     { label: 'all chats (history)', hint: '⌘Y', run: toggleHistory },
     { label: `agent for next message: next (now ${getState().driver})`, hint: '⌘.', run: () => setDriver() },

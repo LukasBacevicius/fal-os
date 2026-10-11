@@ -56,6 +56,22 @@ enum Cmd {
     },
 }
 
+/// With `FALOS_EXIT_WITH_PARENT=1` (the desktop app sets it for its sidecar host): resolves when the
+/// process that started us is gone (we got reparented), so a crashed or force-quit app never leaves
+/// a host (and its agent runtime) running. Pending forever otherwise.
+async fn parent_gone() {
+    if std::env::var_os("FALOS_EXIT_WITH_PARENT").is_none() {
+        return std::future::pending().await;
+    }
+    let parent = std::os::unix::process::parent_id();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if std::os::unix::process::parent_id() != parent {
+            return;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -114,6 +130,7 @@ async fn main() -> Result<()> {
             tokio::select! {
                 r = tokio::signal::ctrl_c() => r?,
                 _ = term.recv() => {}
+                _ = parent_gone() => tracing::info!("parent process gone; shutting down"),
             }
             running.cancel.cancel();
             running.task.await?;

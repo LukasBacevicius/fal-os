@@ -33,7 +33,7 @@ export interface State {
   outlineOpen: boolean | null;
   /** Modal overlay: command palette, the shortcut list, "connect your agent" or the project
    *  picker (⌘O). */
-  overlay: 'palette' | 'help' | 'connect' | 'projects' | 'export' | null;
+  overlay: 'palette' | 'help' | 'connect' | 'projects' | 'export' | 'setup' | null;
   /** Node context menu (right-click) at a screen point. */
   menu: { x: number; y: number; ids: string[] } | null;
   /** Nodes the export panel works on (empty = every node with saved export settings). */
