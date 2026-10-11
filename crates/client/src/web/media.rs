@@ -56,24 +56,135 @@ async function imageSource(blob) {
   return { bitmap: small || full, width, height, duration: 0 };
 }
 
-export async function probe_video(url) {
-  const v = document.createElement('video');
-  v.muted = true; v.playsInline = true; v.preload = 'auto'; v.crossOrigin = 'anonymous';
-  v.src = url;
-  await new Promise((res, rej) => {
-    v.addEventListener('loadeddata', res, { once: true });
-    v.addEventListener('error', () => rej(new Error('video failed to load')), { once: true });
-  });
-  const duration = isFinite(v.duration) ? v.duration : 0;
-  const t = Math.min(0.5, duration * 0.1);
-  if (t > 0) {
-    await new Promise((res) => { v.addEventListener('seeked', res, { once: true }); v.currentTime = t; });
+// ---- video posters ----------------------------------------------------------------------
+// A poster is the most representative of a few sampled frames (15/35/55/75 % of the clip):
+// generated clips often open on black or a title card, so the first frame is a poor still.
+// Each sample is scored on a 64 px thumbnail: brightness × (contrast + edges); near-black and
+// flat frames are penalized. Probing stays cheap: at most two probes at once, each on a pooled
+// `<video>` with `preload=metadata` (seeks fetch only the byte ranges they need), and the
+// chosen time is cached per asset so re-probing (after LRU eviction) is a single seek.
+const POSTER_FRACTIONS = [0.15, 0.35, 0.55, 0.75];
+const POSTER_TIMES_KEY = 'falos.posterTimes';
+const posterTimes = (() => {
+  try { return new Map(Object.entries(JSON.parse(localStorage.getItem(POSTER_TIMES_KEY) || '{}'))); } catch (e) { return new Map(); }
+})();
+// Asset URLs carry a session token (`/assets/<sha>?token=`): key by the path.
+function assetKey(url) { try { const u = new URL(url, location.href); return u.protocol === 'blob:' ? url : u.pathname; } catch (e) { return url; } }
+function rememberPosterTime(url, t) {
+  posterTimes.set(assetKey(url), t);
+  try {
+    const entries = [...posterTimes.entries()].slice(-500);
+    localStorage.setItem(POSTER_TIMES_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch (e) { /* private mode / quota */ }
+}
+
+const PROBE_SLOTS = 2;
+const probePool = [];
+let probeBusy = 0;
+const probeWaiters = [];
+async function withProbeVideo(fn) {
+  if (probeBusy >= PROBE_SLOTS) await new Promise((r) => probeWaiters.push(r));
+  probeBusy++;
+  const v = probePool.pop() || document.createElement('video');
+  try {
+    return await fn(v);
+  } finally {
+    v.removeAttribute('src'); v.load();
+    probePool.push(v);
+    probeBusy--;
+    const next = probeWaiters.shift();
+    if (next) next();
   }
+}
+
+function waitFor(v, ok, ms = 15000) {
+  return new Promise((res, rej) => {
+    const done = (f) => (e) => { clearTimeout(timer); v.removeEventListener(ok, onOk); v.removeEventListener('error', onErr); f(e); };
+    const onOk = done(res), onErr = done(() => rej(new Error('video failed to load')));
+    const timer = setTimeout(done(() => rej(new Error('video probe timed out'))), ms);
+    v.addEventListener(ok, onOk, { once: true });
+    v.addEventListener('error', onErr, { once: true });
+  });
+}
+
+async function openProbe(v, url, ready) {
+  v.muted = true; v.playsInline = true; v.crossOrigin = 'anonymous';
+  v.preload = ready === 'loadeddata' ? 'auto' : 'metadata';
+  const p = waitFor(v, ready);
+  v.src = url;
+  await p;
+}
+
+async function seekTo(v, t) {
+  if (Math.abs(v.currentTime - t) < 1e-3 && v.readyState >= 2) return;
+  const p = waitFor(v, 'seeked');
+  v.currentTime = t;
+  await p;
+}
+
+let scoreCtx = null;
+// Representativeness of the current frame: mean luma (gamma-ish, saturating) × (contrast +
+// edge energy). Black, washed-out and flat frames score near zero.
+function frameScore(v) {
+  const W = 64, H = Math.max(1, Math.round(64 * v.videoHeight / Math.max(1, v.videoWidth)));
+  scoreCtx ??= canvas(64, 64).getContext('2d', { willReadFrequently: true });
+  const c = scoreCtx.canvas;
+  if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+  scoreCtx.drawImage(v, 0, 0, W, H);
+  const d = scoreCtx.getImageData(0, 0, W, H).data;
+  const n = W * H, luma = new Float32Array(n);
+  let sum = 0;
+  for (let i = 0; i < n; i++) { const l = (0.2126 * d[i * 4] + 0.7152 * d[i * 4 + 1] + 0.0722 * d[i * 4 + 2]) / 255; luma[i] = l; sum += l; }
+  const mean = sum / n;
+  let varSum = 0, edge = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, l = luma[i];
+    varSum += (l - mean) * (l - mean);
+    if (x + 1 < W) edge += Math.abs(l - luma[i + 1]);
+    if (y + 1 < H) edge += Math.abs(l - luma[i + W]);
+  }
+  const std = Math.sqrt(varSum / n), edges = edge / n;
+  const bright = Math.min(1, mean / 0.35) * (mean > 0.92 ? 0.3 : 1);
+  const dead = mean < 0.06 || std < 0.025 ? 0.05 : 1;
+  return bright * (std + 2 * edges) * dead;
+}
+
+async function grab(v) {
   const width = v.videoWidth, height = v.videoHeight;
-  const m = Math.max(width, height), s = Math.min(1, 1024 / m);
-  const bitmap = await resize(v, width * s, height * s);
-  v.removeAttribute('src'); v.load();
-  return { bitmap, width, height, duration };
+  const s = Math.min(1, 1024 / Math.max(width, height, 1));
+  return await resize(v, width * s, height * s);
+}
+
+/** Natural size + duration only (imports). */
+export async function probe_video(url) {
+  return await withProbeVideo(async (v) => {
+    await openProbe(v, url, 'loadedmetadata');
+    return { width: v.videoWidth, height: v.videoHeight, duration: isFinite(v.duration) ? v.duration : 0 };
+  });
+}
+
+/** Poster source: the best of a few sampled frames, at most 1024 px. */
+async function videoPoster(url) {
+  return await withProbeVideo(async (v) => {
+    await openProbe(v, url, 'loadeddata');
+    const duration = isFinite(v.duration) ? v.duration : 0;
+    const width = v.videoWidth, height = v.videoHeight;
+    const cached = posterTimes.get(assetKey(url));
+    let best = null, bestScore = -1, bestTime = 0;
+    const times = cached != null && cached <= duration ? [cached] : duration > 0 ? POSTER_FRACTIONS.map((f) => f * duration) : [0];
+    for (const t of times) {
+      try { await seekTo(v, t); } catch (e) { continue; }
+      const score = times.length > 1 ? frameScore(v) : 1;
+      if (score > bestScore) {
+        const bitmap = await grab(v);
+        best?.close();
+        best = bitmap; bestScore = score; bestTime = t;
+      }
+    }
+    if (!best) best = await grab(v);
+    if (times.length > 1) rememberPosterTime(url, bestTime);
+    return { bitmap: best, width, height, duration, posterTime: bestTime };
+  });
 }
 
 // Cards follow UI-SPEC.md: monospace, grays only, no ornament. Sizes are in canvas px; `k`
@@ -254,7 +365,7 @@ function makeSource(spec) {
   if (spec.type === 'blob') return imageSource(spec.blob);
   if (spec.type === 'url') return urlSource(spec.url);
   if (spec.kind === 'generation') return generationSource(spec);
-  if (spec.type === 'video') return probe_video(spec.url);
+  if (spec.type === 'video') return videoPoster(spec.url);
   return cardSource(spec);
 }
 

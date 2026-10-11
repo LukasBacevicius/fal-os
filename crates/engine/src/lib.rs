@@ -380,6 +380,8 @@ pub struct FrameStats {
     pub detail_resident: usize,
     pub detail_uploads: u32,
     pub active_videos: usize,
+    /// Playing videos sampled into a 1024 px hires slot this frame.
+    pub hires_videos: usize,
     /// Real decoded video frames blitted into the detail tier this frame (VideoSource path).
     pub video_frames: u32,
     /// CPU time spent on video this frame (synth+upload, or source calls + blit encoding).
@@ -499,7 +501,15 @@ pub struct Renderer {
     blit_sampler: wgpu::Sampler,
     /// Render-target views of the detail tier, indexed `layer * DETAIL_MIPS + mip`.
     detail_targets: Vec<wgpu::TextureView>,
-    blits: Vec<(u32, wgpu::BindGroup)>,
+    /// Copy-mode video frames to blit this frame: (tier, slot, frame bind group).
+    blits: Vec<(Tier, u32, wgpu::BindGroup)>,
+    /// Video nodes playing into a freshly assigned hires slot that has no frame yet.
+    hires_pending: HashSet<Handle>,
+    /// Tier each playing video was last written into (a change forces a fresh frame).
+    video_tier: HashMap<Handle, Tier>,
+    /// Videos that get a hires (1024 px) slot as soon as they outgrow the detail tile
+    /// (selected / focused), not only past `hires_min_px`.
+    video_boost: HashSet<Handle>,
 
     mip_pipeline: wgpu::RenderPipeline,
     mip_layout: wgpu::BindGroupLayout,
@@ -527,6 +537,25 @@ pub struct Renderer {
     /// Only these videos play (`None` = every visible video, up to the cap); the others show
     /// their poster or last frame.
     video_focus: Option<HashSet<Handle>>,
+}
+
+/// A load/store render pass into one tier subresource (video blits).
+macro_rules! blit_pass {
+    ($view:expr) => {
+        wgpu::RenderPassDescriptor {
+            label: Some("video blit"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: $view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        }
+    };
 }
 
 const TIER_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING
@@ -712,6 +741,9 @@ impl Renderer {
             blit_sampler,
             detail_targets,
             blits: Vec::new(),
+            hires_pending: HashSet::new(),
+            video_tier: HashMap::new(),
+            video_boost: HashSet::new(),
             mip_pipeline,
             mip_layout,
             mip_views: HashMap::new(),
@@ -860,6 +892,9 @@ impl Renderer {
             v.set_active(h, false);
         }
         self.video_pending.remove(&h);
+        self.hires_pending.remove(&h);
+        self.video_tier.remove(&h);
+        self.video_boost.remove(&h);
         self.requests.retain(|r| r.0 != h);
         self.low_queue.retain(|&r| r != h);
         self.free.push(h);
@@ -920,6 +955,8 @@ impl Renderer {
         self.detail.release(h);
         self.hires.release(h);
         self.video_pending.remove(&h);
+        self.hires_pending.remove(&h);
+        self.video_tier.remove(&h);
         let Some(s) = self.state_mut(h) else { return };
         s.low_ready = false;
         s.requested = [false; 2];
@@ -953,6 +990,11 @@ impl Renderer {
             return false;
         }
         self.cancel_request(h, tier);
+        if tier != Tier::Low && self.video.is_some() && self.playing.contains(&h) {
+            // A still arriving for a video that is playing (or held on a frame) would cover
+            // its live frame: the decoder owns that slot now.
+            return true;
+        }
         let frame = self.frame;
         let (layer, origin) = match tier {
             Tier::Low => {
@@ -1108,6 +1150,16 @@ impl Renderer {
         if next != self.video_focus {
             self.video_focus = next;
             self.overlay_dirty = true; // forces a frame so playback state updates
+        }
+    }
+
+    /// Videos that should sample at high resolution (1024 px slot) as soon as they are larger
+    /// on screen than the 256 px detail tile, e.g. the selected or focused video.
+    pub fn set_video_boost(&mut self, boost: &[Handle]) {
+        let next: HashSet<Handle> = boost.iter().copied().collect();
+        if next != self.video_boost {
+            self.video_boost = next;
+            self.overlay_dirty = true;
         }
     }
 
@@ -1370,23 +1422,66 @@ impl Renderer {
         }
         self.playing = now;
 
-        for &(h, _) in videos {
-            let (slot, fresh) = match self.detail.node_slot.get(&h) {
-                Some(&s) => (s, false),
-                None => match self.alloc_slot(h) {
-                    Some(s) => (s, true),
-                    None => continue,
-                },
-            };
-            let force = fresh || self.video_pending.contains(&h);
+        // The biggest playing videos sample into a 1024 px hires slot (at most half the hires
+        // tier, so images keep theirs); the rest into a 256 px detail slot.
+        let hires_cap = (self.hires.slot_node.len() / 2).max(1);
+        let mut hires_used = 0;
+        let frame = self.frame;
+        for &(h, px) in videos {
+            let boosted = self.video_boost.contains(&h) && px > DETAIL_TILE as f32 * 1.1;
+            let mut target_slot: Option<(Tier, u32, bool)> = None;
+            if hires_used < hires_cap && (px >= self.budgets.hires_min_px || boosted) {
+                target_slot = match self.hires.node_slot.get(&h) {
+                    Some(&s) => {
+                        self.hires.last_used[s as usize] = frame;
+                        Some((Tier::Hires, s, false))
+                    }
+                    None => match self.hires.alloc(h, frame) {
+                        Some((s, evicted)) => {
+                            if let Some(e) = evicted {
+                                self.hires_pending.remove(&e);
+                                self.refresh_instance(e);
+                            }
+                            // Stale pixels until the first frame lands: keep it hidden.
+                            self.hires_pending.insert(h);
+                            Some((Tier::Hires, s, true))
+                        }
+                        None => None,
+                    },
+                };
+                if target_slot.is_some() {
+                    hires_used += 1;
+                    stats.hires_videos += 1;
+                }
+            }
+            if target_slot.is_none() {
+                if self.hires.node_slot.contains_key(&h) {
+                    // Playing small: an old hires still would cover the live detail frames.
+                    self.hires.release(h);
+                    self.hires_pending.remove(&h);
+                    self.refresh_instance(h);
+                }
+                target_slot = match self.detail.node_slot.get(&h) {
+                    Some(&s) => Some((Tier::Detail, s, false)),
+                    None => self.alloc_slot(h).map(|s| (Tier::Detail, s, true)),
+                };
+            }
+            let Some((tier, slot, fresh)) = target_slot else { continue };
+            let switched = self.video_tier.insert(h, tier) != Some(tier);
+            let force = fresh || switched || self.video_pending.contains(&h) || self.hires_pending.contains(&h);
             let Some(src) = self.video.as_mut() else { return };
-            let idx = slot % DETAIL_PER_LAYER;
-            let target = SlotTarget {
-                texture: &self.detail_tex,
-                layer: slot / DETAIL_PER_LAYER,
-                origin: [(idx % DETAIL_PER_ROW) * DETAIL_TILE, (idx / DETAIL_PER_ROW) * DETAIL_TILE],
-                size: DETAIL_TILE,
-                mips: DETAIL_MIPS,
+            let target = match tier {
+                Tier::Hires => SlotTarget { texture: &self.hires_tex, layer: slot, origin: [0, 0], size: HIRES_TILE, mips: HIRES_MIPS },
+                _ => {
+                    let idx = slot % DETAIL_PER_LAYER;
+                    SlotTarget {
+                        texture: &self.detail_tex,
+                        layer: slot / DETAIL_PER_LAYER,
+                        origin: [(idx % DETAIL_PER_ROW) * DETAIL_TILE, (idx / DETAIL_PER_ROW) * DETAIL_TILE],
+                        size: DETAIL_TILE,
+                        mips: DETAIL_MIPS,
+                    }
+                }
             };
             let written = match src.update(h, force, &target, &self.device, &self.queue) {
                 FrameUpdate::Texture(view) => {
@@ -1398,19 +1493,23 @@ impl Renderer {
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.blit_sampler) },
                         ],
                     });
-                    self.blits.push((slot, bind_group));
+                    self.blits.push((tier, slot, bind_group));
                     true
                 }
                 FrameUpdate::Written => true,
                 FrameUpdate::None => false,
             };
             if written {
-                if self.video_pending.remove(&h) || fresh {
+                if tier == Tier::Hires {
+                    if self.hires_pending.remove(&h) {
+                        self.refresh_instance(h);
+                    }
+                } else if self.video_pending.remove(&h) || fresh {
                     self.set_detail_slot(h, slot as i32);
                 }
                 stats.video_frames += 1;
                 stats.detail_uploads += 1;
-            } else if force {
+            } else if force && tier == Tier::Detail {
                 // No frame yet: keep the slot but show the low tier (poster) until one arrives.
                 self.video_pending.insert(h);
                 self.set_detail_slot(h, -1);
@@ -1470,32 +1569,37 @@ impl Renderer {
         self.mip_views.insert((tier, layer, mip), (view, bind_group));
     }
 
-    /// One render pass per (layer, mip) touched; each blit draws into its slot's viewport.
+    /// One render pass per (tier, layer, mip) touched; each blit draws into its slot's viewport.
     fn encode_video_blits(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if self.blits.is_empty() {
             return;
         }
         let mut blits = std::mem::take(&mut self.blits);
-        blits.sort_by_key(|b| b.0);
-        for layer_blits in blits.chunk_by(|a, b| a.0 / DETAIL_PER_LAYER == b.0 / DETAIL_PER_LAYER) {
-            let layer = layer_blits[0].0 / DETAIL_PER_LAYER;
+        blits.sort_by_key(|b| (b.0 as u8, b.1));
+        for layer_blits in blits.chunk_by(|a, b| a.0 == b.0 && (a.0 == Tier::Hires || a.1 / DETAIL_PER_LAYER == b.1 / DETAIL_PER_LAYER)) {
+            let tier = layer_blits[0].0;
+            if tier == Tier::Hires {
+                // One slot per array layer, every mip blitted straight from the frame.
+                for (_, layer, bind_group) in layer_blits {
+                    for mip in 0..HIRES_MIPS {
+                        self.ensure_mip_view(Tier::Hires, *layer, mip);
+                        let (view, _) = &self.mip_views[&(Tier::Hires, *layer, mip)];
+                        let size = (HIRES_TILE >> mip) as f32;
+                        let mut pass = encoder.begin_render_pass(&blit_pass!(view));
+                        pass.set_pipeline(&self.blit_pipeline);
+                        pass.set_viewport(0.0, 0.0, size, size, 0.0, 1.0);
+                        pass.set_bind_group(0, bind_group, &[]);
+                        pass.draw(0..4, 0..1);
+                    }
+                }
+                continue;
+            }
+            let layer = layer_blits[0].1 / DETAIL_PER_LAYER;
             for mip in 0..DETAIL_MIPS {
                 let size = (DETAIL_TILE >> mip) as f32;
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("video blit"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.detail_targets[(layer * DETAIL_MIPS + mip) as usize],
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+                let mut pass = encoder.begin_render_pass(&blit_pass!(&self.detail_targets[(layer * DETAIL_MIPS + mip) as usize]));
                 pass.set_pipeline(&self.blit_pipeline);
-                for (slot, bind_group) in layer_blits {
+                for (_, slot, bind_group) in layer_blits {
                     let idx = slot % DETAIL_PER_LAYER;
                     let (cx, cy) = ((idx % DETAIL_PER_ROW) as f32, (idx / DETAIL_PER_ROW) as f32);
                     pass.set_viewport(cx * size, cy * size, size, size, 0.0, 1.0);
@@ -1532,7 +1636,7 @@ impl Renderer {
     fn refresh_instance(&mut self, h: Handle) {
         let Some(s) = self.state(h) else { return };
         let slot = self.detail.node_slot.get(&h).filter(|_| !self.video_pending.contains(&h)).map_or(-1, |&s| s as i32);
-        let hires = self.hires.node_slot.get(&h).map_or(-1, |&s| s as i32);
+        let hires = self.hires.node_slot.get(&h).filter(|_| !self.hires_pending.contains(&h)).map_or(-1, |&s| s as i32);
         let mut inst = instance_for(h, &s.desc, s.low_ready, slot);
         inst.hires_layer = hires;
         inst.tile[3] = s.fade_start;

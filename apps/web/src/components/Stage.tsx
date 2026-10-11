@@ -14,6 +14,8 @@ import { TextLayer, createNote, editNode } from './TextLayer';
 import { installKeys, pointer } from '../keys';
 import { theme } from '../theme';
 import { ProjectHeader } from './Projects';
+import { VideoLayer } from './VideoLayer';
+import { openFocus, pointerPressed } from '../video';
 
 /** The local user. The host suffixes the actor id if several browsers connect. */
 const ME = { id: 'you', name: 'you' };
@@ -134,6 +136,7 @@ export function Stage() {
       const active = document.activeElement as HTMLElement | null;
       if (active && active !== document.body) active.blur();
       el.setPointerCapture(e.pointerId);
+      pointerPressed(); // a space press with a drag pans instead of toggling the video
       const [x, y] = pos(e);
       app.pointerDown(x, y, e.button, e.shiftKey, e.altKey, meta(e));
       const sel = getState().selection;
@@ -194,6 +197,7 @@ export function Stage() {
       if (r.entered) return;
       const n = r.node ? getState().nodes.find((m) => m.id === r.node) : null;
       if (n && (n.kind === 'note' || n.kind === 'text')) editNode(n.id);
+      else if (n && n.kind === 'video' && n.props.asset) openFocus(n.id);
       else if (!n || n.kind === 'frame') createNote([x, y]);
     };
     el.addEventListener('dblclick', dbl);
@@ -251,6 +255,7 @@ export function Stage() {
       <canvas ref={canvas} className="stage-canvas" />
       <Guard name="text"><TextLayer /></Guard>
       <Guard name="overlays"><NodeOverlays /></Guard>
+      <Guard name="video"><VideoLayer /></Guard>
       <Guard name="presence"><PresenceLayer /></Guard>
       <Guard name="selection-prompt"><SelectionPrompt /></Guard>
       {!loading && !error && empty && (

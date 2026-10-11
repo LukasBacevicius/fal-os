@@ -7,6 +7,7 @@ import { Layers } from './components/Layers';
 import { ConnectModal } from './components/ConnectModal';
 import { ActivitySync } from './components/ActivityBars';
 import { ProjectPicker } from './components/Projects';
+import { VideoFocus } from './components/VideoLayer';
 
 function stored(key: string, fallback: number) {
   try {
@@ -45,6 +46,7 @@ export function App() {
       {overlay === 'help' && <Help />}
       {overlay === 'connect' && <ConnectModal />}
       {overlay === 'projects' && <ProjectPicker />}
+      <VideoFocus />
       <ActivitySync />
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>

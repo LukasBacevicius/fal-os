@@ -52,7 +52,7 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | V | Select tool |
 | H, or hold Space | Pan |
 | N, or double-click empty canvas | New note at the cursor, in edit mode |
-| ⏎ or double-click | Edit the selected note or text. On media, zoom to it |
+| ⏎ or double-click | Edit the selected note or text. On a video, open the focus view; on other media, zoom to it |
 | Tab / ⇧Tab | Select the next or previous node in reading order (rows top to bottom, left to right) |
 | ⌘A | Select all |
 | Esc | Deselect |
@@ -69,6 +69,17 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | ⇧1 / ⇧2 | Fit all / zoom to the selection |
 | ⌘0 / ⌘+ / ⌘− | Zoom to 100% / zoom in / zoom out |
 | Drop files | Import |
+
+## Video
+Videos play muted while hovered or selected (tiles big enough on screen show `▶ 0:30`). The selected video gets a transport under it: `[▶] 0:07 / 0:30 ───── [mute] [⤢]` (click or drag the line to scrub; hover shows the time). Arrows keep nudging, so seeking uses J / L and , / .
+
+| Keys | Action |
+|---|---|
+| Space (tap) or K | Play / pause the selected video. Holding Space still pans |
+| J / L | Back / forward 5 s |
+| , / . | One frame back / forward (pauses) |
+| M | Sound on / off (back to muted when you deselect) |
+| ⏎ or double-click | Focus view: the video near-fullscreen with sound. ← / → previous / next video on the canvas, Space / K, J / L, , / ., M work there too; Esc or a click on the backdrop closes |
 
 Agents never move your camera; only your own clicks (a node id, a chip, a batch line) pan.
 

@@ -54,5 +54,9 @@ A `generation` node renders as a dark tile (`#1a1a1c`) with **sparse square pixe
 - **frame:** a 1px `--line` outline with the title in dim mono above its top-left corner. No fill.
 - **note / text:** a plain mono text block on `--panel`, with a 1px border and no sticky colors (ignore `color` props for now).
 - **image / video:** the media, edge to edge. Videos play muted on hover, or while selected.
+  - **Poster:** the most representative of a few sampled frames (15/35/55/75 %), never a black or flat opening frame.
+  - **Affordances:** a tiny `▶ 0:30` badge bottom-left (only when the tile is big enough on screen); while hovered it shows `0:07 / 0:30`.
+  - **Selected:** a one-line mono transport under the tile, `[▶] 0:07 / 0:30 ───── [mute] [⤢]`. Space tap / K, J / L, , / . and M drive it (see SHORTCUTS.md).
+  - **Focus view** (⏎ or double-click): a near-fullscreen real `<video>` with sound on a near-black backdrop, the same transport, ← / → for other videos, Esc closes.
 - **audio:** a waveform in `--dim` on `--panel`, with the name.
 - **other types:** a bordered box with `[3d] name`, `[pdf] name` and so on.

@@ -12,6 +12,7 @@ import { setDriver, toggleHistory } from './chatActions';
 import { openPrompt } from './components/SelectionPrompt';
 import { createNote, editNode } from './components/TextLayer';
 import { openPicker } from './components/Projects';
+import { canvasVideoKey, focusKey, openFocus, spacePressed, spaceReleased } from './video';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 export const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -45,7 +46,12 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: 'V', desc: 'select tool' },
   { group: 'canvas', keys: 'H  or  hold space', desc: 'pan' },
   { group: 'canvas', keys: 'N  or  double-click', desc: 'new note at the cursor (editing)' },
-  { group: 'canvas', keys: '⏎', desc: 'edit the selected note / zoom to selected media' },
+  { group: 'canvas', keys: '⏎', desc: 'edit the selected note / focus view of a video / zoom to selected media' },
+  { group: 'canvas', keys: 'space (tap)  K', desc: 'selected video: play / pause (hold space to pan)' },
+  { group: 'canvas', keys: 'J  L', desc: 'selected video: back / forward 5 s (arrows still nudge)' },
+  { group: 'canvas', keys: ',  .', desc: 'selected video: one frame back / forward' },
+  { group: 'canvas', keys: 'M', desc: 'selected video: sound on / off' },
+  { group: 'canvas', keys: 'double-click a video', desc: 'focus view: ← → other videos, esc closes' },
   { group: 'canvas', keys: 'tab  ⇧tab', desc: 'select next / previous node (reading order)' },
   { group: 'canvas', keys: '⌘A', desc: 'select all' },
   { group: 'canvas', keys: 'esc', desc: 'deselect' },
@@ -117,6 +123,7 @@ function enter(): boolean {
   const n = nodes.find((x) => x.id === selection[0]);
   if (!n) return false;
   if (n.kind === 'note' || n.kind === 'text') editNode(n.id);
+  else if (n.kind === 'video' && n.props.asset) openFocus(n.id);
   else app.zoomToNodes([n.id]);
   return true;
 }
@@ -144,6 +151,12 @@ export function installKeys(): () => void {
     };
 
     if (k === (isMac ? 'Meta' : 'Control') && !getState().modHeld) setState({ modHeld: true });
+    // The video focus view owns the keyboard.
+    if (getState().focusVideo) {
+      if (focusKey(e)) done();
+      else if (!mod) done();
+      return;
+    }
     // Global (also while typing).
     if (mod && !e.shiftKey && (k === 'k' || k === 'K')) return done(), setState({ overlay: overlay === 'palette' ? null : 'palette' });
     if (mod && !e.shiftKey && !e.altKey && (k === 'o' || k === 'O')) return done(), openPicker();
@@ -177,12 +190,16 @@ export function installKeys(): () => void {
     }
     if (k === 'Tab' && !mod) return done(), cycleSelection(e.shiftKey ? -1 : 1);
     if (k === 'Enter' && !mod && enter()) return done();
+    if (canvasVideoKey(e)) return done();
+    if (k === ' ' && !e.repeat) spacePressed();
     if (app.keyDown(k, e.shiftKey, e.altKey, mod)) done();
   };
   const blur = () => getState().modHeld && setState({ modHeld: false });
   const ku = (e: KeyboardEvent) => {
     if (e.key === (isMac ? 'Meta' : 'Control')) blur();
-    if (!editable(e.target)) getState().app?.keyUp(e.key);
+    if (editable(e.target)) return;
+    getState().app?.keyUp(e.key);
+    if (e.key === ' ' && !getState().focusVideo && !getState().overlay && !getState().editing) spaceReleased();
   };
   const onCopy = (e: ClipboardEvent) => {
     if (!editable(e.target) && !getState().editing && !getState().overlay) copy(e);

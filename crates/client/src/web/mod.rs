@@ -578,6 +578,20 @@ impl App {
             .filter_map(|n| n.handle)
             .collect();
         self.gpu.renderer.set_video_focus(Some(&focus));
+        // The selected video samples at high resolution once it outgrows the detail tile.
+        let boost: Vec<Handle> = self
+            .ix
+            .selection
+            .iter()
+            .filter_map(|id| self.scene.get(id))
+            .filter(|n| n.kind == NodeKind::Video)
+            .filter_map(|n| n.handle)
+            .collect();
+        self.gpu.renderer.set_video_boost(&boost);
+    }
+
+    fn video_handle(&self, node_id: &str) -> Option<Handle> {
+        self.scene.get(node_id).filter(|n| n.kind == NodeKind::Video).and_then(|n| n.handle)
     }
 
     fn set_palette(&mut self, palette: Palette) {
@@ -722,7 +736,7 @@ impl App {
                     "fps": if self.frame_times.is_empty() { 0.0 } else { (1000.0 / avg.max(1.0)).round() },
                     "frames": self.frame_times.len(),
                     "nodes": s.nodes, "visible": s.visible, "detail": s.detail_resident,
-                    "videos": s.active_videos, "zoom": self.camera.zoom / self.dpr,
+                    "videos": s.active_videos, "hiresVideos": s.hires_videos, "zoom": self.camera.zoom / self.dpr,
                 }),
             );
             self.frame_times.clear();
@@ -844,9 +858,11 @@ impl App {
             return;
         }
         let Some(entry) = self.media.assets.get_mut(&asset) else { return };
+        if duration > 0.0 {
+            entry.duration = duration;
+        }
         if entry.dims != Some((w, ht)) && w > 0 && ht > 0 {
             entry.dims = Some((w, ht));
-            entry.duration = duration;
             let hs: Vec<(Handle, SceneNode)> =
                 self.scene.iter().filter(|n| n.asset.as_deref() == Some(asset.as_str())).filter_map(|n| Some((n.handle?, n.clone()))).collect();
             for (h, n) in hs {
@@ -1415,6 +1431,61 @@ impl CanvasApp {
     pub fn video_time(&self, node_id: &str) -> f64 {
         let a = self.app.borrow();
         a.scene.get(node_id).and_then(|n| n.handle).map_or(0.0, |h| a.videos.current_time(h))
+    }
+
+    /// Playback state of a video node for the transport UI:
+    /// `{time, duration, ready, muted, paused, playing, url, width, height}` (null if not a video).
+    #[wasm_bindgen(js_name = videoState)]
+    pub fn video_state(&self, node_id: &str) -> JsValue {
+        let a = self.app.borrow();
+        let Some(n) = a.scene.get(node_id).filter(|n| n.kind == NodeKind::Video) else { return JsValue::NULL };
+        let asset = n.asset.as_deref().and_then(|id| a.media.get(id));
+        let (mut time, mut duration, mut st) = (0.0, 0.0, (false, true, false, false));
+        if let Some(h) = n.handle {
+            time = a.videos.current_time(h);
+            duration = a.videos.duration(h);
+            st = a.videos.state(h);
+        }
+        if !(duration.is_finite() && duration > 0.0) {
+            duration = asset.map_or(0.0, |e| e.duration);
+        }
+        let (w, h) = asset.and_then(|e| e.dims).unwrap_or((0, 0));
+        to_js(&json!({
+            "time": time, "duration": duration, "ready": st.0, "muted": st.1, "paused": st.2, "playing": st.3,
+            "url": asset.map(|e| e.url.clone()), "width": w, "height": h,
+        }))
+    }
+
+    /// Plays (releases a user pause) or pauses a video node on its current frame. Playback still
+    /// follows the canvas rules (hovered / selected, decoder cap).
+    #[wasm_bindgen(js_name = videoPlay)]
+    pub fn video_play(&self, node_id: &str, play: bool) {
+        let mut a = self.app.borrow_mut();
+        let Some(h) = a.video_handle(node_id) else { return };
+        if play {
+            a.videos.release(h);
+        } else {
+            let t = a.videos.current_time(h);
+            a.videos.hold(h, t);
+        }
+        a.dirty = true;
+    }
+
+    #[wasm_bindgen(js_name = videoSeek)]
+    pub fn video_seek(&self, node_id: &str, t: f64) {
+        let mut a = self.app.borrow_mut();
+        let Some(h) = a.video_handle(node_id) else { return };
+        let d = a.videos.duration(h);
+        a.videos.seek(h, if d > 0.0 { t.clamp(0.0, d - 0.01) } else { t.max(0.0) });
+        a.dirty = true;
+    }
+
+    #[wasm_bindgen(js_name = videoMute)]
+    pub fn video_mute(&self, node_id: &str, muted: bool) {
+        let a = self.app.borrow();
+        if let Some(h) = a.video_handle(node_id) {
+            a.videos.set_muted(h, muted);
+        }
     }
 
     // ---- doc ----

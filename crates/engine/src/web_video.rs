@@ -223,6 +223,37 @@ impl WebVideos {
     pub fn is_held(&self, id: Handle) -> bool {
         self.inner.borrow().videos.get(&id).is_some_and(|v| v.held.is_some())
     }
+
+    /// Moves the playhead of video `id` (stays paused if held).
+    pub fn seek(&self, id: Handle, t: f64) {
+        let held = {
+            let mut inner = self.inner.borrow_mut();
+            let Some(v) = inner.videos.get_mut(&id) else { return };
+            if v.held.is_none() {
+                v.el.set_current_time(t.max(0.0));
+                v.refresh = true;
+                return;
+            }
+            true
+        };
+        if held {
+            self.hold(id, t.max(0.0));
+        }
+    }
+
+    /// Sound on (`false`) or off for video `id`'s element.
+    pub fn set_muted(&self, id: Handle, muted: bool) {
+        if let Some(v) = self.inner.borrow().videos.get(&id) {
+            v.el.set_muted(muted);
+        }
+    }
+
+    /// `{ready, muted, held, active}` of video `id`'s element (all false without one).
+    pub fn state(&self, id: Handle) -> (bool, bool, bool, bool) {
+        self.inner.borrow().videos.get(&id).map_or((false, true, false, false), |v| {
+            (v.el.ready_state() >= HAVE_CURRENT_DATA, v.el.muted(), v.held.is_some(), v.active && !v.el.paused())
+        })
+    }
 }
 
 fn drop_video(v: Video) {

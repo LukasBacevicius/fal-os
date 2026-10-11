@@ -48,6 +48,8 @@ export interface State {
   modHeld: boolean;
   /** The ✦ selection prompt is open. */
   promptOpen: boolean;
+  /** Video node shown in the focus view (near-fullscreen player), if open. */
+  focusVideo: string | null;
   /** Chat panel content: the active chat, or the full history list (⌘Y). */
   chatView: 'chat' | 'history';
   /** A subagent's own transcript shown in the panel (null = the main chat). */
@@ -112,6 +114,7 @@ let state: State = {
   })(),
   modHeld: false,
   promptOpen: false,
+  focusVideo: null,
   chatView: 'chat',
   subView: null,
   drafts: {},
