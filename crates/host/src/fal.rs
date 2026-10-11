@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use falos_doc::{Actor, Asset, Command, Lineage, NodeKind, Props};
+use falos_doc::{Actor, Asset, Command, Lineage, NodeKind, Parent, Props};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 
@@ -71,6 +71,7 @@ pub fn start(
     model: &str,
     input: Json,
     place: Placement,
+    parents: Vec<Parent>,
 ) -> Result<String> {
     let backend = backend(host)?;
     check_model(model)?;
@@ -124,6 +125,7 @@ pub fn start(
         input,
         backend,
         requester: actor.id.clone(),
+        parents,
     };
     tokio::spawn(async move {
         if let Err(e) = job.run().await {
@@ -141,6 +143,8 @@ pub(crate) struct Job {
     pub input: Json,
     pub backend: Backend,
     pub requester: String,
+    /// Media inputs (`mediaInputs`), recorded as lineage parents.
+    pub parents: Vec<Parent>,
 }
 
 impl Job {
@@ -152,6 +156,7 @@ impl Job {
             status: status.into(),
             queue_position,
             error,
+            cost: None,
         });
     }
 
@@ -318,13 +323,10 @@ impl Job {
             &self.host,
             &media,
             Lineage {
-                model: self.model.clone(),
-                params: self.input.clone(),
                 seed: result.get("seed").and_then(Json::as_i64),
-                parents: vec![],
                 fal_request_id: Some(request_id),
-                cost: None,
-                actor: self.requester.clone(),
+                parents: self.parents.clone(),
+                ..Lineage::generate(&self.model, self.input.clone(), &self.requester)
             },
         )
         .await?;
@@ -364,11 +366,23 @@ pub(crate) async fn download(host: &Host, media: &Media, lineage: Lineage) -> Re
     if !file.exists() {
         tokio::fs::write(&file, &bytes).await?;
     }
+    let source = match lineage.kind {
+        falos_doc::LineageKind::Derive => falos_doc::Source::Derive,
+        falos_doc::LineageKind::Render => falos_doc::Source::Render,
+        _ => falos_doc::Source::Generate,
+    };
     Ok(Asset {
         id: format!("sha256:{hex}"),
         mime: media.mime.clone(),
         uri: Some(media.url.clone()),
+        source,
+        media: (media.width.is_some() || media.height.is_some()).then(|| falos_doc::Media {
+            w: media.width,
+            h: media.height,
+            ..Default::default()
+        }),
         lineage: Some(lineage),
+        origin: None,
     })
 }
 
@@ -398,7 +412,7 @@ pub(crate) fn convert_cmds(
         _ => n.h,
     };
     let props: Props = serde_json::from_value(json!({
-        "x": n.x, "y": n.y, "w": n.w, "h": h, "asset": asset.id,
+        "x": n.x, "y": n.y, "w": n.w, "h": h, "asset": asset.id, "role": "candidate",
     }))?;
     Ok(vec![
         Command::PutAsset(asset.clone()),

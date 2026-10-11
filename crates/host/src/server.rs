@@ -286,6 +286,7 @@ pub fn router(space: Arc<Workspace>, token: &str, ct: CancellationToken) -> Rout
         .route("/import/url", axum::routing::post(crate::assets::import_url))
         .merge(crate::runtime::routes())
         .merge(crate::out::routes())
+        .merge(crate::ops::rest::routes())
         .with_state(space)
         .nest_service("/mcp", mcp)
         .layer(middleware::from_fn_with_state(

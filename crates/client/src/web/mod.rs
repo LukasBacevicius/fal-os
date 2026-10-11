@@ -977,7 +977,7 @@ impl App {
         let total_w: f32 = sizes.iter().map(|s| s[0]).sum::<f32>() + gap * (sizes.len().saturating_sub(1)) as f32;
         let mut x = at[0] - total_w * 0.5;
         for (item, size) in items.iter().zip(&sizes) {
-            cmds.push(Command::PutAsset(Asset { id: item.id.clone(), mime: Some(item.mime.clone()), uri: None, lineage: None }));
+            cmds.push(Command::PutAsset(Asset { id: item.id.clone(), mime: Some(item.mime.clone()), ..Default::default() }));
             let mut props: Props = serde_json::from_value(json!({
                 "x": x.round(), "y": (at[1] - size[1] * 0.5).round(), "w": size[0].round(), "h": size[1].round(),
             }))
