@@ -8,7 +8,7 @@ import { query, type Query, type SDKMessage, type SDKUserMessage } from "@anthro
 import { type Capabilities, type CapName, capabilityEvent, capabilityPrompt, probeCapabilities } from "./capabilities.ts";
 import { config, remotionChrome } from "./config.ts";
 import { runCodexDriver, runFalDriver } from "./drivers.ts";
-import { Channel, doneSummary, friendlyError, ROLES, runningSummary, scrubError, stripAgent } from "./events.ts";
+import { Channel, doneSummary, filesEvent, filesOf, friendlyError, ROLES, runningSummary, scrubError, stripAgent } from "./events.ts";
 import { HostMcp } from "./hostMcp.ts";
 import { agents, directorPrompt } from "./prompts.ts";
 import { createSwarmTools } from "./swarmTools.ts";
@@ -164,6 +164,7 @@ export class ChatRun {
   private flushTimer: NodeJS.Timeout | null = null;
   private cost = 0;
   private finalNodes: string[] = [];
+  private markedFinal = false;
   private background = new Set<string>(); // Agent tool_use ids of background subagents
   /** Messages queued by the host, waiting for the next tool call. */
   private pending: Queued[] = [];
@@ -467,6 +468,8 @@ export class ChatRun {
       request: this.request,
       reportSession: (sid, agent) => this.reportSession(sid, agent),
       mcpHeaders: { "X-Falos-Chat": f.chat, "X-Falos-Project": f.project },
+      projectDir: projectDir(f),
+      assets: caps.assets,
     });
 
     // Resume the SDK session for follow-ups on the same driver; start fresh after a switch.
@@ -476,7 +479,8 @@ export class ChatRun {
     const { blocks, notes } = await chipImages(f.context, this.workDir);
     const prompt = promptText(f, { resume: Boolean(resume), notes });
     const capText = capabilityPrompt(caps);
-    const sysPrompt = directorPrompt({ canvas: f.canvas, workDir: this.workDir, falAgent: fa, codex, caps: capText });
+    const assetCtx = { assets: caps.assets, projectDir: projectDir(f), projectName: f.project_name, qa: config.motionQa };
+    const sysPrompt = directorPrompt({ canvas: f.canvas, workDir: this.workDir, falAgent: fa, codex, caps: capText, ...assetCtx });
     const agentDefs = agents({
       canvas: f.canvas,
       workDir: this.workDir,
@@ -488,7 +492,9 @@ export class ChatRun {
       hyperframes: has("hyperframes"),
       remotionSkills: has("remotion-skills"),
       hyperframesSkills: has("hyperframes-skills"),
-      qa: config.motionQa,
+      ...assetCtx,
+      otio: config.otio,
+      hostTools: caps.hostTools,
     });
     const chrome = remotionChrome();
 
@@ -716,7 +722,21 @@ export class ChatRun {
     }
     if (["fal_agent", "fal_model", "codex", "TodoWrite"].includes(caller.name)) return;
     const nodes = nodesOf(json);
-    if (caller.name === "import_file" && json?.type === "video" && json.node) this.finalNodes = [json.node];
+    if (caller.name === "import_file" && json?.type === "video" && json.node && !this.markedFinal) this.finalNodes = [json.node];
+    // Nodes an agent marked final (`<id> role(final)`) are the run's result.
+    if (caller.name === "edit" && !b.is_error) {
+      const finals = [...String(caller.input.text ?? "").matchAll(/^\s*([a-z0-9]{6,12})\b[^\n]*\brole\(final\)/gm)].map((m) => m[1]);
+      if (finals.length) {
+        if (!this.markedFinal) this.finalNodes = [];
+        this.markedFinal = true;
+        this.finalNodes = [...new Set([...this.finalNodes, ...finals])];
+      }
+    }
+    // File cards for exports agents ran directly on the host (deliver / share_files post their own).
+    if ((caller.name === "export" || caller.name === "package") && !b.is_error && !json?.emitted) {
+      const { files, dir } = filesOf(json);
+      if (files.length) this.emit(filesEvent(files, dir, caller.agent));
+    }
     this.emit({
       kind: "tool",
       agent: caller.agent,

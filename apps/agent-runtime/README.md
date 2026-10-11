@@ -9,6 +9,8 @@ The swarm behind the chat panel. You type "OPUS please direct me an ad for the h
 | generator (one or more, in parallel) | `claude-opus-5-5` | Makes stills, video clips and music with **fal** into the Assets frame. Placeholders appear at once and turn into the media. |
 | motion | `claude-opus-5-5` | Builds the edit in **Remotion** (or **HyperFrames** for typography-led kinetic pieces) from the canvas assets with the official Remotion / HyperFrames agent skills, renders 1080p30, runs the motion QA (contact sheet, beat timing, typography, loudness → -14 LUFS), fixes what it finds and imports the MP4 into the Final frame. |
 | qa | `claude-opus-5-5` | Independent check: the motion-QA report, the contact sheet and frames; pins annotations and sends motion back once if needed. |
+| editor | `claude-opus-5-5` | Transforms existing media into new nodes with lineage (trim, concat, reframe, captions, audio mix, …) with the host's `transform` ops, or ffmpeg + `import_file` lineage on hosts without them. Inputs stay untouched. |
+| finisher | `claude-opus-5-5` | Turns finals into deliverable files: reframes missing aspects, marks finals, exports presets into `<project>/deliverables/`, probes every file against its spec, posts file cards. |
 | Codex | Codex CLI (your ChatGPT sign-in) | Only when the user asks for it (or picks the codex driver): a coding worker with its own fal-os session. Opus writes code itself otherwise. |
 
 ```
@@ -40,6 +42,11 @@ cargo run -p falos-host -- serve --project ~/fal-os-projects/demo   # single-pro
 
 ## Capabilities
 Probed at start and before every turn (`src/capabilities.ts`): Claude, fal Agent (AGENT preset, cached `GET /agent/projects`), fal models, Codex (sign-in **and** the host MCP answering on a fresh session), Remotion (deps + chrome-headless-shell), HyperFrames, ffmpeg, and the skills. The list goes into every system prompt and out as a `capabilities` chat event (missing ones with their fix).
+
+Assets v1 (`docs/ASSETS-V1.md`) is detected from the host's MCP `tools/list` (cached 60 s): `asset-ops` (`inspect` + `transform`, plus `compose`/`rerun` if present), `asset-export` (`export`, `package`), `asset-library` (`search_assets` & co.), `media-inputs` (`generate` schema has `mediaInputs`), `provenance` (`import_file` lineage has `recipe`). Prompts and subagent tool lists only name tools the host has; without them the rules fall back to ffmpeg + `import_file` lineage, ffmpeg-encoded deliverables and `share_files`.
+
+## Assets: bring it in, generate, take it out
+Every agent gets the asset rules (`assetRules` in `src/prompts.ts`): protected inputs (derive, never modify), lineage for every derivative (op, or `import_file` lineage with the exact command as recipe), candidates → final/rejected, library first, chips as precise model inputs, explicit fal uploads. The Director also gets deliverables thinking: platforms → presets, defaults (video ads: 16:9 master + 9:16 + 1:1; web images @2x), ask once if unclear, and the finishing order (final aspects → mark final → export → probe QA → file cards). Motion renders each aspect natively, QA's with `motion-qa.mjs --size WxH`, writes an OTIO timeline next to the render (`scripts/otio.mjs` from an edit list, or an installed OTIO skill) and imports renders as candidates.
 
 ## Steering
 `steer` frames (UI: send now) interrupt the current step (`priority: "now"`, after `backgroundTasks()` so foreground subagents and commands keep running; `perTaskStopAffordance` so the interrupt doesn't kill them) and continue the same session. A steer for a running subagent goes into its context after its next tool call (PostToolUse / SubagentStop hook `additionalContext`). fal driver: answers a pending question or cancels the task and continues the conversation; Codex driver: aborts the turn and continues the thread.
@@ -86,6 +93,9 @@ Anything on the canvas can be a reference or a direct model input: generated med
 - `fal_model(sessionId, model, input, mediaInputs?, name, kind, parent?)`: one exact endpoint on the fal queue, with a placeholder, lineage and a cost estimate.
 - `fal_model_schema(model)`: input fields of an endpoint, from fal's public OpenAPI.
 - `media_url(sessionId, nodes)`: public URLs for canvas media.
+- `fal_model` `mediaInputs` also take chips: a region/spot is cropped, a frame extracted, a range trimmed (ffmpeg, into `work/<chat>/chips/`), then uploaded; the chips are recorded in the lineage params.
+- `share_files(files[])`: posts project files (deliverables, OTIO, zips) as a `files` chat event (sha256, size, ffprobe w/h/duration). Files must be inside the project folder.
+- `deliver(sessionId, nodes|frame|deliverables, presets[], dir?, naming?)` (only when the host has `export`): host `export`, then ffprobe + loudness of every file against its preset, a `files` event (unless the result says `emitted: true`) and `{ok, files:[…issues]}`; host image blocks are passed through as images.
 - `codex(task, dir?)`: a Codex thread (`workspace-write`, no approvals) in the chat workspace. It has its own "Codex" session and status.
 
 ## Drivers, queue, errors (UX v1)

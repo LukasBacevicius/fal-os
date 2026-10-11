@@ -53,6 +53,8 @@ export const config = {
   skillsDir: env.FALOS_SKILLS_DIR || new URL("../skills/", import.meta.url).pathname,
   /** QA script the motion and qa agents run on renders. */
   motionQa: new URL("../scripts/motion-qa.mjs", import.meta.url).pathname,
+  /** Edit list → OpenTimelineIO writer (motion agent: an editable timeline next to the render). */
+  otio: new URL("../scripts/otio.mjs", import.meta.url).pathname,
   codexHome: env.CODEX_HOME || join(homedir(), ".codex"),
 };
 

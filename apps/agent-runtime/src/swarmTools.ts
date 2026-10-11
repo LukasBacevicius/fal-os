@@ -1,14 +1,21 @@
 // In-process MCP tools ("swarm") the runtime gives the Claude agents. They run with the
 // runtime's FAL_KEY / Codex login and act on the canvas through the host as the calling
 // agent's fal-os session (placeholders, presence, imports with lineage).
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import type { AssetCaps } from "./capabilities.ts";
 import { codexAuthAvailable, config } from "./config.ts";
 import { autoDecide, costFromPrice, EXT, falAgentAvailable, unitPrice, findMedia, modelSchema, runAgentTask, runModel, uploadFile } from "./fal.ts";
-import { generatedSummary, shortModel } from "./events.ts";
+import { type FileCard, filesEvent, filesOf, generatedSummary, shortModel } from "./events.ts";
 import type { HostMcp } from "./hostMcp.ts";
+
+const run$ = promisify(execFile);
 
 export type ToolCtx = {
   host: HostMcp;
@@ -29,7 +36,71 @@ export type ToolCtx = {
   reportSession?: (sessionId: string, agent: string) => void;
   /** Headers for MCP clients this run starts (Codex): X-Falos-Chat / X-Falos-Project. */
   mcpHeaders?: Record<string, string>;
+  /** Project folder: `share_files` only posts files inside it. Default: two levels above workDir. */
+  projectDir?: string;
+  /** Host asset surface (capabilities.ts): `deliver` exists only when the host has `export`. */
+  assets?: AssetCaps;
 };
+
+/** A chip passed as a model input: `{kind:"region"|"frame"|"range"|"spot"|"node", node, …}`. */
+const chipSchema = z.object({ kind: z.string(), node: z.string() }).passthrough();
+const mediaRef = z.union([z.string(), chipSchema]);
+
+/** Output size per preset (for checking export results); x / linkedin take either orientation. */
+export const PRESET_SIZE: Record<string, [number, number]> = {
+  reel: [1080, 1920],
+  tiktok: [1080, 1920],
+  short: [1080, 1920],
+  "ig-feed-45": [1080, 1350],
+  square: [1080, 1080],
+  "youtube-1080": [1920, 1080],
+  "youtube-4k": [3840, 2160],
+};
+const SOCIAL = new Set(["reel", "tiktok", "short", "ig-feed-45", "square", "youtube-1080", "youtube-4k", "x", "linkedin"]);
+
+/** ffprobe a file: dimensions, duration, codecs (null if not media). */
+export async function probeFile(file: string): Promise<{ w?: number; h?: number; duration?: number; vcodec?: string; pix_fmt?: string; acodec?: string } | null> {
+  try {
+    const { stdout } = await run$("ffprobe", ["-v", "error", "-show_streams", "-show_format", "-of", "json", file], { maxBuffer: 64 * 1024 * 1024 });
+    const j = JSON.parse(stdout);
+    const v = (j.streams ?? []).find((s: any) => s.codec_type === "video");
+    const a = (j.streams ?? []).find((s: any) => s.codec_type === "audio");
+    const d = Number(j.format?.duration);
+    return { w: v?.width, h: v?.height, duration: Number.isFinite(d) ? d : undefined, vcodec: v?.codec_name, pix_fmt: v?.pix_fmt, acodec: a?.codec_name };
+  } catch {
+    return null;
+  }
+}
+
+/** Integrated loudness (LUFS) via ebur128, or null. */
+async function lufs(file: string): Promise<number | null> {
+  try {
+    const { stderr } = await run$("ffmpeg", ["-hide_banner", "-nostats", "-i", file, "-af", "ebur128=framelog=quiet", "-f", "null", "-"], { maxBuffer: 64 * 1024 * 1024 });
+    const m = stderr.match(/Integrated loudness:\s*\n\s*I:\s*(-?[\d.]+) LUFS/);
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function sha256File(file: string): Promise<string> {
+  const h = createHash("sha256");
+  for await (const chunk of createReadStream(file)) h.update(chunk as Buffer);
+  return h.digest("hex");
+}
+
+/** Spec problems of one exported file (empty = passes). */
+export function specIssues(f: { preset?: string; w?: number; h?: number; bytes: number }, p: Awaited<ReturnType<typeof probeFile>>, loud: number | null): string[] {
+  const out: string[] = [];
+  if (!f.bytes) out.push("empty file");
+  if (p === null) return [...out, "not readable by ffprobe"];
+  const want = f.preset ? PRESET_SIZE[f.preset] : undefined;
+  if (want && p.w !== undefined && (p.w !== want[0] || p.h !== want[1])) out.push(`${p.w}×${p.h}, preset ${f.preset} is ${want[0]}×${want[1]}`);
+  if (f.w && p.w && (f.w !== p.w || f.h !== p.h)) out.push(`reported ${f.w}×${f.h}, file is ${p.w}×${p.h}`);
+  if (p.w && p.vcodec === "h264" && p.pix_fmt && p.pix_fmt !== "yuv420p") out.push(`pixel format ${p.pix_fmt} (yuv420p plays everywhere)`);
+  if (loud !== null && f.preset && SOCIAL.has(f.preset) && Math.abs(loud + 14) > 1) out.push(`loudness ${loud} LUFS, social target -14`);
+  return out;
+}
 
 type Kind = "image" | "video" | "audio";
 const CELL: Record<Kind, [number, number]> = { image: [480, 270], video: [480, 270], audio: [480, 96] };
@@ -113,6 +184,37 @@ export function createSwarmTools(ctx: ToolCtx) {
     const url = await uploadFile(c.file);
     if (c.asset) await ctx.host.call("set_asset_uri", { sessionId, canvas: ctx.canvas, asset: c.asset, uri: url }).catch(() => {});
     return { node, url, mime: c.mime as string | undefined, file: c.file as string, name: c.name };
+  }
+
+  /**
+   * Public URL for a model input: a node id (its whole media), or a chip — a region/spot is
+   * cropped, a frame extracted, a range trimmed (locally with ffmpeg), then uploaded once.
+   */
+  async function inputUrl(sessionId: string, ref: string | { kind: string; node: string; [k: string]: unknown }) {
+    if (typeof ref === "string" || ref.kind === "node") return mediaUrl(sessionId, typeof ref === "string" ? ref : ref.node);
+    const [c] = await ctx.host.call("get_context", { sessionId, canvas: ctx.canvas, chips: [ref] });
+    if (!c || c.error) throw new Error(c?.error ?? `could not resolve chip on ${ref.node}`);
+    if (!c.file) throw new Error(`node ${ref.node} has no media file`);
+    const dir = join(ctx.workDir, "chips");
+    await mkdir(dir, { recursive: true });
+    const key = createHash("sha1").update(JSON.stringify(ref)).digest("hex").slice(0, 12);
+    const args = ["-v", "error", "-y"];
+    let out: string;
+    if (c.range) {
+      const ext = String(c.file).match(/\.[a-z0-9]+$/i)?.[0] ?? ".mp4";
+      out = join(dir, `range-${key}${ext}`);
+      const video = String(c.mime ?? "").startsWith("video/");
+      args.push("-ss", String(c.range.t0), "-to", String(c.range.t1), "-i", c.file, ...(video ? ["-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart"] : []), out);
+    } else {
+      out = join(dir, `${c.frame ? "frame" : "crop"}-${key}.png`);
+      if (c.frame) args.push("-ss", String(c.frame.t));
+      args.push("-i", c.file, "-frames:v", "1");
+      if (c.crop) args.push("-vf", `crop=${c.crop.w}:${c.crop.h}:${c.crop.x}:${c.crop.y}`);
+      args.push(out);
+    }
+    await run$("ffmpeg", args);
+    const url = await uploadFile(out);
+    return { node: ref.node, url, mime: c.range ? (c.mime as string | undefined) : "image/png", file: out, name: c.name, chip: ref };
   }
 
   async function importResult(opts: {
@@ -243,12 +345,12 @@ export function createSwarmTools(ctx: ToolCtx) {
 
   const falModel = tool(
     "fal_model",
-    "Run one specific fal model endpoint directly (when you need an exact model, or the fal Agent is unavailable). Creates a placeholder node at once, waits for the result and lands it as a media node with lineage. Use fal_model_schema first for the input fields. `mediaInputs` maps input fields to canvas node ids, e.g. {\"image_url\": \"a1b2c3\"} — they are turned into public URLs (uploading user media to fal storage once).",
+    "Run one specific fal model endpoint directly (when you need an exact model, or the fal Agent is unavailable). Creates a placeholder node at once, waits for the result and lands it as a media node with lineage. Use fal_model_schema first for the input fields. `mediaInputs` maps input fields to canvas node ids or chips, e.g. {\"image_url\": \"a1b2c3\"} or {\"image_url\": {\"kind\":\"region\",\"node\":\"a1b2c3\",\"box\":[0.1,0.2,0.5,0.4]}} (a region is cropped, a frame extracted, a range trimmed) — turned into public URLs (uploading user media to fal storage once).",
     {
       sessionId: z.string(),
       model: z.string().describe("fal endpoint id, e.g. fal-ai/flux-pro/v1.1"),
       input: z.record(z.string(), z.any()).describe("model input JSON"),
-      mediaInputs: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+      mediaInputs: z.record(z.string(), z.union([mediaRef, z.array(mediaRef)])).optional().describe("model field → node id or chip (region/frame/range/spot), or a list"),
       name: z.string().describe("name for the result node"),
       kind: z.enum(["image", "video", "audio"]),
       parent: z.string().optional().describe("frame node id"),
@@ -263,10 +365,12 @@ export function createSwarmTools(ctx: ToolCtx) {
       try {
         const input: Record<string, unknown> = { ...a.input };
         const parents: string[] = [];
+        const chips: Record<string, unknown> = {};
         for (const [field, v] of Object.entries(a.mediaInputs ?? {})) {
-          const nodes = Array.isArray(v) ? v : [v];
-          const urls = await Promise.all(nodes.map((n) => mediaUrl(a.sessionId, n)));
-          parents.push(...nodes);
+          const refs = Array.isArray(v) ? v : [v];
+          const urls = await Promise.all(refs.map((r) => inputUrl(a.sessionId, r as any)));
+          parents.push(...urls.map((u) => u.node));
+          if (refs.some((r) => typeof r !== "string")) chips[field] = v;
           input[field] = Array.isArray(v) ? urls.map((u) => u.url) : urls[0].url;
         }
         ph = await placeholder(a.sessionId, a.name, a.kind, a.parent, a.model, input);
@@ -285,7 +389,7 @@ export function createSwarmTools(ctx: ToolCtx) {
               name: i ? `${a.name} ${i + 1}` : a.name,
               replace: i === 0 ? ph : undefined,
               parent: a.parent,
-              lineage: { model: a.model, params: input, falRequestId: requestId, parents },
+              lineage: { model: a.model, params: Object.keys(chips).length ? { ...input, mediaChips: chips } : input, falRequestId: requestId, parents },
             }),
           );
         }
@@ -418,6 +522,105 @@ export function createSwarmTools(ctx: ToolCtx) {
     },
   );
 
+  const projectRoot = resolve(ctx.projectDir ?? dirname(dirname(ctx.workDir)));
+
+  /** A file card for a local file (sha256, size, probe), or an error string. */
+  async function card(f: { path: string; node?: string; preset?: string }): Promise<FileCard | string> {
+    const path = resolve(ctx.workDir, f.path);
+    if (path !== projectRoot && !path.startsWith(projectRoot + sep)) return `${f.path}: outside the project folder`;
+    const st = await stat(path).catch(() => null);
+    if (!st?.isFile()) return `${f.path}: no such file`;
+    const p = await probeFile(path);
+    return {
+      path,
+      name: path.split("/").pop()!,
+      ...(f.node ? { node: f.node } : {}),
+      ...(f.preset ? { preset: f.preset } : {}),
+      ...(p?.w ? { w: p.w, h: p.h } : {}),
+      ...(p?.duration && (p.vcodec || p.acodec) && !/^(png|mjpeg|webp)$/.test(p.vcodec ?? "") ? { duration: Math.round(p.duration * 100) / 100 } : {}),
+      bytes: st.size,
+      sha256: await sha256File(path),
+    };
+  }
+
+  const shareFiles = tool(
+    "share_files",
+    "Post local files from the project (deliverables, an OTIO timeline, a zip) to the chat as file cards the user can drag out, reveal, open in an app or copy. Files must be inside the project folder. Use for every deliverable that `deliver`/`export` didn't post already.",
+    {
+      files: z
+        .array(z.union([z.string(), z.object({ path: z.string(), node: z.string().optional(), preset: z.string().optional() })]))
+        .min(1)
+        .max(50)
+        .describe("absolute paths (or {path, node, preset})"),
+    },
+    async (a) => {
+      const cards: FileCard[] = [];
+      const errors: string[] = [];
+      for (const f of a.files) {
+        const c = await card(typeof f === "string" ? { path: f } : f);
+        if (typeof c === "string") errors.push(c);
+        else cards.push(c);
+      }
+      if (cards.length) ctx.emit(filesEvent(cards, undefined));
+      if (!cards.length) return fail(errors.join("; "));
+      return ok({ files: cards, ...(errors.length ? { errors } : {}) });
+    },
+  );
+
+  const deliver = tool(
+    "deliver",
+    "Export finals as deliverable files and prove them: runs fal-os `export` (presets, into <project>/deliverables by default), then ffprobes every file against its preset (dimensions, codec, pixel format, -14 LUFS for social video) and posts the file cards in chat. Returns the files with QA issues; fix and re-run when `ok` is false.",
+    {
+      sessionId: z.string(),
+      nodes: z.array(z.string()).optional().describe("final node ids"),
+      frame: z.string().optional().describe("a frame id to export instead of nodes"),
+      deliverables: z.boolean().optional().describe("export the project's deliverables (nodes marked final / the Deliverables frame)"),
+      presets: z.array(z.string()).min(1).describe("e.g. [\"youtube-1080\", \"reel\"]"),
+      dir: z.string().optional(),
+      naming: z.string().optional(),
+    },
+    async (a) => {
+      if (!a.nodes?.length && !a.frame && !a.deliverables) return fail("give nodes, frame or deliverables:true");
+      const target = a.deliverables ? { nodes: "deliverables" } : a.frame ? { frame: a.frame } : { nodes: a.nodes };
+      let content: any[];
+      try {
+        content = await ctx.host.callContent("export", {
+          sessionId: a.sessionId,
+          canvas: ctx.canvas,
+          ...target,
+          presets: a.presets,
+          ...(a.dir ? { dir: a.dir } : {}),
+          ...(a.naming ? { naming: a.naming } : {}),
+        });
+      } catch (e: any) {
+        return fail(`export failed: ${e.message}`);
+      }
+      const text = content.map((c) => c.text ?? "").join("\n");
+      const end = text.indexOf("\n\nnotices");
+      let json: any = null;
+      try {
+        json = JSON.parse((end >= 0 ? text.slice(0, end) : text).trim());
+      } catch {}
+      const { files, dir } = filesOf(json);
+      if (!files.length) return fail(`export returned no files: ${text.slice(0, 400)}`);
+      const checked: (FileCard & { issues: string[]; lufs?: number | null })[] = [];
+      for (const f of files) {
+        const st = await stat(f.path).catch(() => null);
+        const bytes = st?.size ?? 0;
+        const p = st ? await probeFile(f.path) : null;
+        const loud = p?.acodec && f.preset && SOCIAL.has(f.preset) && (p.duration ?? 0) < 600 ? await lufs(f.path) : null;
+        const sha256 = f.sha256 || (st ? await sha256File(f.path) : "");
+        checked.push({ ...f, bytes, sha256, ...(p?.w ? { w: p.w, h: p.h } : {}), ...(p?.duration ? { duration: Math.round(p.duration * 100) / 100 } : {}), lufs: loud, issues: st ? specIssues({ ...f, bytes }, p, loud) : ["missing on disk"] });
+      }
+      // The host may post the cards itself (it says so with `emitted: true`); otherwise we do.
+      if (!json?.emitted) ctx.emit(filesEvent(checked.map(({ issues, lufs, ...c }) => c), dir, ctx.agentFor(a.sessionId)));
+      const ok_ = checked.every((c) => !c.issues.length);
+      // Image blocks the host returned (contact sheets) go back to the model as images.
+      const images = content.filter((c) => c.type === "image");
+      return { content: [{ type: "text" as const, text: JSON.stringify({ ok: ok_, dir, files: checked }, null, 2) }, ...images] };
+    },
+  );
+
   const chatList = tool(
     "chat_list",
     "The project's chats (other workstreams running in parallel): id, title, state (running/idle/error), working agents, cost. Use to find a chat to hand work to or ask.",
@@ -472,7 +675,7 @@ export function createSwarmTools(ctx: ToolCtx) {
   return createSdkMcpServer({
     name: "swarm",
     version: "0.1.0",
-    tools: [falAgent, falModel, falModelSchema, mediaUrlTool, codex, chatList, chatRead, chatSend, chatTitle],
+    tools: [falAgent, falModel, falModelSchema, mediaUrlTool, shareFiles, ...(ctx.assets?.export ? [deliver] : []), codex, chatList, chatRead, chatSend, chatTitle],
     alwaysLoad: true,
   });
 }

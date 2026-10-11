@@ -60,8 +60,8 @@ const ING = /^[a-z]+ing\b/i;
 function inflect(verb: string, form: 0 | 1): string {
   const v = verb.toLowerCase();
   if (IRREGULAR[v]) return IRREGULAR[v][form];
-  if (form === 0) return v.endsWith("e") ? `${v}d` : /[^aeiou]y$/.test(v) ? `${v.slice(0, -1)}ied` : /^(stop|grab|trim|drop|plan|ship)$/.test(v) ? `${v}${v.at(-1)}ed` : `${v}ed`;
-  return v.endsWith("e") && !v.endsWith("ee") ? `${v.slice(0, -1)}ing` : /^(stop|grab|trim|drop|plan|ship)$/.test(v) ? `${v}${v.at(-1)}ing` : `${v}ing`;
+  if (form === 0) return v.endsWith("e") ? `${v}d` : /[^aeiou]y$/.test(v) ? `${v.slice(0, -1)}ied` : /^(stop|grab|trim|drop|plan|ship|crop)$/.test(v) ? `${v}${v.at(-1)}ed` : `${v}ed`;
+  return v.endsWith("e") && !v.endsWith("ee") ? `${v.slice(0, -1)}ing` : /^(stop|grab|trim|drop|plan|ship|crop)$/.test(v) ? `${v}${v.at(-1)}ing` : `${v}ing`;
 }
 
 /**
@@ -91,6 +91,8 @@ export const ROLES: Record<string, string> = {
   generator: "fal media",
   motion: "edit & render",
   qa: "render check",
+  editor: "cuts & reframes",
+  finisher: "export & delivery",
   codex: "code",
 };
 
@@ -133,10 +135,54 @@ export function runningSummary(name: string, input: any): string {
     case "Write":
     case "Edit":
       return `${name.toLowerCase()} ${clean(input.file_path).split("/").slice(-2).join("/")}`;
+    case "transform":
+      return `${opPhrase(input.op, false)}${inputsPhrase(input.inputs)}`;
+    case "inspect":
+      return `inspecting ${[input.what ?? []].flat().join(", ") || "media"}`;
+    case "compose":
+      return `composing a ${clean(input.op).replace(/_/g, " ") || "layout"}`;
+    case "rerun":
+      return `re-running ${input.node ?? "a recipe"}`;
+    case "export":
+    case "deliver":
+      return `exporting ${[input.presets ?? []].flat().join(", ") || "files"}`;
+    case "package":
+      return `packaging the ${clean(input.kind) || "project"}`;
+    case "share_files":
+      return `sharing ${plural((input.files ?? input.paths ?? []).length, "file")}`;
+    case "search_assets":
+      return `searching the library${input.query?.text ? ` for "${clean(input.query.text).slice(0, 40)}"` : ""}`;
+    case "place_asset":
+      return "placing a library asset";
     default:
       return name.replace(/_/g, " ");
   }
 }
+
+/** `reframe` → "reframing" / "reframed"; the ffmpeg escape hatch reads as "ran ffmpeg". */
+const OPS: Record<string, [string, string]> = {
+  ffmpeg: ["ran ffmpeg", "running ffmpeg"],
+  concat: ["concatenated clips", "concatenating clips"],
+  speed: ["retimed", "retiming"],
+  gif: ["made a gif", "making a gif"],
+  burn_captions: ["burned in captions", "burning in captions"],
+  audio_mix: ["mixed audio", "mixing audio"],
+  audio_normalize: ["normalized loudness", "normalizing loudness"],
+  audio_extract: ["extracted audio", "extracting audio"],
+  extract_frames: ["extracted frames", "extracting frames"],
+  remove_bg: ["removed the background", "removing the background"],
+};
+
+function opPhrase(op: unknown, done: boolean): string {
+  const o = clean(op).toLowerCase() || "transform";
+  if (OPS[o]) return OPS[o][done ? 0 : 1];
+  return /^[a-z]+$/.test(o) ? inflect(o, done ? 0 : 1) : `${done ? "ran" : "running"} ${o.replace(/_/g, " ")}`;
+}
+
+const inputsPhrase = (inputs: unknown) => {
+  const n = Array.isArray(inputs) ? inputs.length : inputs ? 1 : 0;
+  return n > 1 ? ` (${n} inputs)` : "";
+};
 
 /** Past-tense, human line for a finished tool (`generated 4 images (flux/schnell)`). */
 export function doneSummary(name: string, input: any, json: any, nodes: string[] | undefined): string {
@@ -186,9 +232,78 @@ export function doneSummary(name: string, input: any, json: any, nodes: string[]
       return `wrote ${clean(input.file_path).split("/").pop()}`;
     case "Edit":
       return `edited ${clean(input.file_path).split("/").pop()}`;
+    case "transform":
+      return `${opPhrase(input.op, true)}${inputsPhrase(input.inputs)}${n ? ` → ${plural(n, "node")}` : ""}`;
+    case "inspect":
+      return `inspected ${[input.what ?? []].flat().join(", ") || "media"}`;
+    case "compose":
+      return `composed a ${clean(input.op).replace(/_/g, " ") || "layout"}`;
+    case "rerun":
+      return `re-ran ${input.node ?? "a recipe"}${n ? ` → ${plural(n, "node")}` : ""}`;
+    case "export":
+    case "deliver": {
+      const files = filesOf(json).files;
+      const presets = [...new Set(files.map((f) => f.preset).filter(Boolean))];
+      return `exported ${plural(files.length, "file")}${presets.length ? ` (${presets.join(", ")})` : ""}`;
+    }
+    case "package":
+      return `packaged the ${clean(input.kind) || "project"}`;
+    case "share_files":
+      return `shared ${plural(filesOf(json).files.length, "file")}`;
+    case "search_assets": {
+      const items = Array.isArray(json?.items) ? json.items.length : Array.isArray(json) ? json.length : undefined;
+      return `searched the library${items !== undefined ? ` (${plural(items, "hit")})` : ""}`;
+    }
+    case "place_asset":
+      return "placed a library asset";
+    case "list_ops":
+      return "listed the asset ops";
     default:
       return name.replace(/_/g, " ");
   }
+}
+
+/** One file card (`files` chat event, docs/ASSETS-V1.md §7). */
+export type FileCard = { path: string; name: string; node?: string; preset?: string; w?: number; h?: number; duration?: number; bytes: number; sha256: string };
+
+/** Files in an `export` / `package` result (`{files:[…], dir}`, or one `{path|zip|file}`); [] if none. */
+export function filesOf(json: any): { files: FileCard[]; dir?: string } {
+  if (!json || typeof json !== "object") return { files: [] };
+  const raw: any[] = Array.isArray(json.files) ? json.files : [json.zip ?? json.path ?? json.file].filter((x) => typeof x === "string").map((path) => ({ path, bytes: json.bytes, sha256: json.sha256 }));
+  const files = raw
+    .map((f) => (typeof f === "string" ? { path: f } : f))
+    .filter((f) => typeof f?.path === "string")
+    .map((f) => ({
+      path: f.path,
+      name: f.name ?? String(f.path).split("/").pop(),
+      ...(f.node ? { node: f.node } : {}),
+      ...(f.preset ? { preset: f.preset } : {}),
+      ...(Number.isFinite(f.w) ? { w: f.w } : {}),
+      ...(Number.isFinite(f.h) ? { h: f.h } : {}),
+      ...(Number.isFinite(f.duration) ? { duration: f.duration } : {}),
+      bytes: Number(f.bytes ?? 0),
+      sha256: String(f.sha256 ?? ""),
+    }));
+  const dir = typeof json.dir === "string" ? json.dir : files.length ? commonDir(files.map((f) => f.path)) : undefined;
+  return { files, dir };
+}
+
+/** Longest common directory of absolute paths. */
+export function commonDir(paths: string[]): string {
+  const parts = paths.map((p) => p.split("/").slice(0, -1));
+  const first = parts[0] ?? [];
+  let n = first.length;
+  for (const p of parts) {
+    let i = 0;
+    while (i < n && p[i] === first[i]) i++;
+    n = i;
+  }
+  return first.slice(0, n).join("/") || "/";
+}
+
+/** The `files` chat event: file cards (drag out, Reveal, Open in…, Copy). */
+export function filesEvent(files: FileCard[], dir: string | undefined, agent?: string) {
+  return { kind: "files", ...(agent ? { agent } : {}), files, dir: dir ?? commonDir(files.map((f) => f.path)) };
 }
 
 /** `generated 4 images (flux/schnell)` for fal results. */
