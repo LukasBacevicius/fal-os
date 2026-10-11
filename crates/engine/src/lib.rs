@@ -79,6 +79,9 @@ pub struct NodeDesc {
     /// Maximum corner radius in screen pixels.
     pub radius: f32,
     pub hidden: bool,
+    /// A text raster (note / text node): never takes a [`Tier::Hires`] slot; once it is big
+    /// on screen the page draws crisp DOM text over it.
+    pub text: bool,
     /// Draw as a generating tile: sparse drifting square dots over `color` (one shader effect,
     /// no CPU work per frame).
     pub generating: Option<GenTile>,
@@ -107,6 +110,7 @@ impl Default for NodeDesc {
             aspect: 0.0,
             radius: 6.0,
             hidden: false,
+            text: false,
             generating: None,
         }
     }
@@ -1337,7 +1341,7 @@ impl Renderer {
         // Hires: the biggest external images on screen (`wanted` is sorted biggest first).
         let hires: Vec<Handle> = wanted
             .iter()
-            .filter(|(h, px)| *px >= self.budgets.hires_min_px && self.state(*h).is_some_and(|s| s.desc.content == Content::External))
+            .filter(|(h, px)| *px >= self.budgets.hires_min_px && self.state(*h).is_some_and(|s| s.desc.content == Content::External && !s.desc.text))
             .take(self.hires.slot_node.len())
             .map(|w| w.0)
             .collect();

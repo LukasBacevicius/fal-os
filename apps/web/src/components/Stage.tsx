@@ -13,6 +13,7 @@ import { addContext } from '../controller';
 import { TextLayer, createNote, editNode } from './TextLayer';
 import { installKeys, pointer } from '../keys';
 import { theme } from '../theme';
+import { ProjectHeader } from './Projects';
 
 /** The local user. The host suffixes the actor id if several browsers connect. */
 const ME = { id: 'you', name: 'you' };
@@ -45,6 +46,7 @@ export function Stage() {
   const error = useStore((s) => s.error);
   const loading = useStore((s) => s.loading);
   const empty = useStore((s) => s.nodes.length === 0);
+  const layers = useStore((s) => s.outlineOpen ?? s.nodes.length > 0);
 
   // Create the app once.
   useEffect(() => {
@@ -264,6 +266,7 @@ export function Stage() {
       {dragging && <div className="drop-hint">drop to import</div>}
       <ActivityBars />
       <StatusBar />
+      {!layers && <ProjectHeader floating />}
     </div>
   );
 }

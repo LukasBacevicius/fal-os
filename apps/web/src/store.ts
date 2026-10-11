@@ -31,8 +31,15 @@ export interface State {
   chatOpen: boolean;
   /** Left layers panel; null = automatic (shown when the canvas has nodes). */
   outlineOpen: boolean | null;
-  /** Modal overlay: command palette, the shortcut list or "connect your agent". */
-  overlay: 'palette' | 'help' | 'connect' | null;
+  /** Modal overlay: command palette, the shortcut list, "connect your agent" or the project
+   *  picker (⌘O). */
+  overlay: 'palette' | 'help' | 'connect' | 'projects' | null;
+  /** Projects from the host's `/workspace` socket (newest first). */
+  projects: import('./projects').ProjectInfo[];
+  /** The open project; null = a host without `/workspace` (single canvas `main`). */
+  project: string | null;
+  /** `/workspace`: unknown until it answers or fails; `unavailable` = older host. */
+  workspace: 'unknown' | 'connected' | 'unavailable';
   /** Agent activity from the host (`activity` events), newest last; expires after 30 s. */
   activity: import('./activity').ActivityEntry[];
   /** Static outlines instead of sweeps and pulses (persisted; defaults to the OS setting). */
@@ -90,6 +97,9 @@ let state: State = {
     }
   })(),
   overlay: null,
+  projects: [],
+  project: null,
+  workspace: 'unknown',
   activity: [],
   reduceMotion: (() => {
     try {

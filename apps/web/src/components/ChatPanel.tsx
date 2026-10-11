@@ -2,8 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { getState, setState, useStore } from '../store';
 import { hostSync } from '../sync';
 import { attachFiles } from '../controller';
-import { addChips, chatColor, chatTitle, groupTurns, isExternal, slug, transcript, type Chip } from '../chat';
-import { DRIVERS, sendChatMessage, setDriver } from '../chatActions';
+import { addChips, agentLine, chatColor, chatTitle, groupTurns, isExternal, slug, transcript, type Chip, type Transcript } from '../chat';
+import { DRIVERS, sendChatMessage, setDriver, steerQueued, steerText } from '../chatActions';
+import { toast } from '../store';
 import { Chips } from './Chips';
 import { ChatHistory, ChatTabs, DeleteConfirm } from './ChatTabs';
 import { bar, Row, selectBatch, TurnView } from './Transcript';
@@ -20,9 +21,14 @@ function mention(text: string, caret: number): { start: number; q: string; kind:
 const NODE_MIME = 'application/x-falos-node';
 
 /** The composer: chips above a `>` textarea. Enter sends (queued by the host while the chat
- *  runs), ⇧Enter newline, Esc stops / leaves, ⌫ on empty removes the last chip, `@` completes
- *  nodes and `#` chats; drop or paste images and files (imported to the canvas, attached). */
-function Composer({ running, readOnly, question }: { running: boolean; readOnly: boolean; question: string[] | null }) {
+ *  runs: injected after the next step), ⌘Enter while running sends now (steers the running
+ *  turn; with an empty input it sends the first queued message), ⇧Enter newline, Esc stops /
+ *  leaves, ⌫ on empty removes the last chip, `@` completes nodes and `#` chats; drop or paste
+ *  images and files (imported to the canvas, attached). In a subagent's view (`agent`) every
+ *  message goes to that subagent. */
+function Composer({ running, readOnly, question, agent, queued }: {
+  running: boolean; readOnly: boolean; question: string[] | null; agent: string | null; queued: { id: string; text: string }[];
+}) {
   const chat = useStore((s) => s.chat);
   const driver = useStore((s) => s.driver);
   const chatDriver = chat.active ? chat.meta[chat.active]?.driver : undefined;
@@ -81,10 +87,28 @@ function Composer({ running, readOnly, question }: { running: boolean; readOnly:
     });
   };
 
+  /** Enter: send (queues while running); in a subagent's view: to that subagent. */
   const send = () => {
     const v = text.trim();
     if (!v || readOnly) return;
-    if (sendChatMessage(v)) setText('');
+    if (agent ? steerText(v, agent) : sendChatMessage(v)) setText('');
+  };
+
+  /** ⌘Enter: while running, deliver now instead of after the next step. */
+  const sendNow = () => {
+    if (readOnly) return;
+    const v = text.trim();
+    if (!running && !agent) return send();
+    if (!v) {
+      if (queued[0] && steerQueued(queued[0].id)) toast('sent now');
+      return;
+    }
+    if (chat.chips.length) {
+      // Steering carries text only: chips go with a normal (queued) send.
+      if (sendChatMessage(v)) setText('');
+      return;
+    }
+    if (steerText(v, agent)) setText('');
   };
 
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -105,7 +129,8 @@ function Composer({ running, readOnly, question }: { running: boolean; readOnly:
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      send();
+      if (e.metaKey || e.ctrlKey) sendNow();
+      else send();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       if (running && chat.active) hostSync()?.stopChat(chat.active);
@@ -118,9 +143,12 @@ function Composer({ running, readOnly, question }: { running: boolean; readOnly:
   const removeChip = (i: number) => setState((s) => ({ chat: { ...s.chat, chips: s.chat.chips.filter((_, j) => j !== i) } }));
   const placeholder = readOnly
     ? 'external agent · read-only'
-    : chat.active
-      ? running ? 'queue a message…' : `message ${chatTitle(chat, chat.active)}…`
-      : 'start a chat…';
+    : agent
+      ? `message ${agent}…`
+      : chat.active
+        ? running ? 'steer: ⏎ queue · ⌘⏎ send now…' : `message ${chatTitle(chat, chat.active)}…`
+        : 'start a chat…';
+  const mod = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'ctrl+';
 
   return (
     <div className="chat-input">
@@ -166,6 +194,45 @@ function Composer({ running, readOnly, question }: { running: boolean; readOnly:
           spellCheck={false}
         />
       </div>
+      {running && !agent && text.trim() && !readOnly && (
+        <div className="steer-hint faint">
+          <button className="link" onMouseDown={(e) => { e.preventDefault(); send(); }}>⏎ queue</button>
+          <span> after the next step · </span>
+          <button className="link" onMouseDown={(e) => { e.preventDefault(); sendNow(); }}>{mod}⏎ send now</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Missing tools/drivers at chat start: one dim line, collapsed; the fix copies on click.
+ *  Nothing when everything is available. */
+function Capabilities({ caps }: { caps: Transcript['caps'] }) {
+  const [open, setOpen] = useState(false);
+  if (!caps?.missing.length) return null;
+  const copy = (fix: string) => {
+    void navigator.clipboard?.writeText(fix).then(() => toast('copied'), () => toast(fix));
+  };
+  const line = (m: { name: string; fix: string }) => (
+    <div key={m.name} className="caps-line" onClick={() => m.fix && copy(m.fix)} title={m.fix ? `${m.name} unavailable — ${m.fix} (click to copy)` : `${m.name} unavailable`}>
+      · {m.name} unavailable
+      {m.fix && (
+        <>
+          {' — '}
+          <button className="link md-code caps-fix">
+            {/^(run|install|set|sign|log)\b/i.test(m.fix) ? m.fix : `run ${m.fix}`}
+          </button>
+        </>
+      )}
+    </div>
+  );
+  if (caps.missing.length === 1) return <div className="caps faint">{line(caps.missing[0])}</div>;
+  return (
+    <div className="caps faint">
+      <div className="caps-line row-line" onClick={() => setOpen(!open)}>
+        {open ? '▾' : '▸'} {caps.missing.length} unavailable: {caps.missing.map((m) => m.name).join(', ')}
+      </div>
+      {open && <div className="caps-body">{caps.missing.map(line)}</div>}
     </div>
   );
 }
@@ -254,12 +321,19 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
         <ChatHistory />
       ) : (
         <>
-          {subView && (
-            <div className="sub-head">
-              <button className="link dim" onClick={() => setState({ subView: null })}>← main chat</button>
-              <span><span style={{ color }}>●</span> {subView}</span>
-            </div>
-          )}
+          {subView && (() => {
+            const a = main.agents[subView];
+            const line = a ? agentLine(subView, a.role, a.status) : { role: '', status: '' };
+            const ended = a?.state === 'done' || a?.state === 'failed';
+            const status = ended ? `${a!.state}${line.status ? ` · ${line.status}` : ''}` : line.status || line.role;
+            return (
+              <div className="sub-head">
+                <button className="link dim" onClick={() => setState({ subView: null })}>← main chat</button>
+                <span className="sub-name"><span style={{ color }}>{a?.state === 'failed' ? '✕' : ended ? '✓' : '●'}</span> {subView}</span>
+                {status && <span className="dim sub-status" title={status}>{status}</span>}
+              </div>
+            );
+          })()}
           <div
             className="chat-log"
             ref={log}
@@ -277,8 +351,9 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
                 or type below · drop images here to attach
               </div>
             )}
+            {!subView && <Capabilities caps={main.caps} />}
             {subView
-              ? <div className="sub-log">{t.items.map((it) => <Row key={it.key} item={it} ids={ids} chat={chat.active!} kindOf={kindOf} />)}</div>
+              ? <div className="sub-log">{t.items.map((it) => <Row key={it.key} item={it.type === 'user' ? { ...it, to: undefined } : it} ids={ids} chat={chat.active!} kindOf={kindOf} />)}</div>
               : turns.map((tn, i) => (
                   <TurnView key={tn.key} turn={tn} live={t.running && i === turns.length - 1} ids={ids} chat={chat.active!} kindOf={kindOf} />
                 ))}
@@ -316,7 +391,8 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
               ))}
               {main.swarm.map((a) => (
                 <div key={a.agent} className="swarm-line" onClick={() => setState({ subView: a.agent })} title="open this agent's transcript">
-                  <span style={{ color }}>●</span> <span>{a.agent.padEnd(12)}</span> <span className="dim">{a.status || a.role}</span>
+                  <span style={{ color }}>●</span> <span>{a.agent.padEnd(12)}</span>{' '}
+                  <span className="dim swarm-status">{(() => { const l = agentLine(a.agent, a.role, a.status); return l.status || l.role; })()}</span>
                   {a.tools > 0 && <span className="faint">  {a.tools}</span>}
                 </div>
               ))}
@@ -325,8 +401,27 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
           {main.queued.length > 0 && chat.active && (
             <div className="queued">
               {main.queued.map((q) => (
-                <div key={q.id} className="queued-line">
+                <div
+                  key={q.id}
+                  className="queued-line"
+                  tabIndex={0}
+                  title={`queued: delivered after the next step · ${navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'ctrl+'}⏎ send now`}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      steerQueued(q.id);
+                    } else if (e.key === 'Backspace' || e.key === 'Delete') {
+                      e.preventDefault();
+                      hostSync()?.unqueue(chat.active!, q.id);
+                    }
+                  }}
+                >
                   <span className="faint">queued:</span> <span className="queued-text">{q.text}</span>
+                  {main.running && (
+                    <button className="link dim" title="deliver to the running turn now (⌘⏎)" onClick={() => steerQueued(q.id)}>
+                      [send now]
+                    </button>
+                  )}
                   <button
                     className="link faint"
                     title="edit (moves it back into the input)"
@@ -344,7 +439,13 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
               ))}
             </div>
           )}
-          <Composer running={main.running} readOnly={readOnly} question={main.question?.options.length ? main.question.options : null} />
+          <Composer
+            running={main.running}
+            readOnly={readOnly}
+            question={main.question?.options.length ? main.question.options : null}
+            agent={subView && main.agents[subView] && !['done', 'failed'].includes(main.agents[subView].state) ? subView : null}
+            queued={main.queued}
+          />
         </>
       )}
       {(dropping || dragToChat) && <div className="chat-drop faint">drop to attach</div>}

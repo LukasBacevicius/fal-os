@@ -6,6 +6,7 @@ import { Help, Palette } from './components/Palette';
 import { Layers } from './components/Layers';
 import { ConnectModal } from './components/ConnectModal';
 import { ActivitySync } from './components/ActivityBars';
+import { ProjectPicker } from './components/Projects';
 
 function stored(key: string, fallback: number) {
   try {
@@ -43,6 +44,7 @@ export function App() {
       {overlay === 'palette' && <Palette />}
       {overlay === 'help' && <Help />}
       {overlay === 'connect' && <ConnectModal />}
+      {overlay === 'projects' && <ProjectPicker />}
       <ActivitySync />
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>

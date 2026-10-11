@@ -9,7 +9,8 @@ import { discoverHost, explicitHost, type HostInfo } from './host';
 import { getState, setState, toast } from './store';
 import type { CanvasApp } from './wasm';
 import type { NodeView, Presence } from './types';
-import { applyEvent, applyHistory, applyList, removeChat, selectChat, type Chip } from './chat';
+import { applyEvent, applyHistory, applyList, emptyChat, removeChat, selectChat, type ChatState, type Chip } from './chat';
+import { bootProject, loadScene, rememberProject, saveCamera, touchProject } from './projects';
 import { onActivity, onActivityClear } from './activity';
 
 /** A send that gets no chat event back within this time means no agent runtime is attached. */
@@ -84,10 +85,15 @@ export class HostSync {
     private app: CanvasApp,
     private host: HostInfo,
     private canvas: string,
-    private actor: { id: string; name: string },
+    readonly actor: { id: string; name: string },
+    /** The project (`/sync/<project>`, assets `?project=`); null = an older host's single
+     *  canvas (`/sync/<canvas>`). */
+    readonly project: string | null = null,
   ) {}
 
   get info() { return this.host; }
+  /** Key for per-project memory (camera, caches). */
+  get key() { return this.project ?? this.canvas; }
   get connected() { return this.ws?.readyState === WebSocket.OPEN && this.bootstrapped; }
 
   start() {
@@ -116,7 +122,7 @@ export class HostSync {
     if (this.closed) return;
     setState({ conn: this.bootstrapped ? 'reconnecting' : 'connecting' });
     const q = new URLSearchParams({ token: this.host.token, actor: this.actor.id, name: this.actor.name });
-    const ws = new WebSocket(`${this.base('ws')}/sync/${encodeURIComponent(this.canvas)}?${q}`);
+    const ws = new WebSocket(`${this.base('ws')}/sync/${encodeURIComponent(this.project ?? this.canvas)}?${q}`);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
     let gotSnapshot = false;
@@ -155,15 +161,16 @@ export class HostSync {
   private onSnapshot(bytes: Uint8Array) {
     try {
       if (!this.bootstrapped) {
-        // First contact: the host's canvas replaces whatever was local.
-        this.app.loadSnapshot(bytes, true);
+        // First contact: the host's canvas replaces whatever was local. The project's last
+        // camera comes back; a canvas opened for the first time fits its content.
+        loadScene(this.app, bytes, this.key);
         this.bootstrapped = true;
       } else {
         // Resync after a reconnect: merge (CRDT), then offline edits flow out.
         this.app.importUpdates(bytes);
       }
       this.retry = 0;
-      setState({ conn: 'connected', canvasName: this.app.canvasName() });
+      setState({ conn: 'connected', canvasName: this.app.canvasName(), camera: this.app.camera() });
       this.app.tick();
       this.syncAssets(getState().nodes);
     } catch (e) {
@@ -267,6 +274,21 @@ export class HostSync {
     return true;
   }
 
+  /** Steering: delivers a message to the running turn now (`id` = a queued message, or new
+   *  `text`), optionally to one subagent. */
+  steerChat(chat: string, m: { id?: string; text?: string; agent?: string | null }): boolean {
+    const msg: Record<string, unknown> = { type: 'chat.steer', chat };
+    if (m.id) msg.id = m.id;
+    if (m.text) msg.text = m.text;
+    if (m.agent) msg.agent = m.agent;
+    if (!this.sendJson(msg)) return false;
+    if (m.text) {
+      const at = Date.now();
+      setState((s) => ({ chat: { ...s.chat, pending: { text: m.text!, context: [], at, chat } } }));
+    }
+    return true;
+  }
+
   stopChat(chat: string) {
     this.sendJson({ type: 'chat.stop', chat });
   }
@@ -347,7 +369,8 @@ export class HostSync {
     for (const s of others) {
       const c = s.presence.cursor;
       // Only agents get cursors (UI-SPEC: real agent sessions with recent activity).
-      if (!c || s.kind !== 'agent' || (s.presence.canvas && s.presence.canvas !== this.canvas)) continue;
+      // Per-project sockets only relay their own project's sessions.
+      if (!c || s.kind !== 'agent' || (!this.project && s.presence.canvas && s.presence.canvas !== this.canvas)) continue;
       const cur = this.cursors.get(s.id);
       // A cursor first seen on (re)connect is as old as the session's last activity.
       const age = s.id === changed ? 0 : Math.max(0, Date.now() - (s.presence.last_activity || 0));
@@ -430,7 +453,11 @@ export class HostSync {
 
   private assetUrl(id: string, withToken = false) {
     const hex = id.replace(/^sha256:/, '');
-    return `${this.base('http')}/assets/${hex}${withToken ? `?token=${encodeURIComponent(this.host.token)}` : ''}`;
+    const q = new URLSearchParams();
+    if (this.project) q.set('project', this.project);
+    if (withToken) q.set('token', this.host.token);
+    const qs = q.toString();
+    return `${this.base('http')}/assets/${hex}${qs ? `?${qs}` : ''}`;
   }
 
   private auth() { return { Authorization: `Bearer ${this.host.token}` }; }
@@ -495,7 +522,15 @@ export class HostSync {
 let current: HostSync | null = null;
 export const hostSync = () => current;
 
-/** Connects the canvas to the host if one is found. Returns whether a host was found. */
+function startSync(s: HostSync) {
+  current = s;
+  if (import.meta.env.DEV) Object.assign(window as any, { falosSync: s, falosSwitch: switchProject }); // debugging
+  s.start();
+}
+
+/** Connects the canvas to the host if one is found: the project from `/workspace` (URL,
+ *  last used or most recent), else the host's single canvas. Returns whether a host was
+ *  found. */
 export async function connectHost(app: CanvasApp, canvas: string, actor: { id: string; name: string }): Promise<boolean> {
   const host = await discoverHost();
   if (!host) {
@@ -503,9 +538,73 @@ export async function connectHost(app: CanvasApp, canvas: string, actor: { id: s
     return false;
   }
   current?.stop();
-  current = new HostSync(app, host, canvas, actor);
-  if (import.meta.env.DEV) (window as any).falosSync = current; // debugging
-  setState({ hostAddr: host.addr });
-  current.start();
+  setState({ hostAddr: host.addr, conn: 'connecting' });
+  const project = await bootProject(host);
+  setState({ project });
+  if (project) {
+    rememberProject(project);
+    touchProject(project);
+  }
+  startSync(new HostSync(app, host, canvas, actor, project));
+  return true;
+}
+
+/** In-memory per-project caches so switching back is instant: the last canvas snapshot and
+ *  chat state (the host's snapshot and chat history replace them a moment later). */
+const snapshots = new Map<string, Uint8Array>();
+const chatCache = new Map<string, ChatState>();
+
+/** Swaps the open project: same GPU surface and app, new scene + chats + socket. The new
+ *  project's last camera comes back (or it fits its content the first time). */
+export function switchProject(project: string): boolean {
+  const s = getState();
+  const app = s.app;
+  const prev = current;
+  if (!app || !prev) return false;
+  if (prev.project === project) return true;
+  if (prev.project) {
+    saveCamera(prev.key, app.camera() as { x: number; y: number; zoom: number });
+    try {
+      snapshots.set(prev.key, app.exportSnapshot());
+    } catch {
+      /* nothing to cache */
+    }
+    chatCache.set(prev.key, s.chat);
+  }
+  const host = prev.info;
+  prev.stop();
+  current = null;
+  app.setSelection([]);
+  app.setPresence([]);
+  app.setClaims([]);
+  app.setHighlight([]);
+  const cached = snapshots.get(project);
+  if (cached) {
+    try {
+      loadScene(app, cached, project);
+    } catch (e) {
+      console.warn('cached snapshot failed', e);
+    }
+  }
+  setState((st) => ({
+    project,
+    chat: chatCache.get(project) ?? { ...emptyChat(), tabOrder: st.chat.tabOrder },
+    chatView: 'chat',
+    subView: null,
+    selection: [],
+    editing: null,
+    promptOpen: false,
+    confirmDelete: null,
+    sessions: [],
+    claims: [],
+    jobs: {},
+    activity: [],
+    presence: [],
+    conn: 'connecting',
+    camera: app.camera(),
+  }));
+  rememberProject(project);
+  touchProject(project);
+  startSync(new HostSync(app, host, project, prev.actor, project));
   return true;
 }

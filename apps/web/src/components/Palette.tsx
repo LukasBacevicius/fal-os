@@ -8,6 +8,7 @@ import { focusNode, addSelectionToChat } from '../controller';
 import { cycleSelection, duplicate, frameSelection, groupIntoFrame, ungroup, zoomBy } from '../actions';
 import { createNote } from './TextLayer';
 import { focusChat, newChat, SHORTCUTS, toggleChat, toggleOutline } from '../keys';
+import { byRecent, openProject } from '../projects';
 
 interface Entry { label: string; hint: string; run: () => void }
 
@@ -34,6 +35,8 @@ function actions(): Entry[] {
   };
   return [
     { label: 'new chat', hint: '⌘N', run: newChat },
+    { label: 'switch project…', hint: '⌘O', run: () => setState({ overlay: 'projects' }) },
+    { label: 'new project…', hint: 'project', run: () => setState({ overlay: 'projects' }) },
     { label: 'connect agent (Claude Code, Codex, Cursor, …)', hint: 'mcp', run: () => setState({ overlay: 'connect' }) },
     { label: 'ask about the selection', hint: '/', run: openPrompt },
     { label: 'all chats (history)', hint: '⌘Y', run: toggleHistory },
@@ -65,6 +68,8 @@ function actions(): Entry[] {
 export function Palette() {
   const nodes = useStore((s) => s.nodes);
   const chat = useStore((s) => s.chat);
+  const projects = useStore((s) => s.projects);
+  const project = useStore((s) => s.project);
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -73,6 +78,7 @@ export function Palette() {
   const entries = useMemo(() => {
     const all: Entry[] = [
       ...actions(),
+      ...byRecent(projects).map((p) => ({ label: `${p.name}${p.fal_project ? ' · fal' : ''}`, hint: p.id === project ? 'project · open' : 'project', run: () => openProject(p.id) })),
       ...[...chat.order].reverse().map((id) => ({ label: `#${chatTitle(chat, id)}`, hint: 'chat', run: () => openChat(id) })),
       ...nodes
         .filter((n) => n.kind !== 'connector')
@@ -85,7 +91,7 @@ export function Palette() {
       .sort((a, b) => b.s - a.s)
       .slice(0, 50)
       .map((x) => x.e);
-  }, [q, nodes, chat]);
+  }, [q, nodes, chat, projects, project]);
 
   const close = () => setState({ overlay: null });
   const run = (e?: Entry) => {

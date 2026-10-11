@@ -182,7 +182,75 @@ async function urlSource(url) {
   return imageSource(await r.blob());
 }
 
+// Note / text: the text laid out like the page's DOM (.note-text: 10 px padding, mono at the
+// node's font size, line-height 1.45, pre-wrap, break anywhere), in world units × `k`.
+function noteLines(g, spec, k) {
+  const fs = (Number(spec.fs) || 12.5) * k, lh = fs * 1.45, pad = 10 * k;
+  const maxW = Math.max(fs, Number(spec.w) * k - pad * 2), maxH = Number(spec.h) * k - pad;
+  g.font = `400 ${fs}px ${MONO}`;
+  const text = spec.body || (spec.kind === 'text' ? spec.title || '' : '');
+  const lines = [];
+  const full = () => pad + (lines.length + 1) * lh > maxH + lh * 0.6;
+  for (const para of String(text).split('\n')) {
+    let line = '';
+    // Break opportunities like the browser's: whitespace, and after a hyphen.
+    for (const tok of para.split(/(\s+)|(?<=-)/)) {
+      if (!tok) continue;
+      if (g.measureText(line + tok).width <= maxW) { line += tok; continue; }
+      if (line.trim()) { lines.push(line); if (full()) return { lines, fs, lh, pad }; line = ''; }
+      if (/^\s+$/.test(tok)) continue;
+      let t = tok;
+      while (g.measureText(t).width > maxW) {
+        let n = t.length;
+        while (n > 1 && g.measureText(t.slice(0, n)).width > maxW) n--;
+        lines.push(t.slice(0, n)); if (full()) return { lines, fs, lh, pad };
+        t = t.slice(n);
+      }
+      line = t;
+    }
+    lines.push(line);
+    if (full()) break;
+  }
+  return { lines, fs, lh, pad };
+}
+
+async function noteSource(spec) {
+  const th = theme(spec);
+  const w = Math.max(1, Number(spec.w) || 240), h = Math.max(1, Number(spec.h) || 120);
+  const k = Math.min(2, MAX_SOURCE_PX / w, MAX_SOURCE_PX / h);
+  const W = Math.max(1, Math.round(w * k)), H = Math.max(1, Math.round(h * k));
+  const c = canvas(W, H), g = c.getContext('2d');
+  g.fillStyle = th.panel; g.fillRect(0, 0, W, H);
+  const { lines, fs, lh, pad } = noteLines(g, spec, k);
+  g.fillStyle = spec.body ? th.text : th.faint; g.textBaseline = 'alphabetic';
+  // Baseline inside a CSS line box: half-leading + the font's ascent (~0.8 em for mono).
+  lines.forEach((l, i) => g.fillText(l, pad, pad + i * lh + (lh - fs) / 2 + fs * 0.8));
+  return { bitmap: await createImageBitmap(c), width: 0, height: 0, duration: 0 };
+}
+
+// Tiny on screen (the 32 px tier): "greeked" text, one thin dim bar per line.
+let measure = null;
+async function greekTile(spec, size) {
+  const th = theme(spec);
+  const w = Math.max(1, Number(spec.w) || 240), h = Math.max(1, Number(spec.h) || 120);
+  measure ??= canvas(8, 8).getContext('2d');
+  const { lines, fs, lh, pad } = noteLines(measure, spec, 1);
+  const c = canvas(size, size), g = c.getContext('2d');
+  g.fillStyle = th.panel; g.fillRect(0, 0, size, size);
+  const sx = size / w, sy = size / h;
+  g.fillStyle = spec.body ? th.dim : th.faint;
+  g.globalAlpha = 0.7;
+  lines.forEach((l, i) => {
+    const lw = measure.measureText(l.trimEnd()).width;
+    if (lw <= 0) return;
+    const y = (pad + i * lh + lh * 0.5) * sy, bh = Math.max(0.6, fs * 0.42 * sy);
+    g.fillRect(pad * sx, y - bh / 2, Math.max(0.6, lw * sx), bh);
+  });
+  return await createImageBitmap(c);
+}
+
 function makeSource(spec) {
+  if (spec.type === 'note') return noteSource(spec);
   if (spec.type === 'blob') return imageSource(spec.blob);
   if (spec.type === 'url') return urlSource(spec.url);
   if (spec.kind === 'generation') return generationSource(spec);
@@ -206,6 +274,7 @@ function source(key, spec) {
 
 // A square `size` tile of the source (content squeezed; the engine restores the aspect).
 export async function make_tile(key, spec, size) {
+  if (spec.type === 'note' && size <= 32) return { tile: await greekTile(spec, size), width: 0, height: 0, duration: 0 };
   const s = await source(key, spec);
   const tile = await resize(s.bitmap, size, size);
   return { tile, width: s.width, height: s.height, duration: s.duration };
@@ -320,8 +389,8 @@ pub enum Content {
     Card,
     /// A generation in flight: the engine's generating tile (no pixels).
     Generating,
-    /// note / text: the engine draws the box; the page lays out the text as crisp, editable
-    /// DOM over it.
+    /// note / text: the engine draws the box with a raster of the text (greeked lines when
+    /// tiny); once it is readable the page fades in crisp, editable DOM text over it.
     TextBox,
     None,
 }
@@ -399,7 +468,23 @@ pub fn source_spec(n: &SceneNode, media: &MediaStore, light: bool) -> Option<(St
             let h = fnv(&format!("{title}\u{1}{body}\u{1}{:.2}\u{1}{:.0}\u{1}{theme}\u{1}{}\u{1}{}", aspect, n.rect[2], n.card, asset.is_some()));
             format!("c:{}:{h:x}", n.id)
         }
-        Content::Generating | Content::TextBox | Content::None => return None,
+        Content::TextBox => {
+            let theme = if light { "light" } else { "dark" };
+            let body = n.text.clone().unwrap_or_default();
+            let fs = n.card.split('\u{1}').nth(1).and_then(|v| v.parse::<f32>().ok()).filter(|v| *v > 0.0).unwrap_or(12.5);
+            set(&o, "type", "note");
+            set(&o, "kind", n.kind.to_string());
+            set(&o, "title", n.name.clone());
+            set(&o, "body", body.clone());
+            set(&o, "w", n.rect[2]);
+            set(&o, "h", n.rect[3]);
+            set(&o, "fs", fs);
+            set(&o, "theme", theme);
+            // Layout depends on the box size (wrapping, clipping): it is part of the key.
+            let h = fnv(&format!("{}\u{1}{body}\u{1}{:.0}\u{1}{:.0}\u{1}{fs}\u{1}{theme}", n.name, n.rect[2], n.rect[3]));
+            format!("t:{}:{h:x}", n.id)
+        }
+        Content::Generating | Content::None => return None,
     };
     Some((key, o.into()))
 }

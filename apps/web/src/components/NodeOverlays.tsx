@@ -34,6 +34,7 @@ export function NodeOverlays() {
   const promptOpen = useStore((s) => s.promptOpen);
   const editing = useStore((s) => s.editing);
   const camera = useStore((s) => s.camera); // re-position on camera changes
+  const activity = useStore((s) => s.activity);
   const rects = useMemo(() => worldRects(nodes), [nodes]);
   if (!app) return null;
   const screen = (r: Rect) => {
@@ -55,17 +56,50 @@ export function NodeOverlays() {
     selBox = screen([x0, y0, x1 - x0, y1 - y0]);
   }
 
+  // Frame titles, decluttered (brilliant-canvas-interaction.md): frames too small on screen
+  // lose their title, overlapping titles keep the bigger frame's, and the hovered/selected
+  // frame always keeps its own. DOM above the canvas, so titles never sit under content.
+  const labels: { n: NodeView; b: ReturnType<typeof screen>; pin: boolean }[] = [];
+  {
+    const cands = nodes
+      .filter((n) => n.kind === 'frame' && n.name)
+      .map((n) => ({ n, b: screen(rects.get(n.id)!), pin: n.id === hover || selection.includes(n.id) }))
+      .filter((c) => visible(c.b) && (c.pin || c.b.width >= 40))
+      .sort((a, b) => Number(b.pin) - Number(a.pin) || b.b.width * b.b.height - a.b.width * a.b.height);
+    const placed: [number, number, number, number][] = [];
+    for (const c of cands) {
+      // A frame running off the left edge keeps its title at the edge (sticky).
+      const left = c.b.left < 0 ? 4 : c.b.left;
+      if (c.b.left + c.b.width - left < 40 && !c.pin) continue;
+      const w = Math.min(c.b.left + c.b.width - left, c.n.name.length * 6.7 + 4);
+      const box: [number, number, number, number] = [left, c.b.top - 16, w, 14];
+      const hit = placed.some((p) => p[0] < box[0] + box[2] && box[0] < p[0] + p[2] && p[1] < box[1] + box[3] && box[1] < p[1] + p[3]);
+      if (hit && !c.pin) continue;
+      placed.push(box);
+      labels.push({ n: c.n, b: { ...c.b, left, width: c.b.left + c.b.width - left }, pin: c.pin });
+    }
+  }
+  // An empty frame an agent is working on (claimed, or touched in the last 30 s): a render or
+  // import is on its way.
+  const pending = new Set<string>([...claims.map((c) => c.node), ...activity.filter((a) => a.op !== 'read').flatMap((a) => a.nodes)]);
+
   return (
     <div className="node-overlays">
+      {labels.map(({ n, b, pin }) => (
+        <div key={`f-${n.id}`} className="frame-label" style={{ transform: `translate(${b.left}px, ${b.top - 16}px)`, maxWidth: pin ? Math.max(b.width, 240) : b.width }}>
+          {n.name}
+        </div>
+      ))}
       {nodes.map((n) => {
         const r = rects.get(n.id);
         if (!r) return null;
-        if (n.kind === 'frame' && n.name) {
+        if (n.kind === 'frame') {
+          if (n.children.length || !pending.has(n.id)) return null;
           const b = screen(r);
-          if (!visible(b) || b.width < 40) return null;
+          if (!visible(b) || b.width < 80 || b.height < 30) return null;
           return (
-            <div key={`f-${n.id}`} className="frame-label" style={{ transform: `translate(${b.left}px, ${b.top - 16}px)`, maxWidth: b.width }}>
-              {n.name}
+            <div key={`r-${n.id}`} className="frame-pending faint" style={{ transform: `translate(${b.left}px, ${b.top}px)`, width: b.width, height: b.height }}>
+              rendering…
             </div>
           );
         }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  actLabel, addChips, applyEvent, applyHistory, applyList, chipFromPick, chipLabel, cleanError, emptyChat, groupTurns, removeChat,
+  actLabel, addChips, agentLine, applyEvent, applyHistory, applyList, chipFromPick, chipLabel, cleanError, emptyChat, groupTurns, removeChat,
   tabs, transcript, workSummary, type ChatEvent, type ChatState,
 } from './chat';
 import { timecode } from './format';
@@ -136,6 +136,47 @@ describe('chat', () => {
     expect(chipFromPick({ nodeId: 'v', region: { kind: 'point', x: 0.5, y: 0.5 }, time: 1.5 })).toEqual({ kind: 'frame', node: 'v', t: 1.5 });
     expect(chipFromPick({ nodeId: 'i', region: { kind: 'box', x: 0.1, y: 0.2, w: 0.3, h: 0.4 }, time: null })).toEqual({ kind: 'region', node: 'i', box: [0.1, 0.2, 0.3, 0.4] });
     expect(addChips([{ kind: 'node', node: 'a' }], [{ kind: 'node', node: 'a' }, { kind: 'node', node: 'b' }])).toHaveLength(2);
+  });
+
+  it('dedupes verbs and agent names in activity lines', () => {
+    const act = (name: string, summaries: string[]): any => ({
+      type: 'act', key: '0', agent: 'director', verb: name === 'Bash' ? 'bash' : name === 'codex' ? 'codex' : name === 'generate' ? 'gen' : 'file',
+      calls: summaries.map((summary, i) => ({ id: `${i}`, name, summary, state: 'done', nodes: [], cost: 0 })),
+    });
+    const k = () => undefined;
+    expect(actLabel(act('Bash', ['ran Build a contact sheet']), k)).toBe('ran Build a contact sheet');
+    expect(actLabel(act('Bash', ['npm test']), k)).toBe('ran npm test');
+    expect(actLabel(act('Write', ['wrote FILM_SPEC.md']), k)).toBe('wrote FILM_SPEC.md');
+    const mixed = act('Write', ['wrote FILM_SPEC.md', 'edited FILM_SPEC.md', 'edited src/a.ts']);
+    mixed.calls[1].name = 'Edit';
+    mixed.calls[2].name = 'Edit';
+    expect(actLabel(mixed, k)).toBe('wrote FILM_SPEC.md, edited a.ts');
+    expect(actLabel(act('Edit', ['Edit /x/y/z.md']), k)).toBe('edited z.md');
+    expect(actLabel(act('codex', ['codex: fix the build']), k)).toBe('codex: fix the build');
+    expect(actLabel(act('generate', ['generated 4 images (flux/schnell)']), k)).toBe('generated 4 images (flux/schnell)');
+    expect(agentLine('motion', 'motion', 'motion · Build Remotion launch film')).toEqual({ role: '', status: 'Build Remotion launch film' });
+    expect(agentLine('generator-2', 'fal generator', 'hero shots')).toEqual({ role: 'fal generator', status: 'hero shots' });
+  });
+
+  it('steered and subagent messages, capabilities', () => {
+    const s = run([
+      { kind: 'capabilities', available: ['opus'], missing: [{ name: 'codex', fix: 'npx @openai/codex login' }] },
+      { kind: 'user', text: 'make a film' },
+      { kind: 'status', state: 'running' },
+      { kind: 'agent', agent: 'motion', role: 'motion', parent: 'director', state: 'started', status: 'writing the composition' },
+      { kind: 'queued', id: 'q1', text: 'use red' },
+      { kind: 'dequeued', id: 'q1', reason: 'steer' },
+      { kind: 'user', text: 'use red', queued: 'q1' },
+      { kind: 'user', text: 'slower cuts', agent: 'motion', steer: true },
+    ]);
+    const t = transcript(s.threads.c1);
+    expect(t.caps?.missing).toEqual([{ name: 'codex', fix: 'npx @openai/codex login' }]);
+    expect(t.queued).toEqual([]);
+    const users = t.items.filter((i) => i.type === 'user') as any[];
+    expect(users.map((u) => [u.text, u.delivered, u.to])).toEqual([['make a film', undefined, undefined], ['use red', 'steer', undefined], ['slower cuts', 'steer', 'motion']]);
+    const sub = transcript(s.threads.c1, 'motion');
+    expect(sub.items.filter((i) => i.type === 'user').map((i: any) => i.text)).toEqual(['slower cuts']);
+    expect(t.agents.motion.status).toBe('writing the composition');
   });
 
   it('timecode', () => {

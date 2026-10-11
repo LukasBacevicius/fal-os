@@ -89,3 +89,31 @@ export function setDriver(d?: (typeof DRIVERS)[number]) {
   }
   setState({ driver: next });
 }
+
+/** Steering: deliver `text` to the running turn of the active chat now (⌘⏎), or to one of its
+ *  subagents (`agent`, from the subagent view). Returns false (with a toast) when it can't. */
+export function steerText(text: string, agent: string | null = null): boolean {
+  const s = getState();
+  const chat = s.chat.active;
+  const sync = hostSync();
+  if (!chat || !sync || s.conn !== 'connected') {
+    toast('chat needs a fal-os host');
+    return false;
+  }
+  if (isExternal(chat)) {
+    toast('external agents are read-only here');
+    return false;
+  }
+  if (!sync.steerChat(chat, { text, agent })) {
+    toast('not connected to the host');
+    return false;
+  }
+  return true;
+}
+
+/** `[send now]` on a queued message: deliver it to the running turn right away. */
+export function steerQueued(id: string): boolean {
+  const chat = getState().chat.active;
+  if (!chat) return false;
+  return !!hostSync()?.steerChat(chat, { id });
+}
