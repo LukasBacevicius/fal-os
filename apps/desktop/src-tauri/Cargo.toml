@@ -13,7 +13,18 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+# drag-rs: native drag of file URLs out of the window (docs/ASSETS-V1.md §4).
+drag = "2.1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+libc = "0.2"
 
 [features]
 # `cargo build --features custom-protocol` (what `cargo tauri build` does) serves
