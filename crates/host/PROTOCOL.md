@@ -78,7 +78,7 @@ already in use). Two frame kinds:
 {"type":"claims","canvas":"main","claims":[Claim]}            // full list for the canvas
 {"type":"claim_revoked","canvas":"main","node":"881s9r","actor":"codex","by":"lukas"}
 {"type":"annotation_assigned","canvas":"main","annotation":"yflw1y","node":"881s9r","assignee":"codex","by":"lukas"}
-{"type":"job","canvas":"main","node":"b59dlc","model":"fal-ai/flux/dev","status":"queued|running|done|failed","queue_position":3,"error":"…"}
+{"type":"job","canvas":"main","node":"b59dlc","model":"fal-ai/flux/dev"|"op:reframe","status":"queued|running|done|failed","queue_position":3,"error":"…","cost":0.04}
 {"type":"batch","canvas":"main","batch":{"kind":"batch","id":"batch_…","model":"fal-ai/flux/schnell","total":200,"done":37,"failed":0,"running":120,"finished":false,"frame":"b…","nodes":null}}
 {"type":"activity","canvas":"main","session":"s_…","agent":"generator-2","chat":"c_…"|null,"color":"#7393c2","op":"read"|"write"|"edit"|"delete","nodes":["…"],"at":1760000000000}
 {"type":"activity.clear","session":"s_…","nodes":["…"]|null}           // null = everything (finish_working without ids, session end)
@@ -124,6 +124,28 @@ for the connection's canvas; presence events are global.
 (e.g. JSONC with comments), new files 0600. Paths: `~/.claude.json`, `~/.codex/config.toml`,
 `~/.cursor/mcp.json`, `~/.gemini/settings.json`, `~/.config/opencode/opencode.json(c)`.
 Chat frames (`chat.*`) are in CHAT-PROTOCOL.md.
+
+## Asset ops REST (`/api/*`)
+The UI's mirror of the op MCP tools (no `sessionId`): bearer token, `?project=<id>&canvas=<id>`
+(default: the first canvas), actor = the human (`?actor=<id>&name=…`, default the project's
+connected human session, else `human`). Errors are `{"error": "…"}` with 4xx.
+```jsonc
+GET  /api/ops                     → {"ops": [OpSpec]}     // {name, category, engine, inputs: each|all, accepts, output, deterministic, cost_hint?, description, args: JSON schema}
+GET  /api/presets                 → presets/export.json   // {version, naming, presets: [{id, kind, label, w?, h?, …}]}
+POST /api/inspect   {inputs, what: ["probe","contact_sheet","palette","loudness","scenes","compare"]}
+                                  → {"results": [...], "images": [{caption, data: "data:image/jpeg;base64,…"}]}
+POST /api/transform {op, inputs, args, placement?, name?}   → {"run","op","nodes":[placeholder ids],"frame","status":"running"}
+POST /api/compose   {op, inputs|frame, args, placement?, name?}  → same
+POST /api/rerun     {node, overrides?, on?}                 → same (generations: {"nodes","op","status":"queued"})
+POST /api/export    {nodes: [ids] | frame | target:"deliverables", presets, dir?, naming?, reframe?}
+                                  → {"files":[{path,name,node,preset,w,h,bytes,sha256}],"dir","warnings"}
+POST /api/package   {kind: "project"|"deliverables"}       → {"path","bytes","sha256","kind","assets","cost_usd"}
+```
+`inputs`: node ids, asset ids, `"selection"`, a frame id (its media children = a batch, one
+output per input in a grid) or chips (`region` = implicit crop, `frame` = still, `range` = trim).
+Long ops return at once: progress arrives as `job` events (`model: "op:<name>"`, the
+placeholder's `progress` prop), with `cost` (USD) on `done` for fal-backed ops. Outputs are
+written by the `ops` actor; their asset lineage records the requesting actor.
 
 ## Stdio relay
 `falos-host mcp` is a stdio MCP server that relays to the running host's `/mcp` (URL and token

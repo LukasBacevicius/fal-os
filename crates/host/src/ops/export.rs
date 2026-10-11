@@ -612,31 +612,6 @@ pub async fn package(host: &Arc<Host>, actor: &Actor, session: Option<&str>, can
               "assets": manifest["assets"].as_object().map_or(0, |m| m.len()), "cost_usd": manifest["cost_usd"]}))
 }
 
-/// Clonefile copy (APFS; plain copy elsewhere) of a node's / asset's file into
-/// `<project>/.out/` under a human name — for drag-out and file URLs (never hardlinks).
-pub fn materialize(host: &Host, canvas: &str, key: &str, name: Option<&str>) -> Result<PathBuf> {
-    let (asset, nname) = if key.starts_with("sha256:") {
-        (key.to_string(), falos_doc::Asset::short_id(key))
-    } else {
-        let canvas = host.resolve_canvas(canvas)?;
-        let n = host.read(&canvas, |c| c.node(key))?.ok_or_else(|| anyhow!("unknown node `{key}`"))?;
-        (n.asset_id().ok_or_else(|| anyhow!("`{key}` has no asset"))?.to_string(), if n.name.is_empty() { n.id.clone() } else { n.name.clone() })
-    };
-    let src = crate::chat::asset_file(host, &asset).ok_or_else(|| anyhow!("no file for {asset}"))?;
-    let ext = src.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let dir = host.dir().join(".out");
-    std::fs::create_dir_all(&dir)?;
-    let base = slug(name.unwrap_or(&nname));
-    let file = if base.ends_with(&format!(".{ext}")) { base } else { format!("{base}.{ext}") };
-    let dest = dir.join(&file);
-    if dest.exists() && sha256_file(&dest).ok().as_deref() == Some(asset.trim_start_matches("sha256:")) {
-        return Ok(dest);
-    }
-    let dest = free_name(&dir, &file);
-    clone_or_copy(&src, &dest)?;
-    Ok(dest)
-}
-
 /// APFS `clonefile(2)` (copy-on-write, independent inode), falling back to a byte copy.
 pub fn clone_or_copy(src: &Path, dst: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]

@@ -190,7 +190,7 @@ async fn workspace_projects_lifecycle() {
     send(&mut w, json!({"type": "project.touch", "id": "demo"})).await;
     projects_until(&mut w, |p| p[0]["id"] == "demo").await;
 
-    // duplicate copies canvas + assets (hard links), not chats; the copy has no fal project.
+    // duplicate copies canvas + assets (APFS clones, never hard links), not chats; the copy has no fal project.
     let demo_host = env.ws.get("demo").unwrap();
     demo_host.set_fal_project(Some("fp_demo")).unwrap();
     std::fs::create_dir_all(demo_host.dir().join("assets")).unwrap();
@@ -208,6 +208,13 @@ async fn workspace_projects_lifecycle() {
     assert!(d["fal_project"].is_null());
     assert_eq!(d["thumb"], format!("/assets/{hex}?project={dup_id}"));
     assert_eq!(project(&ps, "demo").unwrap()["fal_project"], "fp_demo");
+    {
+        use std::os::unix::fs::MetadataExt;
+        let a = std::fs::metadata(demo_host.dir().join(format!("assets/{hex}.png"))).unwrap();
+        let b = std::fs::metadata(env.ws.get(&dup_id).unwrap().dir().join(format!("assets/{hex}.png"))).unwrap();
+        assert_ne!(a.ino(), b.ino(), "duplicate must not hardlink assets");
+        assert_eq!(b.nlink(), 1);
+    }
     let copy = env.root().join(&dup_id);
     assert!(copy.join(format!("assets/{hex}.png")).exists() && !copy.join("chats").exists());
     let dh = env.ws.get(&dup_id).unwrap();

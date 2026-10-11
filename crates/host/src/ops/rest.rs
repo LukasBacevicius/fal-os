@@ -41,7 +41,6 @@ pub fn routes() -> Router<Arc<Workspace>> {
         .route("/api/rerun", post(rerun))
         .route("/api/export", post(export))
         .route("/api/package", post(package))
-        .route("/api/materialize", post(materialize))
 }
 
 fn err(status: StatusCode, e: impl std::fmt::Display) -> Response {
@@ -206,16 +205,3 @@ async fn package(State(space): State<Arc<Workspace>>, Query(q): Query<ApiQuery>,
     }
 }
 
-async fn materialize(State(space): State<Arc<Workspace>>, Query(q): Query<ApiQuery>, AxJson(b): AxJson<Json>) -> Response {
-    let c = match ctx(&space, &q, &b) {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    let Some(key) = b["node"].as_str().or(b["sha"].as_str()) else {
-        return err(StatusCode::BAD_REQUEST, "node or sha required");
-    };
-    match super::export::materialize(&c.host, &c.canvas, key, b["name"].as_str()) {
-        Ok(p) => ok(json!({"path": p.display().to_string()})),
-        Err(e) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
-    }
-}
