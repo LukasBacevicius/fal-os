@@ -20,10 +20,17 @@ pub async fn get(UrlPath(file): UrlPath<String>, State(space): State<Arc<Workspa
     };
     let mut path = thumbs::path_of(&lib.thumbs_dir, &key, size);
     if !path.is_file() {
-        let made = tokio::time::timeout(std::time::Duration::from_secs(60), lib.ensure_thumb(&key)).await;
-        match made {
-            Ok(Ok(k)) => path = thumbs::path_of(&lib.thumbs_dir, &k, size),
-            Ok(Err(e)) => return (StatusCode::NOT_FOUND, format!("no thumbnail: {e:#}")).into_response(),
+        // Generation keeps going in the background; a slow one (remote video) answers 503 so
+        // the browser's few connections per host aren't held by pending thumbnails.
+        let job = tokio::spawn({
+            let lib = lib.clone();
+            let key = key.clone();
+            async move { lib.ensure_thumb(&key).await }
+        });
+        match tokio::time::timeout(std::time::Duration::from_millis(1500), job).await {
+            Ok(Ok(Ok(k))) => path = thumbs::path_of(&lib.thumbs_dir, &k, size),
+            Ok(Ok(Err(e))) => return (StatusCode::NOT_FOUND, format!("no thumbnail: {e:#}")).into_response(),
+            Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
             Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "2")], "thumbnail still generating").into_response(),
         }
     }

@@ -618,5 +618,6 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .lib-ql-media { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
 .lib-ql-media img, .lib-ql-media video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .lib-ql-audio { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.lib-ql-audio img { width: 100%; max-height: 50vh; object-fit: contain; }
 .lib-ql-info { flex: none; display: flex; flex-direction: column; gap: 2px; }
 .lib-ql-prompt { max-height: 5.5em; overflow: auto; white-space: pre-wrap; }

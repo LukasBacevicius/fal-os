@@ -97,7 +97,8 @@ pub async fn handle(lib: Arc<Library>, msg: Json, tx: UnboundedSender<String>) {
                                 let limit = q.limit.unwrap_or(200).clamp(1, 10_000);
                                 keys.truncate(limit);
                                 let items = l.with_db(|c| query::items(c, &keys, query::scope(&q)))?;
-                                Ok(json!({"type": "library.results", "id": id2, "items": items, "next": Json::Null, "total": total, "partial": false}))
+                                let next = (total > limit).then(|| limit.to_string());
+                                Ok(json!({"type": "library.results", "id": id2, "items": items, "next": next, "total": total, "partial": false}))
                             })
                             .await??;
                             send(merged);

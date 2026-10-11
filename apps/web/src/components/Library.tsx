@@ -70,6 +70,9 @@ const fmtDur = (d: number) => `${Math.floor(d / 60)}:${String(Math.floor(d % 60)
 
 const Tile = memo(function Tile({ it, x, y, w, h, on, cursor, index }: { it: LibItem; x: number; y: number; w: number; h: number; on: boolean; cursor: boolean; index: number }) {
   const [scrub, setScrub] = useState<number | null>(null);
+  // A thumbnail still being generated answers 503: retry a few times.
+  const [retry, setRetry] = useState(0);
+  const thumb = hostUrl(it.thumb) + (retry ? `&r=${retry}` : '');
   const glyph = GLYPH[it.source] ?? '';
   return (
     <div
@@ -93,7 +96,7 @@ const Tile = memo(function Tile({ it, x, y, w, h, on, cursor, index }: { it: Lib
       ) : scrub !== null ? (
         <div className="lib-strip" style={{ backgroundImage: `url("${hostUrl(it.strip)}")`, backgroundPosition: `${((scrub % 4) / 3) * 100}% ${(Math.floor(scrub / 4) / 2) * 100}%` }} />
       ) : (
-        <img src={hostUrl(it.thumb)} alt="" loading="lazy" decoding="async" draggable={false} />
+        <img src={thumb} alt="" loading="lazy" decoding="async" draggable={false} onError={() => retry < 6 && window.setTimeout(() => setRetry((r) => r + 1), 1500 * (retry + 1))} />
       )}
       <span className="lib-badge">
         {glyph}

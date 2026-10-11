@@ -105,7 +105,7 @@ let sentAt = 0;
 function buildQuery(): Record<string, unknown> {
   const { view, search, similar, shown } = st;
   const project = getState().project;
-  const q: Record<string, unknown> = { limit: 10000 };
+  const q: Record<string, unknown> = { limit: FIRST_PAGE };
   const scoped = view !== 'all' && view !== 'fav' && view !== 'shown';
   q.project = scoped && project ? project : '*';
   if (view === 'inputs') q.role = ['input'];
@@ -121,12 +121,19 @@ function buildQuery(): Record<string, unknown> {
   return q;
 }
 
+/** The first page is small so the first screen paints fast; the rest follows at once. */
+const FIRST_PAGE = 300;
+let rest = '';
+let lastQuery: Record<string, unknown> = {};
+
 export function runQuery() {
   if (!getState().library) return;
   const id = `lq${++seq}`;
   latest = id;
+  rest = '';
   sentAt = performance.now();
-  if (workspaceSend({ type: 'library.query', id, query: buildQuery() })) setLib({ loading: true });
+  lastQuery = buildQuery();
+  if (workspaceSend({ type: 'library.query', id, query: lastQuery })) setLib({ loading: true });
 }
 
 let changeTimer = 0;
@@ -136,7 +143,16 @@ setLibraryHandler((m: any) => {
       if (getState().library) runQuery();
       break;
     case 'library.results':
+      if (m.id === rest && rest) {
+        const have = new Set(st.items.map((i) => i.sha));
+        setLib({ items: [...st.items, ...((m.items ?? []) as LibItem[]).filter((i) => !have.has(i.sha))], loading: false });
+        return;
+      }
       if (m.id !== latest) return;
+      if (m.next && !m.partial) {
+        rest = `${m.id}r`;
+        workspaceSend({ type: 'library.query', id: rest, query: { ...lastQuery, cursor: m.next, limit: 10000, semantic: false } });
+      }
       {
         const items = (m.items ?? []) as LibItem[];
         const keep = new Set(items.map((i) => i.sha));
@@ -198,7 +214,6 @@ export function findSimilar(sha: string) {
 export function openLibrary(mode: 'panel' | 'full') {
   const cur = getState().library;
   setState({ library: cur === mode ? null : mode });
-  if (getState().library) runQuery();
 }
 
 // ---- writes ---------------------------------------------------------------------------

@@ -167,22 +167,29 @@ impl Library {
         self.fal.as_ref().ok_or_else(|| anyhow!("fal isn't connected"))
     }
 
-    fn merge_all(&self, items: &[Json], epoch: i64) -> Result<(Vec<String>, usize)> {
+    /// Merge fal assets → (keys in order, how many were known, keys whose row changed).
+    fn merge_all(&self, items: &[Json], epoch: i64) -> Result<(Vec<String>, usize, Vec<String>)> {
         let mut keys = vec![];
+        let mut changed = vec![];
         let mut known = 0;
+        const SIG: &str = "SELECT sha||'|'||coalesce(favorite,'')||'|'||coalesce(prompt,'')||'|'||coalesce(caption,'')||'|'||coalesce(w,'')||'|'||coalesce(h,'')||'|'||coalesce((SELECT group_concat(tag) FROM tags t WHERE t.sha=a.sha),'') FROM assets a WHERE fal_id=?";
         self.with_db(|c| {
             let tx = c.transaction()?;
             for a in items {
-                let had: bool = a["asset_id"].as_str().is_some_and(|id| tx.query_row("SELECT count(*) FROM assets WHERE fal_id=?", [id], |r| r.get::<_, i64>(0)).unwrap_or(0) > 0);
-                known += had as usize;
+                let before: Option<String> = a["asset_id"].as_str().and_then(|id| tx.query_row(SIG, [id], |r| r.get(0)).optional().ok().flatten());
+                known += before.is_some() as usize;
                 if let Some(k) = merge(&tx, a, epoch)? {
+                    let after: Option<String> = a["asset_id"].as_str().and_then(|id| tx.query_row(SIG, [id], |r| r.get(0)).optional().ok().flatten());
+                    if before != after {
+                        changed.push(k.clone());
+                    }
                     keys.push(k);
                 }
             }
             tx.commit()?;
             Ok(())
         })?;
-        Ok((keys, known))
+        Ok((keys, known, changed))
     }
 
     /// One pull round: new assets, then a few pages of the reconcile walk.
@@ -213,8 +220,8 @@ impl Library {
                 p.push(("cursor", c.clone()));
             }
             let (items, next) = api.list(&p).await?;
-            let (keys, known) = self.merge_all(&items, epoch)?;
-            changed.extend(keys);
+            let (_, known, ch) = self.merge_all(&items, epoch)?;
+            changed.extend(ch);
             if known == items.len() || next.is_none() {
                 break;
             }
@@ -228,8 +235,8 @@ impl Library {
                     p.push(("cursor", cur.clone()));
                 }
                 let (items, next) = api.list(&p).await?;
-                let (keys, _) = self.merge_all(&items, epoch)?;
-                changed.extend(keys);
+                let (_, _, ch) = self.merge_all(&items, epoch)?;
+                changed.extend(ch);
                 match next {
                     Some(n) => cur = n,
                     None => {
@@ -276,8 +283,9 @@ impl Library {
         p.push(("limit", "100".into()));
         let (items, _) = api.list(&p).await?;
         let epoch: i64 = self.with_db(|c| Ok(db::meta(c, "fal.epoch").and_then(|e| e.parse().ok()).unwrap_or(0)))?;
-        let (keys, _) = self.merge_all(&items, epoch)?;
+        let (keys, _, ch) = self.merge_all(&items, epoch)?;
         self.thumb_notify.notify_one();
+        self.changed(ch);
         Ok(keys)
     }
 
