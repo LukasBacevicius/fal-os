@@ -248,6 +248,7 @@ export async function runCodexDriver(run: ChatRun) {
   }
   const { Codex } = await import("@openai/codex-sdk");
   const codex = new Codex({
+    ...(config.codexPath ? { codexPathOverride: config.codexPath } : {}),
     config: {
       // X-Falos-Chat: Codex's fal-os session joins this chat (color, activity, revert).
       mcp_servers: { "fal-os": { url: `${config.hostUrl}/mcp`, http_headers: { Authorization: `Bearer ${config.token}`, "X-Falos-Chat": f.chat, "X-Falos-Project": f.project } } },

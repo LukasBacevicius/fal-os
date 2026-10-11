@@ -372,6 +372,7 @@ export function createSwarmTools(ctx: ToolCtx) {
         // whatever its config.toml points at; a fresh MCP session per call, so a long-idle
         // session can't 404 ("Session not found").
         const thread = new Codex({
+          ...(config.codexPath ? { codexPathOverride: config.codexPath } : {}),
           config: { mcp_servers: { "fal-os": { url: `${config.hostUrl}/mcp`, http_headers: { Authorization: `Bearer ${config.token}`, ...(ctx.mcpHeaders ?? {}) } } } },
         }).startThread({
           workingDirectory: dir,
