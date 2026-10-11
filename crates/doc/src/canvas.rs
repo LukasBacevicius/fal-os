@@ -309,12 +309,33 @@ impl Canvas {
         })
     }
 
+    /// Like [`Canvas::apply`], but not an undo step of its own: for finishing what an earlier
+    /// transaction of the same actor started (e.g. filling in the images of a paste that
+    /// streams in). Undoing that earlier transaction still removes its nodes, and redo brings
+    /// them back with the filled-in props.
+    pub fn apply_untracked(&mut self, actor: &Actor, cmds: &[Command]) -> Result<TxResult> {
+        self.transact_as(actor, None, false, |tx| {
+            cmds.iter().try_for_each(|c| tx.command(c))
+        })
+    }
+
     /// Run `f` as one transaction. `f` runs twice: first as a dry run that only validates
     /// (Loro can't roll back applied ops), then for real.
     pub(crate) fn transact(
         &mut self,
         actor: &Actor,
         expected: Option<&Version>,
+        f: impl Fn(&mut Tx) -> Result<()>,
+    ) -> Result<TxResult> {
+        self.transact_as(actor, expected, true, f)
+    }
+
+    /// `tracked: false` commits under a `sys:` origin, which the undo managers skip.
+    fn transact_as(
+        &mut self,
+        actor: &Actor,
+        expected: Option<&Version>,
+        tracked: bool,
         f: impl Fn(&mut Tx) -> Result<()>,
     ) -> Result<TxResult> {
         let changes = match expected {
@@ -341,7 +362,11 @@ impl Canvas {
             self.sessions.remove(&actor.id);
             return Err(e);
         }
-        let origin = format!("actor:{}", actor.id);
+        let origin = if tracked {
+            format!("actor:{}", actor.id)
+        } else {
+            format!("sys:fill:{}", actor.id)
+        };
         s.doc
             .commit_with(CommitOptions::new().origin(&origin).commit_msg(&actor.id));
         push(&self.doc, s)?;

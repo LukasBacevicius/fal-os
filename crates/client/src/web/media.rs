@@ -325,7 +325,57 @@ function noteLines(g, spec, k) {
   return { lines, fs, lh, pad };
 }
 
+// Styled text (a text node with a color, e.g. from Figma): bare glyphs in the node's font,
+// no padding, its line height / letter spacing / alignment; mirrors the page's DOM text.
+const SANS = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+function styledFont(spec, fs) {
+  const fam = spec.font ? `"${String(spec.font).replace(/"/g, '')}", ${SANS}` : SANS;
+  return `${spec.italic ? 'italic ' : ''}${Number(spec.weight) || 400} ${fs}px ${fam}`;
+}
+function styledLines(g, spec, k) {
+  const fs = (Number(spec.fs) || 12.5) * k;
+  const lh = (Number(spec.lh) || (Number(spec.fs) || 12.5) * 1.2) * k;
+  g.font = styledFont(spec, fs);
+  try { g.letterSpacing = `${(Number(spec.ls) || 0) * k}px`; } catch (e) { /* older engines */ }
+  const maxW = Number(spec.w) * k + 0.5;
+  const lines = [];
+  for (const para of String(spec.body || '').split('\n')) {
+    if (spec.nowrap) { lines.push(para); continue; }
+    let line = '';
+    for (const tok of para.split(/(\s+)/)) {
+      if (!tok) continue;
+      if (!line || g.measureText(line + tok).width <= maxW) { line += tok; continue; }
+      lines.push(line.trimEnd());
+      line = /^\s+$/.test(tok) ? '' : tok;
+    }
+    lines.push(line);
+  }
+  return { lines, fs, lh };
+}
+function drawStyled(g, spec, k, W, H) {
+  const { lines, fs, lh } = styledLines(g, spec, k);
+  const m = g.measureText('Hg');
+  const asc = m.fontBoundingBoxAscent || fs * 0.92, desc = m.fontBoundingBoxDescent || fs * 0.24;
+  const total = lines.length * lh;
+  const top = spec.valign === 'bottom' ? H - total : spec.valign === 'center' ? (H - total) / 2 : 0;
+  g.fillStyle = spec.color || '#000';
+  g.textBaseline = 'alphabetic';
+  lines.forEach((l, i) => {
+    const lw = g.measureText(l).width;
+    const x = spec.align === 'right' ? W - lw : spec.align === 'center' ? (W - lw) / 2 : 0;
+    g.fillText(l, x, top + i * lh + (lh - asc - desc) / 2 + asc);
+  });
+}
+
 async function noteSource(spec) {
+  if (spec.styled) {
+    const w = Math.max(1, Number(spec.w) || 1), h = Math.max(1, Number(spec.h) || 1);
+    const k = Math.min(2, MAX_SOURCE_PX / w, MAX_SOURCE_PX / h);
+    const W = Math.max(1, Math.round(w * k)), H = Math.max(1, Math.round(h * k));
+    const c = canvas(W, H), g = c.getContext('2d');
+    drawStyled(g, spec, k, W, H);
+    return { bitmap: await createImageBitmap(c), width: 0, height: 0, duration: 0 };
+  }
   const th = theme(spec);
   const w = Math.max(1, Number(spec.w) || 240), h = Math.max(1, Number(spec.h) || 120);
   const k = Math.min(2, MAX_SOURCE_PX / w, MAX_SOURCE_PX / h);
@@ -342,6 +392,14 @@ async function noteSource(spec) {
 // Tiny on screen (the 32 px tier): "greeked" text, one thin dim bar per line.
 let measure = null;
 async function greekTile(spec, size) {
+  if (spec.styled) {
+    // Tiny on screen: the real glyphs squeezed into the tile read as greeked lines anyway.
+    const c = canvas(size, size), g = c.getContext('2d');
+    const w = Math.max(1, Number(spec.w) || 1), h = Math.max(1, Number(spec.h) || 1);
+    g.scale(size / w, size / h);
+    drawStyled(g, spec, 1, w, h);
+    return await createImageBitmap(c);
+  }
   const th = theme(spec);
   const w = Math.max(1, Number(spec.w) || 240), h = Math.max(1, Number(spec.h) || 120);
   measure ??= canvas(8, 8).getContext('2d');
@@ -514,6 +572,9 @@ pub fn gen_status(n: &SceneNode) -> &str {
 pub fn content_of(n: &SceneNode) -> Content {
     match n.kind {
         NodeKind::Image if n.asset.is_some() => Content::Image,
+        // An image still being filled in (a streaming paste): the generating tile; a failed
+        // one shows as a card.
+        NodeKind::Image if n.card_field(2).is_empty() => Content::Generating,
         NodeKind::Video if n.asset.is_some() => Content::Video,
         NodeKind::Frame | NodeKind::Group | NodeKind::Connector => Content::None,
         NodeKind::Note | NodeKind::Text => Content::TextBox,
@@ -591,8 +652,22 @@ pub fn source_spec(n: &SceneNode, media: &MediaStore, light: bool) -> Option<(St
             set(&o, "h", n.rect[3]);
             set(&o, "fs", fs);
             set(&o, "theme", theme);
+            if n.styled_text() {
+                // card: color, fontSize, then scene::TEXT_STYLE.
+                let f = |i: usize| n.card_field(i).to_string();
+                set(&o, "styled", true);
+                set(&o, "color", f(0));
+                set(&o, "font", f(2));
+                set(&o, "weight", f(3).parse::<f64>().unwrap_or(400.0));
+                set(&o, "italic", f(4) == "true");
+                set(&o, "lh", f(5).parse::<f64>().unwrap_or(0.0));
+                set(&o, "ls", f(6).parse::<f64>().unwrap_or(0.0));
+                set(&o, "align", f(7));
+                set(&o, "valign", f(8));
+                set(&o, "nowrap", f(9) == "true");
+            }
             // Layout depends on the box size (wrapping, clipping): it is part of the key.
-            let h = fnv(&format!("{}\u{1}{body}\u{1}{:.0}\u{1}{:.0}\u{1}{fs}\u{1}{theme}", n.name, n.rect[2], n.rect[3]));
+            let h = fnv(&format!("{}\u{1}{body}\u{1}{:.0}\u{1}{:.0}\u{1}{fs}\u{1}{theme}\u{1}{}", n.name, n.rect[2], n.rect[3], n.card));
             format!("t:{}:{h:x}", n.id)
         }
         Content::Generating | Content::None => return None,

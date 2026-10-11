@@ -7,6 +7,7 @@ One loopback HTTP server (`127.0.0.1`, port 7317 or the next free one) serves:
 | `POST/GET /mcp` | Canvas MCP server, Streamable HTTP (agents) |
 | `GET /sync/{project}` → WebSocket | Canvas sync of a project (the canvas UI, running falos-doc in wasm); `/sync/{canvas}` in single-project mode |
 | `GET/HEAD/PUT /assets/{sha256}?project=<id>` | Content-addressed project media (`<project>/assets/<hex>.<ext>`) |
+| `POST /import/url?project=<id>` | The host downloads a remote media URL into the assets (`{url, sha256?}`) |
 | `GET /workspace` → WebSocket | Projects list + `project.*` ops (see docs/CHAT-PROTOCOL.md → Projects) |
 | `GET /runtime` → WebSocket | The agent runtime (one for the workspace; frames carry `project`) |
 
@@ -31,7 +32,15 @@ MCP sessions are dropped after 6 h idle (rmcp's default 5 min made long renders 
   (`416` if unsatisfiable), so `<video src>` can seek. GET/HEAD also accept `?token=` because
   media elements can't set headers.
 - CORS: allowed origins (below) get `Access-Control-Allow-Origin` echoed; `OPTIONS` preflight
-  on `/assets/*` needs no token.
+  on `/assets/*` and `/import/url` needs no token.
+- `POST /import/url` `{url, sha256?}`: downloads an http(s) file (the page can't: CDNs such as
+  Figma's signed image URLs send no CORS headers) and stores it like a `PUT`. Only media
+  (`image/* video/* audio/*`, sniffed from the bytes when the server says octet-stream; else
+  `415`), at most 512 MiB (`413`), upstream errors → `502`. With `sha256` an existing asset
+  answers at once (`200`, no download) and a download that hashes differently is `400`.
+  Answers `{id: "sha256:<hex>", mime, size, file, existing, width, height}` (`201` when written,
+  `200` when it existed; `width`/`height` from the PNG/JPEG/GIF/WebP header, else null). The
+  canvas uses it for Figma pastes (`apps/web/src/figma.ts`).
 
 ## Discovery and auth
 - `~/.fal-os/token` (0600): per-install random bearer token. `~/.fal-os/host.json` (0600):

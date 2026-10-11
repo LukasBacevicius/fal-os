@@ -115,6 +115,23 @@ use PropType::*;
 
 pub const GEN_STATUS: &[&str] = &["queued", "running", "done", "failed", "canceled"];
 pub const CONNECTOR_KINDS: &[&str] = &["lineage", "reference", "flow"];
+pub const TEXT_ALIGN: &[&str] = &["left", "center", "right", "justify"];
+pub const TEXT_VALIGN: &[&str] = &["top", "center", "bottom"];
+
+/// Text: font size, and the "styled" look (a `color` turns the card into bare text in the
+/// given font, e.g. text imported from Figma).
+const TEXT: &[(&str, PropType)] = &[
+    ("fontSize", Num),
+    ("color", Str),
+    ("font", Str),
+    ("weight", Num),
+    ("italic", Bool),
+    ("lineHeight", Num),
+    ("letterSpacing", Num),
+    ("align", Enum(TEXT_ALIGN)),
+    ("valign", Enum(TEXT_VALIGN)),
+    ("nowrap", Bool),
+];
 
 const VIDEO: &[(&str, PropType)] = &[
     ("asset", Str),
@@ -151,7 +168,7 @@ impl NodeKind {
     /// Type-specific props in canonical (print) order.
     pub fn props(self) -> &'static [(&'static str, PropType)] {
         match self {
-            NodeKind::Image => &[("asset", Str), ("crop", NumList(4))],
+            NodeKind::Image => &[("asset", Str), ("crop", NumList(4)), ("radius", Num), ("transparent", Bool), ("error", Str)],
             NodeKind::Video => VIDEO,
             NodeKind::Audio => AUDIO,
             NodeKind::Model3d | NodeKind::Vector => &[("asset", Str)],
@@ -170,14 +187,16 @@ impl NodeKind {
                 ("error", Str),
             ],
             NodeKind::Style(_) => &[("asset", Str), ("data", Json)],
-            NodeKind::Note => &[("color", Str)],
+            NodeKind::Note => &[("color", Str), ("fontSize", Num)],
+            NodeKind::Text => TEXT,
+            NodeKind::Frame => &[("fill", Str), ("radius", Num)],
             NodeKind::Connector => &[
                 ("from", Str),
                 ("to", Str),
                 ("kind", Enum(CONNECTOR_KINDS)),
                 ("label", Str),
             ],
-            NodeKind::Text | NodeKind::Frame | NodeKind::Group => &[],
+            NodeKind::Group => &[],
         }
     }
 

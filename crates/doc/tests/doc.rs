@@ -889,3 +889,28 @@ fn canvas_is_send() {
     fn assert_send<T: Send>() {}
     assert_send::<Canvas>();
 }
+
+#[test]
+fn untracked_fill_ins_ride_along_with_the_creating_transaction() {
+    let mut c = Canvas::new("c1", "x");
+    // A paste: frame + image placeholder in one transaction.
+    let r = c
+        .apply_edit("frame \"board\" s(100,100)\n  image \"photo\" p(1,1) s(50,50)\n", &lukas(), None)
+        .unwrap();
+    let (frame, image) = (r.created[0].clone(), r.created[1].clone());
+    // The download completes later: not an undo step of its own.
+    c.apply_untracked(
+        &lukas(),
+        &[Command::UpdateNode { id: image.clone(), props: props(json!({"asset": "sha256:ab"})) }],
+    )
+    .unwrap();
+    assert_eq!(c.node(&image).unwrap().props["asset"], "sha256:ab");
+    // One undo removes the whole paste...
+    assert!(c.undo("lukas").unwrap());
+    assert!(c.node(&frame).is_none() && c.node(&image).is_none());
+    assert!(!c.can_undo("lukas"));
+    // ...and redo restores it with the filled-in asset.
+    assert!(c.redo("lukas").unwrap());
+    assert_eq!(c.node(&image).unwrap().props["asset"], "sha256:ab");
+    assert_eq!(c.node(&image).unwrap().parent.as_deref(), Some(frame.as_str()));
+}

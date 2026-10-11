@@ -1,4 +1,6 @@
-//! Content-addressed project assets over HTTP: `GET|HEAD|PUT /assets/{sha256}`.
+//! Content-addressed project assets over HTTP: `GET|HEAD|PUT /assets/{sha256}`, and
+//! `POST /import/url` (the host downloads a remote file into the assets: pages can't fetch
+//! most CDNs themselves because of CORS, e.g. the signed image URLs of a Figma paste).
 //!
 //! Files live in `<project>/assets/<hex>.<ext>` (the extension carries the content type; the
 //! fal job runner writes the same layout). `GET` supports single byte ranges so `<video>` can
@@ -316,9 +318,210 @@ pub async fn put(
     }
 }
 
+/// Largest file `POST /import/url` downloads.
+pub const MAX_IMPORT_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Pixel size from an image header (PNG, JPEG, GIF, WebP).
+pub fn image_size(b: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |i: usize| Some(u16::from_be_bytes(b.get(i..i + 2)?.try_into().ok()?) as u32);
+    let le16 = |i: usize| Some(u16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?) as u32);
+    let le24 = |i: usize| Some(u32::from_le_bytes([*b.get(i)?, *b.get(i + 1)?, *b.get(i + 2)?, 0]));
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let be32 = |i: usize| Some(u32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?));
+        return Some((be32(16)?, be32(20)?));
+    }
+    if b.starts_with(b"GIF8") {
+        return Some((le16(6)?, le16(8)?));
+    }
+    if b.len() > 30 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        return match &b[12..16] {
+            b"VP8 " => Some((le16(26)? & 0x3fff, le16(28)? & 0x3fff)),
+            b"VP8L" => {
+                let (b0, b1, b2, b3) = (b[21] as u32, b[22] as u32, b[23] as u32, b[24] as u32);
+                Some((1 + (b0 | (b1 & 0x3f) << 8), 1 + (b1 >> 6 | b2 << 2 | (b3 & 0xf) << 10)))
+            }
+            b"VP8X" => Some((1 + le24(24)?, 1 + le24(27)?)),
+            _ => None,
+        };
+    }
+    if b.starts_with(&[0xff, 0xd8]) {
+        let mut i = 2;
+        while i + 9 < b.len() {
+            if b[i] != 0xff {
+                i += 1;
+                continue;
+            }
+            let m = b[i + 1];
+            if m == 0xd8 || m == 0x01 || (0xd0..=0xd7).contains(&m) || m == 0xff {
+                i += if m == 0xff { 1 } else { 2 };
+                continue;
+            }
+            let len = be16(i + 2)? as usize;
+            if matches!(m, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+                return Some((be16(i + 7)?, be16(i + 5)?));
+            }
+            i += 2 + len;
+        }
+    }
+    None
+}
+
+/// Content type by magic bytes, for servers that answer `application/octet-stream`.
+fn sniff(b: &[u8]) -> Option<&'static str> {
+    Some(match b {
+        _ if b.starts_with(b"\x89PNG") => "image/png",
+        _ if b.starts_with(&[0xff, 0xd8, 0xff]) => "image/jpeg",
+        _ if b.starts_with(b"GIF8") => "image/gif",
+        _ if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" => "image/webp",
+        _ if b.len() > 12 && &b[4..8] == b"ftyp" && (&b[8..12] == b"avif" || &b[8..12] == b"avis") => "image/avif",
+        _ if b.len() > 12 && &b[4..8] == b"ftyp" => "video/mp4",
+        _ => return None,
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub struct ImportUrl {
+    pub url: String,
+    /// Expected digest (`sha256:<hex>` or hex): skips the download when the asset exists,
+    /// and the download must match it.
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// `POST /import/url?project=<id>` `{url, sha256?}` → `{id, mime, size, width, height, file,
+/// existing}`: downloads an http(s) image/video/audio file into the project's assets.
+pub async fn import_url(
+    State(space): State<Arc<Workspace>>,
+    Query(q): Query<AssetQuery>,
+    axum::Json(req): axum::Json<ImportUrl>,
+) -> Response {
+    let host = match space.host_for_frame(q.project.as_deref()) {
+        Ok(h) => h,
+        Err(e) => return text(StatusCode::NOT_FOUND, format!("{e:#}")),
+    };
+    let dir = host.dir().join("assets");
+    let found = |path: &Path, existing: bool, size: u64, bytes: Option<&[u8]>| {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let hex = name.split('.').next().unwrap_or("").to_string();
+        let mime = mime_of_ext(path.extension().and_then(|e| e.to_str()).unwrap_or(""));
+        let dims = match bytes {
+            Some(b) => image_size(b),
+            None => std::fs::File::open(path).ok().and_then(|mut f| {
+                use std::io::Read;
+                let mut head = vec![0u8; 256 * 1024];
+                let n = f.read(&mut head).ok()?;
+                image_size(&head[..n])
+            }),
+        };
+        let status = if existing { StatusCode::OK } else { StatusCode::CREATED };
+        (
+            status,
+            axum::Json(serde_json::json!({
+                "id": format!("sha256:{hex}"), "mime": mime, "size": size, "file": name, "existing": existing,
+                "width": dims.map(|d| d.0), "height": dims.map(|d| d.1),
+            })),
+        )
+            .into_response()
+    };
+    let want = match req.sha256.as_deref().map(parse_id) {
+        Some(None) => return text(StatusCode::BAD_REQUEST, "sha256 must be a sha256 hex digest"),
+        Some(Some(h)) => Some(h),
+        None => None,
+    };
+    if let Some(h) = &want
+        && let Some(p) = find(&dir, h)
+    {
+        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        return found(&p, true, size, None);
+    }
+    let scheme = req.url.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        return text(StatusCode::BAD_REQUEST, "url must be http(s)");
+    }
+    let resp = match host.http.get(&req.url).timeout(std::time::Duration::from_secs(120)).send().await {
+        Ok(r) => r,
+        Err(e) => return text(StatusCode::BAD_GATEWAY, format!("download failed: {e}")),
+    };
+    if !resp.status().is_success() {
+        return text(StatusCode::BAD_GATEWAY, format!("download failed: upstream {}", resp.status()));
+    }
+    if resp.content_length().is_some_and(|n| n > MAX_IMPORT_BYTES) {
+        return text(StatusCode::PAYLOAD_TOO_LARGE, "file exceeds 512 MiB");
+    }
+    let header_mime = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut resp = resp;
+    let mut bytes = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(c)) => {
+                bytes.extend_from_slice(&c);
+                if bytes.len() as u64 > MAX_IMPORT_BYTES {
+                    return text(StatusCode::PAYLOAD_TOO_LARGE, "file exceeds 512 MiB");
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return text(StatusCode::BAD_GATEWAY, format!("download failed: {e}")),
+        }
+    }
+    let mime = match sniff(&bytes) {
+        Some(m) => m.to_string(),
+        None => header_mime,
+    };
+    if !(mime.starts_with("image/") || mime.starts_with("video/") || mime.starts_with("audio/")) {
+        return text(StatusCode::UNSUPPORTED_MEDIA_TYPE, format!("not media: {}", if mime.is_empty() { "unknown type" } else { &mime }));
+    }
+    let hex: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    if want.as_ref().is_some_and(|w| *w != hex) {
+        return text(StatusCode::BAD_REQUEST, format!("sha256 mismatch: download hashes to {hex}"));
+    }
+    if let Some(p) = find(&dir, &hex) {
+        return found(&p, true, bytes.len() as u64, Some(&bytes));
+    }
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    let file = dir.join(format!("{hex}.{}", ext_of_mime(&mime)));
+    let tmp = dir.join(format!("{hex}.part{}", rand::random::<u32>()));
+    let written = async {
+        tokio::fs::write(&tmp, &bytes).await?;
+        tokio::fs::rename(&tmp, &file).await
+    }
+    .await;
+    if let Err(e) = written {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    found(&file, false, bytes.len() as u64, Some(&bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_sizes() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend_from_slice(&640u32.to_be_bytes());
+        png.extend_from_slice(&480u32.to_be_bytes());
+        assert_eq!(image_size(&png), Some((640, 480)));
+        let gif = b"GIF89a\x20\x03\x58\x02".to_vec();
+        assert_eq!(image_size(&gif), Some((800, 600)));
+        // JPEG: SOI, an APP0 segment, then SOF0 with height 300 and width 400.
+        let mut jpg = vec![0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0];
+        jpg.extend_from_slice(&[0xff, 0xc0, 0, 11, 8, 0x01, 0x2c, 0x01, 0x90, 3, 0, 0, 0, 0]);
+        assert_eq!(image_size(&jpg), Some((400, 300)));
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+        webp.extend_from_slice(&[0; 8]);
+        webp.extend_from_slice(&[0xff, 0x03, 0x00, 0xff, 0x01, 0x00, 0, 0, 0]);
+        assert_eq!(image_size(&webp), Some((1024, 512)));
+        assert_eq!(image_size(b"nope"), None);
+        assert_eq!(sniff(&jpg), Some("image/jpeg"));
+    }
 
     #[test]
     fn ranges() {

@@ -689,6 +689,62 @@ async fn asset_routes_put_get_range_and_cors() {
 }
 
 #[tokio::test]
+async fn import_url_downloads_media_into_assets() {
+    use sha2::{Digest, Sha256};
+    // A stand-in CDN: a PNG served as octet-stream (sniffed), an HTML page, and a 404.
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend_from_slice(&320u32.to_be_bytes());
+    png.extend_from_slice(&200u32.to_be_bytes());
+    png.extend_from_slice(&[8, 6, 0, 0, 0, 1, 2, 3, 4]);
+    let served = png.clone();
+    let cdn = axum::Router::new()
+        .route("/img", axum::routing::get(move || async move { ([("content-type", "application/octet-stream")], served) }))
+        .route("/page", axum::routing::get(|| async { ([("content-type", "text/html")], "<html></html>") }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cdn_port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, cdn).await.unwrap() });
+
+    let env = start("http://127.0.0.1:1", None).await;
+    let http = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{}/import/url", env.port);
+    let auth = format!("Bearer {TOKEN}");
+    let post = |body: Json| http.post(&url).header("authorization", &auth).json(&body).send();
+    let hex: String = Sha256::digest(&png).iter().map(|b| format!("{b:02x}")).collect();
+
+    assert_eq!(http.post(&url).json(&json!({"url": "x"})).send().await.unwrap().status(), 401);
+    let r = post(json!({"url": format!("http://127.0.0.1:{cdn_port}/img")})).await.unwrap();
+    assert_eq!(r.status(), 201);
+    let v: Json = r.json().await.unwrap();
+    assert_eq!(v["id"], format!("sha256:{hex}"));
+    assert_eq!((v["mime"].as_str(), v["width"].as_u64(), v["height"].as_u64()), (Some("image/png"), Some(320), Some(200)));
+    assert_eq!(std::fs::read(env.host.dir().join(format!("assets/{hex}.png"))).unwrap(), png);
+    // Known digest: answered from the assets without downloading (the URL is dead).
+    let r = post(json!({"url": "http://127.0.0.1:1/gone", "sha256": format!("sha256:{hex}")})).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Json>().await.unwrap()["existing"], true);
+    // A digest that doesn't match the download is refused.
+    let wrong = "0".repeat(64);
+    let r = post(json!({"url": format!("http://127.0.0.1:{cdn_port}/img"), "sha256": wrong})).await.unwrap();
+    assert_eq!(r.status(), 400);
+    // Not media, upstream errors, bad schemes.
+    let r = post(json!({"url": format!("http://127.0.0.1:{cdn_port}/page")})).await.unwrap();
+    assert_eq!(r.status(), 415);
+    let r = post(json!({"url": format!("http://127.0.0.1:{cdn_port}/missing")})).await.unwrap();
+    assert_eq!(r.status(), 502);
+    assert_eq!(post(json!({"url": "file:///etc/passwd"})).await.unwrap().status(), 400);
+    // Browser preflight from the canvas UI.
+    let pre = http
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("origin", "http://127.0.0.1:5197")
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pre.status(), 204);
+    assert!(pre.headers()["access-control-allow-methods"].to_str().unwrap().contains("POST"));
+}
+
+#[tokio::test]
 async fn annotate_defaults_normalized_and_agent_presence_follows_work() {
     let env = start("http://127.0.0.1:1", None).await;
     let c = client(env.port).await;

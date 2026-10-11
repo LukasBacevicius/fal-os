@@ -27,7 +27,7 @@ jbuzws frame "Moodboard" s(2000,1200) by(@lukas)
 
   | type | props |
   |---|---|
-  | image | `asset crop(x,y,w,h)` |
+  | image | `asset crop(x,y,w,h) radius transparent error` (`radius`: corner radius in canvas units; `transparent`: no backdrop behind transparent pixels; without an `asset` the image is a placeholder still being filled in, `error` says why that failed) |
   | video | `asset crop in out loop muted` (in/out are seconds) |
   | audio | `asset in out loop muted` |
   | model3d, vector | `asset` |
@@ -37,8 +37,9 @@ jbuzws frame "Moodboard" s(2000,1200) by(@lukas)
   | stream | `url model muted` |
   | generation | `status(queued\|running\|done\|failed\|canceled) model job progress params({json}) asset cost error` |
   | style:* | `asset data({json})` |
-  | text | `text("…")` |
-  | note | `color text("…")` |
+  | text | `fontSize color font weight italic lineHeight letterSpacing align(left\|center\|right\|justify) valign(top\|center\|bottom) nowrap text("…")` (with a `color` the text draws bare, in `font`, instead of on a card) |
+  | note | `color fontSize text("…")` |
+  | frame | `fill("#rrggbb[aa]") radius` (background color, corner radius in canvas units) |
   | connector | `from(id) to(id) kind(lineage\|reference\|flow) label` |
 
   Unknown props are kept, and the edit result warns about them.

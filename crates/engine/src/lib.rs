@@ -71,12 +71,13 @@ pub struct NodeDesc {
     pub kind: Kind,
     pub content: Content,
     /// Placeholder color (RGBA8, red in the low byte): shown until pixels are resident and
-    /// behind transparent pixels; the fill of [`Kind::Flat`] nodes.
+    /// behind transparent pixels (alpha 0 = see-through); the fill of [`Kind::Flat`] nodes.
     pub color: u32,
     /// Content aspect ratio (w/h). Tiles hold the content squeezed to a square; the shader
     /// restores it with a centered cover crop. 0 = use the node's own aspect.
     pub aspect: f32,
-    /// Maximum corner radius in screen pixels.
+    /// Maximum corner radius in screen pixels; negative = `-radius` in world units (scales
+    /// with zoom, up to half the node's size).
     pub radius: f32,
     pub hidden: bool,
     /// A text raster (note / text node): never takes a [`Tier::Hires`] slot; once it is big

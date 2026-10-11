@@ -121,6 +121,14 @@ fn from_js(v: &JsValue) -> Json {
     js_sys::JSON::stringify(v).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Json::Null)
 }
 
+/// Decodes Figma clipboard HTML (`text/html` of a Figma ⌘C) into an import plan (JSON
+/// text, see `falos_figma::Plan`). Errors when the HTML carries no Figma scene.
+#[wasm_bindgen(js_name = figmaPlan)]
+pub fn figma_plan(html: &str) -> Result<String, JsValue> {
+    let plan = falos_figma::plan_html(html).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_json::to_string(&plan).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
@@ -154,11 +162,19 @@ fn desc_for(n: &SceneNode, media: &MediaStore, pal: &Palette, reveal: bool) -> N
         ..Default::default()
     };
     let content = content_of(n);
+    // Corner radius in canvas units: negative tells the shader it scales with zoom.
+    let radius = n.corner_radius();
+    if radius > 0.0 {
+        d.radius = -radius;
+    }
     match content {
         Content::Image | Content::Video => {
             d.kind = if matches!(content, Content::Video) { Kind::Video } else { Kind::Image };
             d.content = EngineContent::External;
             d.aspect = n.asset.as_deref().and_then(|a| media.aspect(a)).unwrap_or(0.0);
+            if n.transparent() {
+                d.color = 0;
+            }
             if reveal {
                 d.color = pal.tile;
                 d.generating = Some(GenTile { seed: seed_of(&n.id), progress: -1.0, reveal: true });
@@ -172,7 +188,8 @@ fn desc_for(n: &SceneNode, media: &MediaStore, pal: &Palette, reveal: bool) -> N
             // The text raster (greeked when tiny); the page's DOM text fades in over it.
             d.kind = Kind::Image;
             d.content = EngineContent::External;
-            d.color = pal.panel;
+            // Styled text draws bare: no backdrop behind its glyphs.
+            d.color = if n.styled_text() { 0 } else { pal.panel };
             d.text = true;
         }
         Content::Generating => {
@@ -185,10 +202,11 @@ fn desc_for(n: &SceneNode, media: &MediaStore, pal: &Palette, reveal: bool) -> N
             d.generating = Some(GenTile { seed: seed_of(&n.id), progress: progress.clamp(-1.0, 1.0), reveal: false });
         }
         Content::None => {
-            // Frames: no fill; the overlay draws their 1 px outline.
+            // Frames: their background color (`fill`) or none; unfilled ones get the overlay's
+            // 1 px outline.
             d.kind = Kind::Flat;
             d.content = EngineContent::None;
-            d.color = 0;
+            d.color = n.frame_fill().unwrap_or(0);
         }
     }
     d
@@ -223,6 +241,11 @@ impl RenderSink for EngineSink<'_> {
     }
 
     fn update(&mut self, h: Handle, n: &SceneNode, mut content: bool) {
+        // A placeholder image that just got its pixels (streaming paste): dots until they are
+        // resident, then the crossfade, like a finished generation.
+        if matches!(content_of(n), Content::Image) && self.r.desc(h).is_some_and(|o| o.generating.is_some_and(|g| !g.reveal)) {
+            self.reveal.insert(n.id.clone());
+        }
         let d = self.desc(n);
         if let (Content::Card, Some(old)) = (content_of(n), self.r.desc(h)) {
             let a0 = old.size[0] / old.size[1].max(1e-3);
@@ -336,10 +359,16 @@ impl App {
     }
 
     fn commit(&mut self, cmds: &[Command]) -> Result<TxResult, String> {
+        self.commit_as(cmds, true)
+    }
+
+    /// `tracked: false`: not an undo step of its own (see `Canvas::apply_untracked`).
+    fn commit_as(&mut self, cmds: &[Command], tracked: bool) -> Result<TxResult, String> {
         if cmds.is_empty() {
             return Err("no commands".into());
         }
-        let r = self.doc.apply(&self.actor, None, cmds).map_err(|e| e.to_string());
+        let r = if tracked { self.doc.apply(&self.actor, None, cmds) } else { self.doc.apply_untracked(&self.actor, cmds) };
+        let r = r.map_err(|e| e.to_string());
         if let Err(e) = &r {
             self.emit("error", json!({"message": e}));
         }
@@ -379,6 +408,8 @@ impl App {
             .scene
             .iter()
             .filter(|n| n.handle.is_some() && n.kind != NodeKind::Generation && matches!(content_of(n), Content::None | Content::Card | Content::TextBox))
+            // Filled frames and styled text show their own edges, like in a design tool.
+            .filter(|n| n.frame_fill().is_none() && !n.styled_text())
             .map(|n| n.rect)
             .collect();
         let claims: Vec<[f32; 4]> = self.claims.iter().filter_map(|id| self.scene.get(id)).map(|n| n.rect).collect();
@@ -1520,6 +1551,17 @@ impl CanvasApp {
     pub fn apply(&self, commands: JsValue) -> Result<JsValue, JsValue> {
         let cmds = api::parse_commands(&from_js(&commands).to_string()).map_err(err)?;
         let r = self.app.borrow_mut().commit(&cmds);
+        dispatch(&self.app);
+        let r = r.map_err(err)?;
+        Ok(to_js(&json!({"version": r.version.to_string(), "created": r.created, "warnings": r.warnings})))
+    }
+
+    /// Like `apply`, but not an undo step of its own: completes an earlier transaction (e.g.
+    /// fills in a pasted image once it has downloaded), so undoing that one removes it all.
+    #[wasm_bindgen(js_name = applyUntracked)]
+    pub fn apply_untracked(&self, commands: JsValue) -> Result<JsValue, JsValue> {
+        let cmds = api::parse_commands(&from_js(&commands).to_string()).map_err(err)?;
+        let r = self.app.borrow_mut().commit_as(&cmds, false);
         dispatch(&self.app);
         let r = r.map_err(err)?;
         Ok(to_js(&json!({"version": r.version.to_string(), "created": r.created, "warnings": r.warnings})))

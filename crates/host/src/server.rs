@@ -207,13 +207,15 @@ async fn guard_inner(g: Guard, req: Request, next: Next) -> Response {
         return (StatusCode::FORBIDDEN, "fal-os host: origin not allowed").into_response();
     }
     // CORS preflight (no credentials on it by spec) for the asset routes.
-    if req.method() == axum::http::Method::OPTIONS && req.uri().path().starts_with("/assets/") {
+    if req.method() == axum::http::Method::OPTIONS
+        && (req.uri().path().starts_with("/assets/") || req.uri().path() == "/import/url")
+    {
         return (
             StatusCode::NO_CONTENT,
             [
                 (
                     header::ACCESS_CONTROL_ALLOW_METHODS,
-                    "GET, HEAD, PUT, OPTIONS",
+                    "GET, HEAD, PUT, POST, OPTIONS",
                 ),
                 (
                     header::ACCESS_CONTROL_ALLOW_HEADERS,
@@ -279,6 +281,7 @@ pub fn router(space: Arc<Workspace>, token: &str, ct: CancellationToken) -> Rout
                 .head(crate::assets::get)
                 .put(crate::assets::put),
         )
+        .route("/import/url", axum::routing::post(crate::assets::import_url))
         .merge(crate::runtime::routes())
         .with_state(space)
         .nest_service("/mcp", mcp)

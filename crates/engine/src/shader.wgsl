@@ -150,7 +150,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Rounded-corner SDF in screen pixels: AA is zoom-independent.
     let half = in.screen_size * 0.5;
     let p = (in.local - 0.5) * in.screen_size;
-    let radius = min(in.radius, min(half.x, half.y) * 0.25);
+    var radius = min(in.radius, min(half.x, half.y) * 0.25);
+    // Negative: a corner radius in canvas units (scales with zoom), up to half the size.
+    if in.radius < 0.0 {
+        radius = min(-in.radius * cam.zoom, min(half.x, half.y));
+    }
     let d = rounded_box_sdf(p, half, radius);
     let coverage = clamp(0.5 - d, 0.0, 1.0);
 
@@ -170,8 +174,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (in.flags & FLAG_LOW_READY) != 0u { px = low; }
     if in.detail.x >= 0.0 { px = detail; }
     if in.hires >= 0 { px = hires; }
-    var rgb = px.rgb + in.color.rgb * (1.0 - px.a);
-    var a = 1.0;
+    // A transparent placeholder color leaves transparent pixels see-through.
+    var rgb = px.rgb + in.color.rgb * in.color.a * (1.0 - px.a);
+    var a = px.a + in.color.a * (1.0 - px.a);
     if (in.flags & FLAG_FLAT) != 0u {
         rgb = in.color.rgb * in.color.a;
         a = in.color.a;

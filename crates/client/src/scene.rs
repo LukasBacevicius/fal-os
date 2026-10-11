@@ -96,6 +96,9 @@ fn json_str(v: &serde_json::Value) -> String {
     v.as_str().map_or_else(|| v.to_string(), String::from)
 }
 
+/// Styled-text props after `color` and `fontSize` in a text node's [`SceneNode::card`].
+pub const TEXT_STYLE: [&str; 8] = ["font", "weight", "italic", "lineHeight", "letterSpacing", "align", "valign", "nowrap"];
+
 /// The render-relevant view of one doc node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneNode {
@@ -120,10 +123,28 @@ impl SceneNode {
     /// `rect` is in the node's parent space; [`Scene::apply`] offsets it to world space.
     pub fn from_doc(n: &Node, tree: TreeID) -> Self {
         let card = match n.kind {
-            // Color, and the font size the text raster is laid out at.
+            // Color, the font size the text raster is laid out at, and the styled-text look
+            // (font, weight, italic, line height, letter spacing, align, valign, nowrap).
             NodeKind::Note | NodeKind::Text => {
                 let p = |k: &str| n.props.get(k).map(json_str).unwrap_or_default();
-                format!("{}\u{1}{}", p("color"), p("fontSize"))
+                let mut s = format!("{}\u{1}{}", p("color"), p("fontSize"));
+                if n.kind == NodeKind::Text && n.props.contains_key("color") {
+                    for k in TEXT_STYLE {
+                        s.push('\u{1}');
+                        s.push_str(&p(k));
+                    }
+                }
+                s
+            }
+            // Backdrop, corner radius and a failed fill-in (pasted images stream in).
+            NodeKind::Image => {
+                let p = |k: &str| n.props.get(k).map(json_str).unwrap_or_default();
+                format!("{}\u{1}{}\u{1}{}", p("transparent"), p("radius"), p("error"))
+            }
+            // Background color and corner radius.
+            NodeKind::Frame => {
+                let p = |k: &str| n.props.get(k).map(json_str).unwrap_or_default();
+                format!("{}\u{1}{}", p("fill"), p("radius"))
             }
             NodeKind::Generation => {
                 let p = |k: &str| n.props.get(k).map(json_str).unwrap_or_default();
@@ -145,6 +166,34 @@ impl SceneNode {
             text: n.text.clone(),
             handle: None,
         }
+    }
+
+    /// `card` field `i` (fields are separated by `\u{1}`).
+    pub fn card_field(&self, i: usize) -> &str {
+        self.card.split('\u{1}').nth(i).unwrap_or("")
+    }
+
+    /// Text drawn bare in its own font and color (no card backdrop), e.g. from Figma.
+    pub fn styled_text(&self) -> bool {
+        self.kind == NodeKind::Text && !self.card_field(0).is_empty()
+    }
+
+    /// Image whose transparent pixels show what is behind (no backdrop color).
+    pub fn transparent(&self) -> bool {
+        self.kind == NodeKind::Image && self.card_field(0) == "true"
+    }
+
+    /// Corner radius in canvas units (frames and images).
+    pub fn corner_radius(&self) -> f32 {
+        match self.kind {
+            NodeKind::Image | NodeKind::Frame => self.card_field(1).parse::<f32>().unwrap_or(0.0).max(0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// Frame background color (RGBA8), if any.
+    pub fn frame_fill(&self) -> Option<u32> {
+        (self.kind == NodeKind::Frame).then(|| crate::overlay::parse_color(self.card_field(0))).flatten()
     }
 
     /// Whether the engine draws this node.
