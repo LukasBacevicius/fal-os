@@ -34,8 +34,8 @@ export function ProjectHeader({ floating = false }: { floating?: boolean }) {
   return (
     <button className={`link project-head ${floating ? 'project-float' : ''}`} onClick={openPicker} title={`switch project (${MOD}O)`}>
       <span className="project-name">{p?.name ?? '…'}</span>
-      {p?.fal_project && <span className="faint" title={`linked to fal project ${p.fal_project}`}> · fal</span>}
-      <span className="faint"> ▾</span>
+      {p?.fal_project && <span className="faint" title={`linked to fal project ${p.fal_project}`}>{'\u00a0· fal'}</span>}
+      <span className="faint">{'\u00a0▾'}</span>
     </button>
   );
 }

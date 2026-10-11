@@ -10,7 +10,7 @@ import { getState, setState, toast } from './store';
 import type { CanvasApp } from './wasm';
 import type { NodeView, Presence } from './types';
 import { applyEvent, applyHistory, applyList, emptyChat, removeChat, selectChat, type ChatState, type Chip } from './chat';
-import { bootProject, loadCamera, rememberProject, saveCamera, touchProject } from './projects';
+import { bootProject, loadScene, rememberProject, saveCamera, touchProject } from './projects';
 import { onActivity, onActivityClear } from './activity';
 
 /** A send that gets no chat event back within this time means no agent runtime is attached. */
@@ -163,9 +163,7 @@ export class HostSync {
       if (!this.bootstrapped) {
         // First contact: the host's canvas replaces whatever was local. The project's last
         // camera comes back; a canvas opened for the first time fits its content.
-        const cam = loadCamera(this.key);
-        this.app.loadSnapshot(bytes, !cam);
-        if (cam) this.app.setCamera(cam.x, cam.y, cam.zoom);
+        loadScene(this.app, bytes, this.key);
         this.bootstrapped = true;
       } else {
         // Resync after a reconnect: merge (CRDT), then offline edits flow out.
@@ -583,9 +581,7 @@ export function switchProject(project: string): boolean {
   const cached = snapshots.get(project);
   if (cached) {
     try {
-      const cam = loadCamera(project);
-      app.loadSnapshot(cached, !cam);
-      if (cam) app.setCamera(cam.x, cam.y, cam.zoom);
+      loadScene(app, cached, project);
     } catch (e) {
       console.warn('cached snapshot failed', e);
     }

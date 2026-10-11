@@ -8,6 +8,9 @@ import { getState, setState, toast } from './store';
 import type { HostInfo } from './host';
 import { discoverHost, explicitHost } from './host';
 import { switchProject } from './sync';
+import type { CanvasApp } from './wasm';
+import type { NodeView } from './types';
+import { worldRects } from './geometry';
 
 export interface ProjectInfo {
   id: string;
@@ -80,6 +83,21 @@ export function loadCamera(key: string): Cam | null {
     /* private mode / bad JSON */
   }
   return null;
+}
+
+/** Loads `bytes` and brings back the project's camera; fits the content when there is no
+ *  saved camera or the saved one would show none of it (e.g. saved while empty). */
+export function loadScene(app: CanvasApp, bytes: Uint8Array, key: string) {
+  const cam = loadCamera(key);
+  app.loadSnapshot(bytes, !cam);
+  if (!cam) return;
+  app.setCamera(cam.x, cam.y, cam.zoom);
+  const nodes = app.nodes() as NodeView[];
+  if (!nodes.length) return;
+  const c = app.camera() as { width: number; height: number };
+  const v = [cam.x, cam.y, c.width / cam.zoom, c.height / cam.zoom];
+  const seen = [...worldRects(nodes).values()].some((r) => r[0] < v[0] + v[2] && r[0] + r[2] > v[0] && r[1] < v[1] + v[3] && r[1] + r[3] > v[1]);
+  if (!seen) app.fitAll();
 }
 
 // ---- the /workspace socket ---------------------------------------------------------------

@@ -9,7 +9,7 @@ import { hostSync } from './sync';
 import { addChips, chipFromPick, type Chip } from './chat';
 import { trackNodes } from './activity';
 import { worldRects } from './geometry';
-import { loadCamera, saveCamera } from './projects';
+import { loadScene, saveCamera } from './projects';
 
 export const CANVAS_ID = 'main';
 
@@ -91,9 +91,7 @@ export async function restore(app: CanvasApp, hosted = false) {
     const [snapshot, assets] = await Promise.all([hosted ? undefined : persist.loadSnapshot(CANVAS_ID), persist.loadAssets()]);
     for (const a of assets) app.registerAsset(a.id, a.blob, a.mime, a.name);
     if (snapshot) {
-      const cam = loadCamera(CANVAS_ID);
-      app.loadSnapshot(snapshot, !cam);
-      if (cam) app.setCamera(cam.x, cam.y, cam.zoom);
+      loadScene(app, snapshot, CANVAS_ID);
     }
   } catch (e) {
     console.warn('restore failed', e);
