@@ -148,3 +148,19 @@ test("OTIO writer: tracks, gaps, file URLs, render metadata", () => {
   assert.equal(au.kind, "Audio");
   assert.equal(doc.metadata.falos.render, "/w/out/ad.mp4");
 });
+
+test("subagents resumed by SendMessage keep the session open and their label", () => {
+  const events: any[] = [];
+  const f: RunFrame = { chat: "c", canvas: "main", text: "x", context: [], history: [], project: "/tmp/p" };
+  const run = new ChatRun(f, (e) => events.push(e), async () => null) as any;
+  run.onToolUse({ id: "a1", name: "Agent", input: { subagent_type: "qa", description: "check" } }, null);
+  run.onMessage({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "a1", status: "completed", summary: "PASS" });
+  // the director resumes qa later (SendMessage): a background task the old code didn't track
+  run.onMessage({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "t2", task_type: "local_agent", description: "qa" }] });
+  run.onMessage({ type: "system", subtype: "task_started", task_id: "t2", tool_use_id: "s1", subagent_type: "qa", is_backgrounded: true, description: "re-check" });
+  assert.equal(run.liveTasks.size, 1);
+  assert.equal(run.labels.get("s1"), "qa");
+  assert.ok(events.some((e) => e.agent === "qa" && e.status === "resumed"));
+  run.onMessage({ type: "system", subtype: "task_notification", task_id: "t2", tool_use_id: "s1", status: "completed", summary: "done" });
+  assert.equal(run.liveTasks.size, 0);
+});

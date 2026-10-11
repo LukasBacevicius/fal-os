@@ -166,6 +166,8 @@ export class ChatRun {
   private finalNodes: string[] = [];
   private markedFinal = false;
   private background = new Set<string>(); // Agent tool_use ids of background subagents
+  /** Non-ambient background task ids (SDK `background_tasks_changed`, replace semantics). */
+  private liveTasks = new Set<string>();
   /** Messages queued by the host, waiting for the next tool call. */
   private pending: Queued[] = [];
   private waiters: ((q: Queued | null) => void)[] = [];
@@ -570,7 +572,7 @@ export class ChatRun {
           this.idle = true;
           // Background subagents still running: keep the session open; their completion
           // starts another Director turn (and another result).
-          if (this.background.size === 0) {
+          if (this.background.size === 0 && this.liveTasks.size === 0) {
             this.closeQueue();
             input.close();
           }
@@ -640,6 +642,21 @@ export class ChatRun {
       case "system": {
         const s: any = m;
         // A subagent task's id is its agent id in hook inputs (steers to that subagent).
+        // Live background work (subagents, also ones resumed by SendMessage, and shell tasks):
+        // while any runs, the input stays open — the in-process swarm MCP answers over it.
+        if (s.subtype === "background_tasks_changed" && Array.isArray(s.tasks)) {
+          // (No eager close here: a finished task still wakes the director for one more turn,
+          // whose `result` closes the input.)
+          this.liveTasks = new Set(s.tasks.filter((t: any) => !t.ambient).map((t: any) => t.task_id));
+        }
+        if (s.subtype === "task_started" && s.task_id && s.tool_use_id && !this.labels.has(s.tool_use_id) && s.subagent_type) {
+          // A subagent resumed by SendMessage: same label as before (else a new one).
+          const type = String(s.subagent_type);
+          const label = [...this.labels.values()].reverse().find((l) => l === type || l.startsWith(`${type}-`)) ?? this.label(type);
+          this.labels.set(s.tool_use_id, label);
+          this.running.add(label);
+          this.emit({ kind: "agent", agent: label, state: "working", status: "resumed" });
+        }
         if (s.subtype === "task_started" && s.task_id && s.tool_use_id) {
           this.taskTool.set(s.task_id, s.tool_use_id);
           const label = this.labels.get(s.tool_use_id);
@@ -650,6 +667,7 @@ export class ChatRun {
           const agent = this.labels.get(s.tool_use_id);
           if (agent) this.emit({ kind: "agent", agent, state: "working", status: stripAgent(s.summary, agent, ROLES[agent.replace(/-\d+$/, "")]).slice(0, 140) });
         }
+        if (s.subtype === "task_notification" && s.task_id) this.liveTasks.delete(s.task_id);
         if (s.subtype === "task_notification" && s.tool_use_id) {
           this.background.delete(s.tool_use_id);
           const agent = this.labels.get(s.tool_use_id);
