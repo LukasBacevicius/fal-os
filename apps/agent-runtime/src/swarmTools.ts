@@ -613,8 +613,9 @@ export function createSwarmTools(ctx: ToolCtx) {
         const sha256 = f.sha256 || (st ? await sha256File(f.path) : "");
         checked.push({ ...f, bytes, sha256, ...(p?.w ? { w: p.w, h: p.h } : {}), ...(p?.duration ? { duration: Math.round(p.duration * 100) / 100 } : {}), lufs: loud, issues: st ? specIssues({ ...f, bytes }, p, loud) : ["missing on disk"] });
       }
-      // The host may post the cards itself (it says so with `emitted: true`); otherwise we do.
-      if (!json?.emitted) ctx.emit(filesEvent(checked.map(({ issues, lufs, ...c }) => c), dir, ctx.agentFor(a.sessionId)));
+      // The host posts the cards for agent exports in a chat (ops/export.rs); only if it says it
+      // didn't (`emitted: false`) do we.
+      if (json?.emitted === false) ctx.emit(filesEvent(checked.map(({ issues, lufs, ...c }) => c), dir, ctx.agentFor(a.sessionId)));
       const ok_ = checked.every((c) => !c.issues.length);
       // Image blocks the host returned (contact sheets) go back to the model as images.
       const images = content.filter((c) => c.type === "image");

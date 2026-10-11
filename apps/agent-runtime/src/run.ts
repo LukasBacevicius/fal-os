@@ -732,8 +732,8 @@ export class ChatRun {
         this.finalNodes = [...new Set([...this.finalNodes, ...finals])];
       }
     }
-    // File cards for exports agents ran directly on the host (deliver / share_files post their own).
-    if ((caller.name === "export" || caller.name === "package") && !b.is_error && !json?.emitted) {
+    // File cards: the host posts them for `export` itself; `package` (a zip) gets one here.
+    if ((caller.name === "package" || (caller.name === "export" && json?.emitted === false)) && !b.is_error) {
       const { files, dir } = filesOf(json);
       if (files.length) this.emit(filesEvent(files, dir, caller.agent));
     }

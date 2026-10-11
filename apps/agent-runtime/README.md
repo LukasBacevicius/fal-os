@@ -108,7 +108,7 @@ Anything on the canvas can be a reference or a direct model input: generated med
 - `media_url(sessionId, nodes)`: public URLs for canvas media.
 - `fal_model` `mediaInputs` also take chips: a region/spot is cropped, a frame extracted, a range trimmed (ffmpeg, into `work/<chat>/chips/`), then uploaded; the chips are recorded in the lineage params.
 - `share_files(files[])`: posts project files (deliverables, OTIO, zips) as a `files` chat event (sha256, size, ffprobe w/h/duration). Files must be inside the project folder.
-- `deliver(sessionId, nodes|frame|deliverables, presets[], dir?, naming?)` (only when the host has `export`): host `export`, then ffprobe + loudness of every file against its preset, a `files` event (unless the result says `emitted: true`) and `{ok, files:[…issues]}`; host image blocks are passed through as images.
+- `deliver(sessionId, nodes|frame|deliverables, presets[], dir?, naming?)` (only when the host has `export`): host `export`, then ffprobe + loudness of every file against its preset, (the host posts the file cards itself) and `{ok, files:[…issues]}`; host image blocks are passed through as images.
 - `codex(task, dir?)`: a Codex thread (`workspace-write`, no approvals) in the chat workspace. It has its own "Codex" session and status.
 
 ## Drivers, queue, errors (UX v1)

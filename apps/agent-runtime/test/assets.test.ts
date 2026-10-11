@@ -101,20 +101,25 @@ test("export QA: preset dimensions, empty files, loudness", () => {
   assert.match(specIssues({ preset: "square", bytes: 9 }, { w: 1080, h: 1080 }, -20).join(), /-20 LUFS/);
 });
 
-test("runtime posts file cards for direct export results and tracks finals", () => {
+test("file cards: the host posts export cards, the runtime posts package zips; finals tracked", () => {
   const events: any[] = [];
   const f: RunFrame = { chat: "c", canvas: "main", text: "x", context: [], history: [], project: "/tmp/p" };
   const run = new ChatRun(f, (e) => events.push(e), async () => null) as any;
+  // export: the host already appended the `files` event (ops/export.rs) → no duplicate
   run.onToolUse({ id: "t1", name: "mcp__falos__export", input: { presets: ["reel"] } }, null);
   run.onToolResult({ tool_use_id: "t1", content: [{ type: "text", text: JSON.stringify({ files: [{ path: "/tmp/p/deliverables/a.mp4", preset: "reel", bytes: 3, sha256: "s" }], dir: "/tmp/p/deliverables" }) }] });
+  assert.equal(events.filter((e) => e.kind === "files").length, 0);
+  // …unless the host says it didn't
+  run.onToolUse({ id: "t2", name: "mcp__falos__export", input: {} }, null);
+  run.onToolResult({ tool_use_id: "t2", content: [{ type: "text", text: JSON.stringify({ emitted: false, files: [{ path: "/tmp/p/deliverables/a.mp4", preset: "reel", bytes: 1 }], dir: "/tmp/p/deliverables" }) }] });
   const files = events.find((e) => e.kind === "files");
   assert.equal(files?.files[0].preset, "reel");
   assert.equal(files?.dir, "/tmp/p/deliverables");
-  // host already posted them
+  // package: one card for the zip
   events.length = 0;
-  run.onToolUse({ id: "t2", name: "mcp__falos__export", input: {} }, null);
-  run.onToolResult({ tool_use_id: "t2", content: [{ type: "text", text: JSON.stringify({ emitted: true, files: [{ path: "/x", bytes: 1 }] }) }] });
-  assert.equal(events.filter((e) => e.kind === "files").length, 0);
+  run.onToolUse({ id: "t4", name: "mcp__falos__package", input: { kind: "deliverables" } }, null);
+  run.onToolResult({ tool_use_id: "t4", content: [{ type: "text", text: JSON.stringify({ path: "/tmp/p/exports/2026-10-11/x_deliverables_1.zip", bytes: 9, sha256: "z", kind: "deliverables" }) }] });
+  assert.equal(events.find((e) => e.kind === "files")?.files[0].name, "x_deliverables_1.zip");
   run.onToolUse({ id: "t3", name: "mcp__falos__edit", input: { text: "abc123 role(final)\nzzz999 role(rejected)" } }, null);
   run.onToolResult({ tool_use_id: "t3", content: [{ type: "text", text: "{}" }] });
   assert.deepEqual(run.finalNodes, ["abc123"]);
