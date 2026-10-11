@@ -157,7 +157,20 @@ export function SelectionPrompt() {
         />
       </div>
       <div className="sel-hint faint">
-        ⏎ new chat{current ? <> · {MOD}⏎ {chatTitle(chat, current).slice(0, 18)}</> : null} · ⇥ open in chat · esc
+        <button className="link" title="Return" disabled={!text.trim()} onClick={() => send(null)}>
+          [⏎ new chat]
+        </button>
+        {current && (
+          <button className="link" title={`${MOD === '⌘' ? 'Cmd' : 'Ctrl'}+Return`} disabled={!text.trim()} onClick={() => send(current)}>
+            [{MOD}⏎ {chatTitle(chat, current).slice(0, 18)}]
+          </button>
+        )}
+        <button className="link" title="Tab" onClick={toPanel}>
+          [⇥ open in chat]
+        </button>
+        <button className="link" title="Escape" onClick={close}>
+          [esc]
+        </button>
       </div>
     </div>
   );

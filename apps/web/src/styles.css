@@ -309,7 +309,10 @@ button, textarea, select, input { font: inherit; color: inherit; }
 }
 .sel-prompt textarea { flex: 1; resize: none; border: 0; outline: none; background: transparent; padding: 0; line-height: 18px; min-height: 18px; }
 .sel-prompt textarea::placeholder { color: var(--faint); }
-.sel-hint { font-size: 11px; line-height: 14px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sel-hint { font-size: 11px; line-height: 14px; margin-top: 4px; display: flex; flex-wrap: wrap; gap: 2px 10px; }
+.sel-hint .link { color: var(--dim); }
+.sel-hint .link:hover:not(:disabled) { color: var(--text); }
+.sel-hint .link:disabled { color: var(--faint); cursor: default; }
 
 /* ---- empty canvas ---- */
 .empty-connect { pointer-events: auto; margin-top: 4px; }
