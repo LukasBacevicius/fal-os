@@ -572,7 +572,7 @@ export class ChatRun {
           this.idle = true;
           // Background subagents still running: keep the session open; their completion
           // starts another Director turn (and another result).
-          if (this.background.size === 0 && this.liveTasks.size === 0) {
+          if (this.background.size === 0 && this.liveTasks.size === 0 && this.running.size === 0) {
             this.closeQueue();
             input.close();
           }
@@ -655,6 +655,8 @@ export class ChatRun {
           const label = [...this.labels.values()].reverse().find((l) => l === type || l.startsWith(`${type}-`)) ?? this.label(type);
           this.labels.set(s.tool_use_id, label);
           this.running.add(label);
+          // A resumed subagent always runs in the background (older CLIs leave is_backgrounded unset).
+          this.background.add(s.tool_use_id);
           this.emit({ kind: "agent", agent: label, state: "working", status: "resumed" });
         }
         if (s.subtype === "task_started" && s.task_id && s.tool_use_id) {
@@ -719,7 +721,7 @@ export class ChatRun {
     const label = this.labels.get(id);
     if (label) {
       // A background subagent: this is only the launch ack; it ends with a task_notification.
-      if (/^Async agent launched|running in the background/i.test(text.trim().slice(0, 300))) {
+      if (/^Async agent launched|running in the background|"resumedAgentId"|Resuming agent/i.test(text.trim().slice(0, 300))) {
         this.background.add(id);
         this.emit({ kind: "agent", agent: label, state: "working", status: "running in the background" });
         return;

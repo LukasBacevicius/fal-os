@@ -161,6 +161,11 @@ test("subagents resumed by SendMessage keep the session open and their label", (
   assert.equal(run.liveTasks.size, 1);
   assert.equal(run.labels.get("s1"), "qa");
   assert.ok(events.some((e) => e.agent === "qa" && e.status === "resumed"));
+  // the SendMessage ack is a launch, not the end (older CLIs send no is_backgrounded)
+  events.length = 0;
+  run.onToolResult({ tool_use_id: "s1", content: [{ type: "text", text: '{"success":true,"message":"Resuming agent a73b4fe","resumedAgentId":"a73b4fefdba1ead52"}' }] });
+  assert.ok(run.background.has("s1") && run.running.has("qa"));
+  assert.ok(!events.some((e) => e.state === "done"));
   run.onMessage({ type: "system", subtype: "task_notification", task_id: "t2", tool_use_id: "s1", status: "completed", summary: "done" });
   assert.equal(run.liveTasks.size, 0);
 });
