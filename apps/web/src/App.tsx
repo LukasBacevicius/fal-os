@@ -8,6 +8,7 @@ import { ConnectModal } from './components/ConnectModal';
 import { ActivitySync } from './components/ActivityBars';
 import { ProjectPicker } from './components/Projects';
 import { VideoFocus } from './components/VideoLayer';
+import { Library } from './components/Library';
 
 function stored(key: string, fallback: number) {
   try {
@@ -24,6 +25,7 @@ export function App() {
   const chatOpen = useStore((s) => s.chatOpen);
   const overlay = useStore((s) => s.overlay);
   const layers = useStore((s) => s.outlineOpen ?? s.nodes.length > 0);
+  const library = useStore((s) => s.library);
   const [chatWidth, setChatWidth] = useState(() => stored('falos.chatWidth', 360));
 
   useEffect(() => {
@@ -38,10 +40,11 @@ export function App() {
   return (
     <div className="app">
       <div className="main">
-        {layers && <Layers />}
+        {library === 'panel' ? <Library /> : layers && <Layers />}
         <Stage />
         {chatOpen && <ChatPanel width={chatWidth} onResize={setChatWidth} />}
       </div>
+      {library === 'full' && <Library />}
       {overlay === 'palette' && <Palette />}
       {overlay === 'help' && <Help />}
       {overlay === 'connect' && <ConnectModal />}

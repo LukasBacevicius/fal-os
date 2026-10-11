@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { ASSET_MIME, libraryDrop } from '../library';
 import { createCanvasApp } from '../wasm';
 import { getState, setState, useStore } from '../store';
 import { attach, CANVAS_ID, importFiles, restore } from '../controller';
@@ -230,6 +231,7 @@ export function Stage() {
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
+    if (libraryDrop(e, canvas.current!.getBoundingClientRect())) return;
     const files = Array.from(e.dataTransfer.files);
     if (!files.length) return;
     const r = canvas.current!.getBoundingClientRect();
@@ -241,7 +243,10 @@ export function Stage() {
       className="stage"
       ref={wrap}
       onDragOver={(e) => {
-        if (e.dataTransfer.types.includes('Files')) {
+        if (e.dataTransfer.types.includes(ASSET_MIME)) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+        } else if (e.dataTransfer.types.includes('Files')) {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'copy';
           setDragging(true);

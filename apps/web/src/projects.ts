@@ -115,6 +115,10 @@ class Workspace {
 
   constructor(private host: HostInfo) {}
 
+  get hostInfo() {
+    return this.host;
+  }
+
   start() {
     this.connect();
   }
@@ -131,6 +135,7 @@ class Workspace {
     let opened = false;
     ws.onopen = () => {
       opened = true;
+      libraryHandler?.({ type: 'library.open' });
       this.everOpened = true;
       this.retry = 0;
       setState({ workspace: 'connected' });
@@ -183,6 +188,10 @@ class Workspace {
   }
 
   private onMessage(m: any) {
+    if (typeof m?.type === 'string' && (m.type.startsWith('library.') || (m.type === 'error' && m.scope === 'library'))) {
+      libraryHandler?.(m);
+      return;
+    }
     switch (m?.type) {
       case 'projects': {
         const list = (Array.isArray(m.projects) ? m.projects : [])
@@ -265,6 +274,14 @@ class Workspace {
 }
 
 let ws: Workspace | null = null;
+
+// The asset library (library.ts) shares this socket.
+let libraryHandler: ((m: any) => void) | null = null;
+export function setLibraryHandler(f: (m: any) => void) {
+  libraryHandler = f;
+}
+export const workspaceSend = (m: unknown) => ws?.send(m) ?? false;
+export const workspaceHost = () => ws?.hostInfo ?? null;
 
 /** Starts the workspace socket and picks the project to open: the URL's, else the last one,
  *  else the most recent (an empty workspace gets a first project). Null = no `/workspace`

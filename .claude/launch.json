@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "lib-host",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "S=/private/tmp/claude-501/-Users-lukas-Development-fal-os/4094f03e-78d8-428d-9f28-59f50ea0c3c5/scratchpad; export FAL_KEY=\"$(grep -E '^(export )?FAL_KEY' $HOME/.fal-os/fal.env | head -1 | sed -E 's/^(export )?FAL_KEY=//; s/^\"//; s/\"$//')\"; FALOS_HOME=$S/libhome exec /Users/lukas/Development/fal-os/target/debug/falos-host serve --workspace $S/projects --port 7391 --no-runtime"],
+      "port": 7391
+    },
+    {
+      "name": "lib-web",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "FALOS_HOME=/private/tmp/claude-501/-Users-lukas-Development-fal-os/4094f03e-78d8-428d-9f28-59f50ea0c3c5/scratchpad/libhome FALOS_WEB_PORT=5196 exec pnpm --dir apps/web exec vite"],
+      "port": 5196
+    }
+  ]
+}

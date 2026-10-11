@@ -13,6 +13,7 @@ import { openPrompt } from './components/SelectionPrompt';
 import { createNote, editNode } from './components/TextLayer';
 import { openPicker } from './components/Projects';
 import { canvasVideoKey, focusKey, openFocus, spacePressed, spaceReleased } from './video';
+import { openLibrary } from './library';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 export const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -26,6 +27,7 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'app', keys: '?', desc: 'this list' },
   { group: 'app', keys: '⌘\\', desc: 'show / hide the chat panel' },
   { group: 'app', keys: '⌘⇧\\', desc: 'show / hide layers and properties' },
+  { group: 'app', keys: '⌘⇧A  ⌘⇧L', desc: 'asset library: panel / full screen (space look, ⏎ or drag places, f t c u l s)' },
   { group: 'chat', keys: '/  or  click [✦]', desc: 'with a selection: ask about it (inline prompt)' },
   { group: 'chat', keys: '⏎  ⌘⏎  ⇥', desc: 'in the ✦ prompt: new chat / current chat / open in chat' },
   { group: 'chat', keys: '⌘L', desc: 'add the selection to the chat' },
@@ -161,6 +163,8 @@ export function installKeys(): () => void {
     if (mod && !e.shiftKey && (k === 'k' || k === 'K')) return done(), setState({ overlay: overlay === 'palette' ? null : 'palette' });
     if (mod && !e.shiftKey && !e.altKey && (k === 'o' || k === 'O')) return done(), openPicker();
     if (mod && e.shiftKey && (k === '\\' || k === '|')) return done(), toggleOutline();
+    if (mod && e.shiftKey && e.code === 'KeyA') return done(), openLibrary('panel');
+    if (mod && e.shiftKey && e.code === 'KeyL') return done(), openLibrary('full');
     if (mod && k === '\\') return done(), toggleChat();
     if ((mod || ctrl) && !e.shiftKey && (k === 'n' || k === 'N')) return done(), newChat();
     if ((mod || ctrl) && e.shiftKey && (k === '[' || k === '{')) return done(), switchChat('prev');
@@ -170,6 +174,7 @@ export function installKeys(): () => void {
     if ((mod || ctrl) && !e.shiftKey && (k === 'y' || k === 'Y')) return done(), toggleHistory();
     if (mod && k === '.') return done(), setDriver();
     if (overlay) return; // the palette / help own the keyboard
+    if (getState().library === 'full' || (e.target as HTMLElement | null)?.closest?.('.library')) return; // the library owns it
     if (editable(e.target) || getState().editing) return;
 
     // Canvas.

@@ -21,6 +21,8 @@ pub mod http;
 pub mod ingest;
 pub mod mcp;
 pub mod query;
+#[cfg(test)]
+mod synth;
 pub mod sync;
 pub mod thumbs;
 pub mod ws;

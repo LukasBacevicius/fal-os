@@ -594,3 +594,29 @@ button, textarea, select, input { font: inherit; color: inherit; }
   background: #000;
   cursor: pointer;
 }
+
+/* ---- asset library (⌘⇧A panel, ⌘⇧L full) ---- */
+.library { display: flex; flex-direction: column; min-height: 0; background: var(--bg); outline: none; position: relative; }
+.library.panel { flex: none; width: 320px; border-right: 1px solid var(--line); }
+.library.full { position: fixed; inset: 0; z-index: 20; }
+.lib-head { height: 28px; flex: none; display: flex; align-items: center; gap: 1ch; padding: 0 8px; border-bottom: 1px solid var(--line); }
+.lib-search { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; }
+.lib-search::placeholder { color: var(--faint); }
+.lib-views { flex: none; display: flex; flex-wrap: wrap; gap: 0 1.5ch; padding: 2px 8px 4px; }
+.lib-views .on { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.lib-note { padding: 0 8px 4px; }
+.lib-grid { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; position: relative; padding: 0 1px; contain: strict; }
+.lib-space { position: relative; }
+.lib-tile { position: absolute; left: 0; top: 0; overflow: hidden; background: var(--panel); cursor: default; contain: strict; }
+.lib-tile img, .lib-strip { width: 100%; height: 100%; object-fit: cover; display: block; background-size: 400% 300%; }
+.lib-tile.on { outline: 1px solid var(--text); outline-offset: -1px; }
+.lib-tile.cur { outline: 1px solid var(--text); outline-offset: 1px; }
+.lib-badge { position: absolute; left: 3px; bottom: 2px; font-size: 10px; line-height: 12px; color: #fff; text-shadow: 0 0 2px #000, 0 0 2px #000; pointer-events: none; white-space: nowrap; }
+.lib-box { padding: 4px 6px; font-size: 11px; overflow: hidden; height: 100%; border: 1px solid var(--line); }
+.lib-empty { position: absolute; top: 72px; left: 0; right: 0; text-align: center; pointer-events: none; }
+.lib-ql { position: absolute; inset: 0; z-index: 2; background: rgba(5, 5, 5, 0.96); display: flex; flex-direction: column; padding: 16px; gap: 8px; }
+.lib-ql-media { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+.lib-ql-media img, .lib-ql-media video { max-width: 100%; max-height: 100%; object-fit: contain; }
+.lib-ql-audio { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.lib-ql-info { flex: none; display: flex; flex-direction: column; gap: 2px; }
+.lib-ql-prompt { max-height: 5.5em; overflow: auto; white-space: pre-wrap; }

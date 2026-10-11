@@ -14,6 +14,7 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | `?` | Shortcut list |
 | ⌘\\ | Show or hide the chat panel (everywhere) |
 | ⌘⇧\\ | Show or hide layers and properties (everywhere) |
+| ⌘⇧A / ⌘⇧L | Asset library: left panel / full screen. Arrows move, space quick look, ⏎ or drag places on the canvas, f favorite, t tag, c collect, u upload to fal, l local-only, s similar, esc closes |
 
 ## Start a chat from the canvas
 | Keys | Action |

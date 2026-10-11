@@ -68,6 +68,8 @@ export interface State {
     connected: Record<string, { agentName: string; session: string }>;
     firstWrite: Record<string, string[]>;
   };
+  /** Asset library: the left-panel tab (⌘⇧A) or the full-screen view (⌘⇧L). */
+  library: 'panel' | 'full' | null;
   toast: string | null;
   saved: 'idle' | 'saving' | 'saved';
 }
@@ -137,6 +139,7 @@ let state: State = {
       return null;
     }
   })(),
+  library: null,
   toast: null,
   saved: 'idle',
 };
