@@ -479,7 +479,17 @@ async fn encode_video(p: &super::Prepared, pr: &Json, dir: &Path, warnings: &mut
             }
         }
         if let Some(l) = num(pr, "lufs") {
-            a.extend([ff::s("-af"), format!("loudnorm=I={l}:TP=-1.5:LRA=11")]);
+            // Two-pass (measured, linear) loudnorm: single-pass dynamic mode undershoots the
+            // target by ~1 LU on short clips.
+            let m = ff::loudness_measure(&p.file, Some(format!("loudnorm=I={l}:TP=-1.5:LRA=11:print_format=json"))).await?;
+            let g = |k: &str| m[k].as_str().unwrap_or("0").to_string();
+            a.extend([
+                ff::s("-af"),
+                format!(
+                    "loudnorm=I={l}:TP=-1.5:LRA=11:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:linear=true,aresample=48000",
+                    g("input_i"), g("input_tp"), g("input_lra"), g("input_thresh"), g("target_offset")
+                ),
+            ]);
         }
     }
     if container != "webm" {
