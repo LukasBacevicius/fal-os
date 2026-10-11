@@ -120,7 +120,11 @@ impl SceneNode {
     /// `rect` is in the node's parent space; [`Scene::apply`] offsets it to world space.
     pub fn from_doc(n: &Node, tree: TreeID) -> Self {
         let card = match n.kind {
-            NodeKind::Note => n.props.get("color").map(json_str).unwrap_or_default(),
+            // Color, and the font size the text raster is laid out at.
+            NodeKind::Note | NodeKind::Text => {
+                let p = |k: &str| n.props.get(k).map(json_str).unwrap_or_default();
+                format!("{}\u{1}{}", p("color"), p("fontSize"))
+            }
             NodeKind::Generation => {
                 let p = |k: &str| n.props.get(k).map(json_str).unwrap_or_default();
                 let prompt = n.props.get("params").and_then(|v| v.get("prompt")).and_then(|v| v.as_str()).unwrap_or("");

@@ -77,7 +77,12 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .text-layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; }
 .note-text {
   position: absolute;
-  padding: 10px;
+  /* Covers the engine's raster of the same text (crossfade); the transparent 1 px border
+     keeps the engine's outline visible and the text at 10 px like the raster. */
+  padding: 9px;
+  border: 1px solid transparent;
+  background: var(--panel);
+  background-clip: padding-box;
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -103,6 +108,7 @@ button, textarea, select, input { font: inherit; color: inherit; }
 }
 
 .gen-info { overflow: hidden; }
+.frame-pending { display: flex; align-items: center; justify-content: center; font-size: 11px; }
 .gen-text {
   padding: 6px 8px;
   font-size: 10px;

@@ -169,9 +169,11 @@ fn desc_for(n: &SceneNode, media: &MediaStore, pal: &Palette, reveal: bool) -> N
             d.content = EngineContent::External;
         }
         Content::TextBox => {
-            d.kind = Kind::Flat;
-            d.content = EngineContent::None;
+            // The text raster (greeked when tiny); the page's DOM text fades in over it.
+            d.kind = Kind::Image;
+            d.content = EngineContent::External;
             d.color = pal.panel;
+            d.text = true;
         }
         Content::Generating => {
             d.kind = Kind::Flat;
@@ -214,7 +216,7 @@ impl RenderSink for EngineSink<'_> {
         let h = self.r.add(self.desc(n));
         self.handles.insert(h, n.id.clone());
         self.attach_video(h, n);
-        if !matches!(content_of(n), Content::None | Content::Generating | Content::TextBox) {
+        if !matches!(content_of(n), Content::None | Content::Generating) {
             self.todo.push_front((h, Tier::Low));
         }
         h
@@ -226,6 +228,10 @@ impl RenderSink for EngineSink<'_> {
             let a0 = old.size[0] / old.size[1].max(1e-3);
             let a1 = d.size[0] / d.size[1].max(1e-3);
             content |= (a0 - a1).abs() / a1.max(1e-3) > 0.02;
+        }
+        // Text rasters are laid out for the box: a resize re-wraps them.
+        if let (Content::TextBox, Some(old)) = (content_of(n), self.r.desc(h)) {
+            content |= (0..2).any(|i| (old.size[i] - d.size[i]).abs() > 0.5);
         }
         self.r.update(h, d);
         if content {
@@ -583,7 +589,7 @@ impl App {
         // Cards are drawn in the theme's colors: redraw them; refresh every node's fill.
         let all: Vec<(Handle, SceneNode)> = self.scene.iter().filter_map(|n| Some((n.handle?, n.clone()))).collect();
         for (h, n) in all {
-            let card = matches!(content_of(&n), Content::Card);
+            let card = matches!(content_of(&n), Content::Card | Content::TextBox);
             let mut sink = EngineSink {
                 r: &mut self.gpu.renderer,
                 media: &self.media,

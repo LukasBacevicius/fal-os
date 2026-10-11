@@ -5,8 +5,11 @@ import type { NodeView } from '../types';
 
 /** Font size in world units (CSS px at 100%). */
 export const NOTE_FONT = 12.5;
-/** Below this on-screen font size the text is not laid out (the box stays). */
+/** Below this on-screen font size there is no DOM text: the engine's raster of the text
+ *  (greeked lines when tiny) shows instead. Between MIN and FULL the DOM text (on the panel
+ *  color, so it covers the raster) fades in: a crossfade with no pop. */
 const MIN_FONT_PX = 3.5;
+const FULL_FONT_PX = 6.5;
 
 const isText = (n: NodeView) => n.kind === 'note' || n.kind === 'text';
 
@@ -101,19 +104,23 @@ export function TextLayer() {
   const editing = useStore((s) => s.editing);
   const rects = useMemo(() => worldRects(nodes), [nodes]);
   const texts = useMemo(() => nodes.filter(isText), [nodes]);
-  const readable = camera.zoom * NOTE_FONT >= MIN_FONT_PX;
+  const fontOf = (n: NodeView) => {
+    const fs = Number(n.props?.fontSize);
+    return fs > 0 ? fs : NOTE_FONT;
+  };
   const shown = texts.filter((n) => {
     if (n.id === editing) return true;
     const r = rects.get(n.id);
-    return !!r && readable && r[3] * camera.zoom >= 8 && inView(r, camera);
+    return !!r && fontOf(n) * camera.zoom >= MIN_FONT_PX && r[3] * camera.zoom >= 8 && inView(r, camera);
   });
   const z = camera.zoom;
   return (
     <div className="text-layer" style={{ transform: `translate(${-camera.x * z}px, ${-camera.y * z}px) scale(${z})` }}>
       {shown.map((n) => {
         const r = rects.get(n.id)!;
-        const fs = Number(n.props?.fontSize);
-        const style = { left: r[0], top: r[1], width: r[2], height: r[3], fontSize: fs > 0 ? fs : NOTE_FONT };
+        const fs = fontOf(n);
+        const fade = n.id === editing ? 1 : Math.min(1, Math.max(0, (fs * z - MIN_FONT_PX) / (FULL_FONT_PX - MIN_FONT_PX)));
+        const style = { left: r[0], top: r[1], width: r[2], height: r[3], fontSize: fs, opacity: fade };
         return (
           <div key={n.id} className="note-text" style={style}>
             {n.id === editing ? <Editor node={n} /> : n.text || (n.kind === 'text' ? <span className="faint">{n.name}</span> : null)}
