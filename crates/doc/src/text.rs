@@ -85,8 +85,25 @@ fn value(v: &Json) -> String {
         Json::Array(a) if a.len() >= 2 && a.iter().all(scalar) => {
             a.iter().map(value).collect::<Vec<_>>().join(",")
         }
-        _ => v.to_string(),
+        _ => canonical(v),
     }
+}
+
+/// JSON with object keys sorted, so the projection is byte-stable whether or not
+/// serde_json's `preserve_order` feature is enabled somewhere in the build.
+fn canonical(v: &Json) -> String {
+    fn sort(v: &Json) -> Json {
+        match v {
+            Json::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                Json::Object(keys.into_iter().map(|k| (k.clone(), sort(&m[k]))).collect())
+            }
+            Json::Array(a) => Json::Array(a.iter().map(sort).collect()),
+            _ => v.clone(),
+        }
+    }
+    sort(v).to_string()
 }
 
 fn prop(k: &str, v: &Json) -> String {
