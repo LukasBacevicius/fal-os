@@ -136,7 +136,7 @@ pub struct Part {
 
 /// One draw op. `m` maps the path's coordinates to the raster's.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(tag = "op", rename_all = "camelCase")]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Op {
     Fill {
         path: String,
@@ -180,15 +180,15 @@ pub enum Op {
         mode: String,
         parts: Vec<Part>,
         paints: Vec<Paint>,
-        /// Bounds of the result in raster coordinates (the paint area).
-        rect: [f64; 4],
-        /// Maps paint space (node-local) to raster coordinates.
+        /// Node size: the paints cover `[0, w] × [0, h]` in node space.
+        size: [f64; 2],
+        /// Maps node space to raster coordinates.
         m: [f64; 6],
     },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Paint {
     Solid {
         color: String,
@@ -538,6 +538,145 @@ fn apply_prop_refs(d: &mut Value, props: &Props) {
     }
 }
 
+// ---- variables ----------------------------------------------------------------------------
+
+/// Color variables: paints bound to a variable carry a cached `color`, but Figma refreshes
+/// that cache lazily, so some of it may be from another mode (e.g. light-mode values inside a
+/// dark-mode design). The clipboard ships the variables, not the mode an ancestor outside the
+/// copy selected, so the mode of each collection is inferred: the one whose values match the
+/// most cached colors wins, and bound paints are re-resolved with it.
+#[derive(Default)]
+struct Vars {
+    /// Variable id (`k:<key>` / `g:<guid>`) → (collection id, values by mode).
+    vars: HashMap<String, (String, Vec<(Guid, Value)>)>,
+    /// Collection id → its modes.
+    sets: HashMap<String, Vec<Guid>>,
+    /// Inferred mode per collection (both ids of a collection).
+    mode: HashMap<String, Guid>,
+}
+
+fn ref_id(r: &Value) -> Option<String> {
+    if let Some(k) = r.s("assetRef.key") {
+        return Some(format!("k:{k}"));
+    }
+    r.get("guid").and_then(guid_of).map(|(a, b)| format!("g:{a}:{b}"))
+}
+
+fn same_color(a: &Value, b: &Value) -> bool {
+    ["r", "g", "b", "a"].iter().all(|k| (a.f(k).unwrap_or(1.0) - b.f(k).unwrap_or(1.0)).abs() < 0.004)
+}
+
+impl Vars {
+    fn new(message: &Value) -> Vars {
+        let mut v = Vars::default();
+        let nodes = message.get("nodeChanges").map(|n| n.items()).unwrap_or_default();
+        let ids = |n: &Value| {
+            let mut ids = Vec::new();
+            if let Some(k) = n.s("key") {
+                ids.push(format!("k:{k}"));
+            }
+            if let Some((a, b)) = n.get("guid").and_then(guid_of) {
+                ids.push(format!("g:{a}:{b}"));
+            }
+            ids
+        };
+        for n in nodes {
+            match n.s("type") {
+                Some("VARIABLE_SET") => {
+                    let modes: Vec<Guid> = n.get("variableSetModes").map(|m| m.items().iter().filter_map(|m| m.get("id").and_then(guid_of)).collect()).unwrap_or_default();
+                    for id in ids(n) {
+                        v.sets.insert(id, modes.clone());
+                    }
+                }
+                Some("VARIABLE") => {
+                    let Some(set) = n.get("variableSetID").and_then(ref_id) else { continue };
+                    let values: Vec<(Guid, Value)> = n
+                        .at("variableDataValues.entries")
+                        .map(|e| e.items().iter().filter_map(|e| Some((e.get("modeID").and_then(guid_of)?, e.get("variableData")?.clone()))).collect())
+                        .unwrap_or_default();
+                    for id in ids(n) {
+                        v.vars.insert(id, (set.clone(), values.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !v.vars.is_empty() {
+            v.infer_modes(nodes);
+        }
+        v
+    }
+
+    /// The color of variable `id`, following aliases; `pick` chooses a collection's mode.
+    fn resolve(&self, id: &str, pick: &dyn Fn(&str) -> Option<Guid>, depth: usize) -> Option<Value> {
+        let (set, values) = self.vars.get(id)?;
+        if depth > 16 || values.is_empty() {
+            return None;
+        }
+        let mode = pick(set);
+        let data = mode.and_then(|m| values.iter().find(|(vm, _)| *vm == m)).unwrap_or(&values[0]).1.clone();
+        let value = data.get("value")?;
+        if let Some(c) = value.get("colorValue") {
+            return Some(c.clone());
+        }
+        self.resolve(&ref_id(value.get("alias")?)?, pick, depth + 1)
+    }
+
+    fn infer_modes(&mut self, nodes: &[Value]) {
+        // Every (variable, cached color) pair in the scene, overrides included.
+        fn walk<'v>(v: &'v Value, out: &mut Vec<(String, &'v Value)>) {
+            match v {
+                Value::Obj(o) => {
+                    if let (Some(alias), Some(color)) = (v.at("colorVar.value.alias"), o.get("color"))
+                        && let Some(id) = ref_id(alias)
+                    {
+                        out.push((id, color));
+                    }
+                    for x in o.values() {
+                        walk(x, out);
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        let mut bound = Vec::new();
+        for n in nodes.iter().filter(|n| !matches!(n.s("type"), Some("VARIABLE" | "VARIABLE_SET"))) {
+            walk(n, &mut bound);
+        }
+        let mut votes: HashMap<(String, Guid), usize> = HashMap::new();
+        for (id, cached) in &bound {
+            let Some((set, _)) = self.vars.get(id) else { continue };
+            for &m in self.sets.get(set).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let pick = |s: &str| (s == set).then_some(m);
+                if self.resolve(id, &pick, 0).is_some_and(|c| same_color(&c, cached)) {
+                    *votes.entry((set.clone(), m)).or_default() += 1;
+                }
+            }
+        }
+        let mut best: HashMap<String, (Guid, usize)> = HashMap::new();
+        for ((set, m), n) in votes {
+            let e = best.entry(set).or_insert((m, 0));
+            if n > e.1 || (n == e.1 && m < e.0) {
+                *e = (m, n);
+            }
+        }
+        for (set, (m, _)) in best {
+            self.mode.insert(set, m);
+        }
+    }
+
+    /// The paint's color: re-resolved from its variable when bound, else the cached one.
+    fn color(&self, p: &Value) -> Option<Value> {
+        if let Some(id) = p.at("colorVar.value.alias").and_then(ref_id)
+            && let Some(c) = self.resolve(&id, &|s| self.mode.get(s).copied(), 0)
+        {
+            return Some(c);
+        }
+        p.get("color").cloned()
+    }
+}
+
 // ---- mapping ------------------------------------------------------------------------------
 
 fn hex2(v: f64) -> String {
@@ -592,6 +731,7 @@ fn simple_image(p: &Value) -> Option<String> {
 
 struct Emit<'s, 'a> {
     scene: &'s mut Scene<'a>,
+    vars: Vars,
     blobs: Vec<&'a [u8]>,
     urls: &'a serde_json::Map<String, serde_json::Value>,
     out: Vec<PlanNode>,
@@ -723,9 +863,9 @@ impl<'s, 'a> Emit<'s, 'a> {
         let mut rest: &[&Value] = &fills;
         if kind == Kind::Frame {
             if let Some(first) = fills.first().filter(|p| is_solid_normal(p))
-                && let Some(c) = first.get("color")
+                && let Some(c) = self.vars.color(first)
             {
-                pn.fill = Some(hex_color(c, first.f("opacity").unwrap_or(1.0)));
+                pn.fill = Some(hex_color(&c, first.f("opacity").unwrap_or(1.0)));
                 rest = &fills[1..];
             }
             pn.radius = n.uniform_radius().map(|r| r * scale);
@@ -832,7 +972,7 @@ impl<'s, 'a> Emit<'s, 'a> {
         .iter()
         .find(|(k, _)| style.contains(k))
         .map_or(400, |(_, w)| *w);
-        let color = n.fills().iter().find(|p| p.s("type") == Some("SOLID")).and_then(|p| Some(hex_color(p.get("color")?, p.f("opacity").unwrap_or(1.0) * n.opacity())));
+        let color = n.fills().iter().find(|p| p.s("type") == Some("SOLID")).and_then(|p| Some(hex_color(&self.vars.color(p)?, p.f("opacity").unwrap_or(1.0) * n.opacity())));
         let lower = |s: Option<&str>, d: &str| s.unwrap_or(d).to_ascii_lowercase();
         let mut align = lower(n.d.s("textAlignHorizontal"), "left");
         if align == "justified" {
@@ -849,7 +989,9 @@ impl<'s, 'a> Emit<'s, 'a> {
             letter_spacing: (letter_spacing * 1000.0).round() / 1000.0,
             align,
             valign: lower(n.d.s("textAlignVertical"), "top"),
-            wrap: n.d.s("textAutoResize") != Some("WIDTH_AND_HEIGHT"),
+            // Auto-width text never wraps; neither does text Figma laid out on one line (a
+            // fallback font that runs wider must not push words onto a clipped second line).
+            wrap: n.d.s("textAutoResize") != Some("WIDTH_AND_HEIGHT") && bounds[3] >= 1.5 * line_height.unwrap_or(font_size * 1.2),
         };
         let mut pn = Self::node_at(Kind::Text, n.name(), bounds, origin, parent);
         pn.text = Some(style);
@@ -858,7 +1000,7 @@ impl<'s, 'a> Emit<'s, 'a> {
 
     fn sticky(&mut self, n: &RNode, bounds: [f64; 4], parent: Option<usize>, origin: (f64, f64)) {
         let mut pn = Self::node_at(Kind::Note, n.name(), bounds, origin, parent);
-        pn.fill = n.fills().first().and_then(|p| Some(hex_color(p.get("color")?, 1.0)));
+        pn.fill = n.fills().first().and_then(|p| Some(hex_color(&self.vars.color(p)?, 1.0)));
         pn.text = Some(TextStyle {
             characters: n.d.s("textData.characters").unwrap_or("").to_string(),
             font_size: n.d.f("fontSize").unwrap_or(16.0),
@@ -932,13 +1074,11 @@ impl<'s, 'a> Emit<'s, 'a> {
                 }
                 Op::Shadow { m, .. } => *m = shift.mul(&Mat(*m)).0,
                 Op::Push { clip_m, .. } => *clip_m = shift.mul(&Mat(*clip_m)).0,
-                Op::Bool { parts, paints: ps, rect, m, .. } => {
+                Op::Bool { parts, paints: ps, m, .. } => {
                     for p in parts.iter_mut() {
                         p.m = shift.mul(&Mat(p.m)).0;
                     }
                     *m = shift.mul(&Mat(*m)).0;
-                    rect[0] -= x0;
-                    rect[1] -= y0;
                     paints.extend(ps.iter());
                 }
                 Op::Pop => {}
@@ -995,10 +1135,9 @@ impl<'s, 'a> Emit<'s, 'a> {
             }
             let paints: Vec<Paint> = n.fills().iter().filter_map(|p| self.paint(p, n.size())).collect();
             if !parts.is_empty() && !paints.is_empty() {
-                let r = w.bounds(sw, sh);
-                b.add(r, 0.0);
+                b.add(w.bounds(sw, sh), 0.0);
                 let mode = n.d.s("booleanOperation").unwrap_or("UNION").to_ascii_lowercase();
-                ops.push(Op::Bool { mode, parts, paints, rect: r, m: w.0 });
+                ops.push(Op::Bool { mode, parts, paints, size: [sw, sh], m: w.0 });
             }
         } else {
             let fills = n.fills();
@@ -1148,7 +1287,7 @@ impl<'s, 'a> Emit<'s, 'a> {
         let blend = blend_of(p);
         let t = p.s("type")?;
         Some(match t {
-            "SOLID" => Paint::Solid { color: hex_color(p.get("color")?, opacity), blend },
+            "SOLID" => Paint::Solid { color: hex_color(&self.vars.color(p)?, opacity), blend },
             "GRADIENT_LINEAR" | "GRADIENT_RADIAL" | "GRADIENT_ANGULAR" | "GRADIENT_DIAMOND" => {
                 let inv = mat_of(p.get("transform")).invert()?;
                 let m = Mat::scale(w, h).mul(&inv);
@@ -1156,7 +1295,7 @@ impl<'s, 'a> Emit<'s, 'a> {
                     .get("stops")?
                     .items()
                     .iter()
-                    .filter_map(|s| Some((s.f("position")?.clamp(0.0, 1.0), hex_color(s.get("color")?, 1.0))))
+                    .filter_map(|s| Some((s.f("position")?.clamp(0.0, 1.0), hex_color(&self.vars.color(s)?, 1.0))))
                     .collect();
                 let kind = t.trim_start_matches("GRADIENT_").to_ascii_lowercase();
                 Paint::Gradient { kind, stops, m: m.0, opacity, blend }
@@ -1249,7 +1388,8 @@ pub fn plan(clip: &Clip) -> Plan {
         sel = Bounds([0.0, 0.0, 0.0, 0.0]);
     }
     let origin = (sel.0[0], sel.0[1]);
-    let mut e = Emit { scene: &mut scene, blobs, urls, out: Vec::new(), images: BTreeMap::new(), stats: Stats::default() };
+    let vars = Vars::new(&clip.message);
+    let mut e = Emit { scene: &mut scene, vars, blobs, urls, out: Vec::new(), images: BTreeMap::new(), stats: Stats::default() };
     for r in &roots {
         e.node(r, r.transform(), None, origin, true);
     }

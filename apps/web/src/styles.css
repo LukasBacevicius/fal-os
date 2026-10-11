@@ -89,6 +89,17 @@ button, textarea, select, input { font: inherit; color: inherit; }
   overflow: hidden;
   color: var(--text);
 }
+/* Styled text (e.g. pasted from Figma): bare glyphs in their own font, no card. */
+.note-text.styled {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+  overflow-wrap: normal;
+}
+.note-text.styled > * { width: 100%; }
 .note-edit {
   display: block;
   width: 100%;

@@ -483,6 +483,31 @@ export class HostSync {
     }
   }
 
+  /** Has the host download a remote media URL into the project's assets (pages can't fetch
+   *  most CDNs: no CORS). Resolves to the stored asset. */
+  async importUrl(url: string, sha256?: string): Promise<{ id: string; mime: string; width: number | null; height: number | null; size: number }> {
+    const q = this.project ? `?project=${encodeURIComponent(this.project)}` : '';
+    const r = await fetch(`${this.base('http')}/import/url${q}`, {
+      method: 'POST',
+      headers: { ...this.auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(sha256 ? { url, sha256 } : { url }),
+    });
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
+    return await r.json();
+  }
+
+  /** The bytes of an asset stored on the host. */
+  async assetBlob(id: string): Promise<Blob> {
+    const r = await fetch(this.assetUrl(id), { headers: this.auth() });
+    if (!r.ok) throw new Error(`asset ${r.status}`);
+    return await r.blob();
+  }
+
+  /** Marks an asset as present on the host (no upload attempt for it). */
+  markUploaded(id: string) {
+    this.uploaded.add(id);
+  }
+
   /** Makes assets referenced by nodes available: local blobs are uploaded, missing ones loaded. */
   syncAssets(nodes: NodeView[]) {
     if (!this.connected) return;

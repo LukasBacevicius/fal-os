@@ -148,6 +148,11 @@ struct EngineSink<'a> {
     reveal: &'a mut HashSet<String>,
 }
 
+/// On-screen font sizes (CSS px) between which the page's DOM text fades in over a text
+/// raster (`MIN_FONT_PX` / `FULL_FONT_PX` in TextLayer.tsx).
+const TEXT_MIN_FONT_PX: f32 = 3.5;
+const TEXT_FULL_FONT_PX: f32 = 6.5;
+
 /// Stable per-node seed for the generating tile's dots.
 fn seed_of(id: &str) -> u32 {
     id.bytes().fold(2_166_136_261u32, |h, b| (h ^ b as u32).wrapping_mul(16_777_619))
@@ -188,9 +193,15 @@ fn desc_for(n: &SceneNode, media: &MediaStore, pal: &Palette, reveal: bool) -> N
             // The text raster (greeked when tiny); the page's DOM text fades in over it.
             d.kind = Kind::Image;
             d.content = EngineContent::External;
-            // Styled text draws bare: no backdrop behind its glyphs.
-            d.color = if n.styled_text() { 0 } else { pal.panel };
+            d.color = pal.panel;
             d.text = true;
+            if n.styled_text() {
+                // Bare text (no backdrop). Its DOM twin is transparent too, so instead of being
+                // covered, the raster fades out as the DOM text fades in (TextLayer.tsx).
+                d.color = 0;
+                let fs = n.card_field(1).parse::<f32>().ok().filter(|v| *v > 0.0).unwrap_or(12.5);
+                d.text_fade = Some([TEXT_MIN_FONT_PX / fs, TEXT_FULL_FONT_PX / fs]);
+            }
         }
         Content::Generating => {
             d.kind = Kind::Flat;
@@ -242,8 +253,12 @@ impl RenderSink for EngineSink<'_> {
 
     fn update(&mut self, h: Handle, n: &SceneNode, mut content: bool) {
         // A placeholder image that just got its pixels (streaming paste): dots until they are
-        // resident, then the crossfade, like a finished generation.
-        if matches!(content_of(n), Content::Image) && self.r.desc(h).is_some_and(|o| o.generating.is_some_and(|g| !g.reveal)) {
+        // resident, then the crossfade, like a finished generation. Transparent ones (vector
+        // art) just appear: the reveal draws over an opaque tile color.
+        if matches!(content_of(n), Content::Image)
+            && !n.transparent()
+            && self.r.desc(h).is_some_and(|o| o.generating.is_some_and(|g| !g.reveal))
+        {
             self.reveal.insert(n.id.clone());
         }
         let d = self.desc(n);

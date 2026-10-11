@@ -362,8 +362,14 @@ function drawStyled(g, spec, k, W, H) {
   g.textBaseline = 'alphabetic';
   lines.forEach((l, i) => {
     const lw = g.measureText(l).width;
+    const y = top + i * lh + (lh - asc - desc) / 2 + asc;
+    if (lw > W) {
+      // A substitute font running wider than the original: condense the line to the box.
+      g.save(); g.scale(W / lw, 1); g.fillText(l, 0, y); g.restore();
+      return;
+    }
     const x = spec.align === 'right' ? W - lw : spec.align === 'center' ? (W - lw) / 2 : 0;
-    g.fillText(l, x, top + i * lh + (lh - asc - desc) / 2 + asc);
+    g.fillText(l, x, y);
   });
 }
 

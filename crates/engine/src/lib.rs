@@ -38,6 +38,7 @@ const FLAG_FLAT: u32 = 16;
 const GEN_NONE: f32 = 0.0;
 const GEN_DOTS: f32 = 1.0;
 const GEN_REVEAL: f32 = 2.0;
+const GEN_TEXT_FADE: f32 = 3.0;
 /// Crossfade from the dots to the media once its pixels are resident, seconds.
 pub const REVEAL_SECS: f32 = 0.2;
 
@@ -86,6 +87,9 @@ pub struct NodeDesc {
     /// Draw as a generating tile: sparse drifting square dots over `color` (one shader effect,
     /// no CPU work per frame).
     pub generating: Option<GenTile>,
+    /// A text raster under transparent DOM text: fades out between these camera zooms (CSS px
+    /// per world unit) while the page's text fades in over it.
+    pub text_fade: Option<[f32; 2]>,
 }
 
 /// A generation placeholder drawn by the shader (see [`NodeDesc::gen`]).
@@ -113,6 +117,7 @@ impl Default for NodeDesc {
             hidden: false,
             text: false,
             generating: None,
+            text_fade: None,
         }
     }
 }
@@ -1919,7 +1924,10 @@ fn instance_for(h: Handle, n: &NodeDesc, low_ready: bool, detail_slot: i32) -> I
         radius: n.radius,
         hires_layer: -1,
         tile: match n.generating {
-            None => [0.0, -1.0, GEN_NONE, -1.0],
+            None => match n.text_fade {
+                Some([z0, z1]) => [z0, z1, GEN_TEXT_FADE, -1.0],
+                None => [0.0, -1.0, GEN_NONE, -1.0],
+            },
             Some(g) => [(g.seed & 0xffff) as f32, g.progress, if g.reveal { GEN_REVEAL } else { GEN_DOTS }, -1.0],
         },
     }

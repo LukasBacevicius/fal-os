@@ -1,10 +1,12 @@
-// Canvas actions behind the keyboard: duplicate, group/ungroup into frames, copy/paste,
+// Canvas actions behind the keyboard: duplicate, group/ungroup into frames, copy/paste
+// (incl. Figma scenes and image data),
 // reading-order selection cycling, zoom. Everything goes through `CanvasApp.apply` (one
 // transaction = one undo step, attributed to the local actor) or the camera API.
 
 import { getState, toast } from './store';
 import { worldRects, type Rect } from './geometry';
 import { importFiles } from './controller';
+import { importFigma, isFigmaScene } from './figma';
 import type { NodeView } from './types';
 
 const ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -96,15 +98,67 @@ export function copy(e: ClipboardEvent): boolean {
 
 let lastClip: Clip | null = null;
 
-/** Paste: files/images become media nodes (uploaded to the host like drops), copied nodes
- *  are recreated at the cursor, plain text becomes a note. */
+/** Image files in a paste: `files`, plus file items some sources only expose as items. */
+function clipboardFiles(dt: DataTransfer | null): File[] {
+  if (!dt) return [];
+  const files = Array.from(dt.files);
+  if (files.length) return files;
+  return Array.from(dt.items ?? [])
+    .filter((i) => i.kind === 'file')
+    .map((i) => i.getAsFile())
+    .filter((f): f is File => !!f);
+}
+
+const EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
+const imageFile = (blob: Blob, name = 'pasted') => new File([blob], `${name}.${EXT[blob.type] ?? 'png'}`, { type: blob.type || 'image/png' });
+
+/** `<img src="data:image/…">` in clipboard HTML (some apps paste images only that way). */
+function dataImages(html: string): File[] {
+  const out: File[] = [];
+  for (const m of html.matchAll(/<img[^>]+src="(data:image\/[a-z+.-]+;base64,[^"]+)"/gi)) {
+    try {
+      const [head, b64] = m[1].split(',');
+      const type = head.slice(5, head.indexOf(';'));
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      out.push(imageFile(new Blob([bytes], { type })));
+    } catch {
+      /* skip */
+    }
+  }
+  return out;
+}
+
+/** Images on the system clipboard through the async Clipboard API. Chrome hides an image
+ *  from paste events when the clipboard also carries HTML (e.g. Figma's "Copy as PNG"). */
+async function asyncClipboardImages(): Promise<File[]> {
+  try {
+    const items = await navigator.clipboard?.read?.();
+    const out: File[] = [];
+    for (const item of items ?? []) {
+      const type = item.types.find((t) => t.startsWith('image/'));
+      if (type) out.push(imageFile(await item.getType(type)));
+    }
+    return out;
+  } catch {
+    return []; // no permission / unsupported
+  }
+}
+
+/** Paste, in priority order: a Figma scene (native import: frames, text, images, vectors),
+ *  image data (files, `<img>` data URLs, or the async clipboard) as image nodes, our own
+ *  copied nodes, and plain text as a note. Lands at the cursor (`at`) or the view center. */
 export async function paste(e: ClipboardEvent, at: [number, number] | null) {
   const { app } = getState();
   if (!app) return;
+  e.preventDefault();
   const dt = e.clipboardData;
-  const files = dt ? Array.from(dt.files) : [];
+  const html = dt?.getData('text/html') ?? '';
+  if (html && isFigmaScene(html)) {
+    await importFigma(html, at);
+    return;
+  }
+  const files = clipboardFiles(dt);
   if (files.length) {
-    e.preventDefault();
     await importFiles(files, at ?? undefined);
     return;
   }
@@ -116,8 +170,7 @@ export async function paste(e: ClipboardEvent, at: [number, number] | null) {
   } catch {
     /* not ours */
   }
-  if (!clip && !text && lastClip) clip = lastClip;
-  e.preventDefault();
+  if (!clip && !text && !html && lastClip) clip = lastClip;
   if (clip) {
     const c = getState().camera;
     const p = at ?? [c.width / 2, c.height / 2];
@@ -125,7 +178,18 @@ export async function paste(e: ClipboardEvent, at: [number, number] | null) {
     const minX = Math.min(...clip.nodes.filter((n) => !n.parent || !clip!.nodes.some((m) => m.id === n.parent)).map((n) => n.x));
     const minY = Math.min(...clip.nodes.filter((n) => !n.parent || !clip!.nodes.some((m) => m.id === n.parent)).map((n) => n.y));
     pasteClip(clip, [wx - minX, wy - minY]);
-  } else if (text.trim()) {
+    return;
+  }
+  // HTML that is (mostly) an image, or nothing readable at all: look for image data.
+  if (/<img\b/i.test(html) || html.includes('(figmeta)') || !text.trim()) {
+    const imgs = dataImages(html);
+    const found = imgs.length ? imgs : await asyncClipboardImages();
+    if (found.length) {
+      await importFiles(found, at ?? undefined);
+      return;
+    }
+  }
+  if (text.trim()) {
     const c = getState().camera;
     const p = at ?? [c.width / 2, c.height / 2];
     const [x, y] = app.screenToWorld(p[0], p[1]);

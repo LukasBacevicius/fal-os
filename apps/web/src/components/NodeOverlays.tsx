@@ -58,13 +58,15 @@ export function NodeOverlays() {
 
   // Frame titles, decluttered (brilliant-canvas-interaction.md): frames too small on screen
   // lose their title, overlapping titles keep the bigger frame's, and the hovered/selected
-  // frame always keeps its own. DOM above the canvas, so titles never sit under content.
+  // frame always keeps its own. Nested frames (e.g. a pasted Figma design's cards) show
+  // theirs only when hovered or selected, like in Figma. DOM above the canvas, so titles
+  // never sit under content.
   const labels: { n: NodeView; b: ReturnType<typeof screen>; pin: boolean }[] = [];
   {
     const cands = nodes
       .filter((n) => n.kind === 'frame' && n.name)
       .map((n) => ({ n, b: screen(rects.get(n.id)!), pin: n.id === hover || selection.includes(n.id) }))
-      .filter((c) => visible(c.b) && (c.pin || c.b.width >= 40))
+      .filter((c) => visible(c.b) && (c.pin || (c.b.width >= 40 && !c.n.parent)))
       .sort((a, b) => Number(b.pin) - Number(a.pin) || b.b.width * b.b.height - a.b.width * a.b.height);
     const placed: [number, number, number, number][] = [];
     for (const c of cands) {

@@ -1011,6 +1011,7 @@ dependencies = [
  "console_log",
  "falos-doc",
  "falos-engine",
+ "falos-figma",
  "js-sys",
  "log",
  "serde",

@@ -60,7 +60,7 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: 'double-click  esc', desc: 'enter a group / back up a level' },
   { group: 'canvas', keys: '⌘ click', desc: 'select inside groups directly' },
   { group: 'canvas', keys: 'drag onto the chat', desc: 'attach the dragged node as a chip' },
-  { group: 'canvas', keys: '⌘C  ⌘V', desc: 'copy / paste nodes; paste images and files as media' },
+  { group: 'canvas', keys: '⌘C  ⌘V', desc: 'copy / paste nodes; paste images and files as media, Figma selections as layers' },
   { group: 'canvas', keys: '⌫', desc: 'delete' },
   { group: 'canvas', keys: 'arrows  ⇧arrows', desc: 'nudge 1 px / 10 px' },
   { group: 'canvas', keys: '⌘Z  ⌘⇧Z', desc: 'undo / redo (your own changes)' },

@@ -14,7 +14,7 @@ fn defs() -> Vec<DefSpec> {
     let f = |n, t| (n, t, false);
     let a = |n, t| (n, t, true);
     vec![
-        ("NodeType", 0, vec![f("DOCUMENT", ""), f("CANVAS", ""), f("FRAME", ""), f("GROUP", ""), f("TEXT", ""), f("RECTANGLE", ""), f("VECTOR", ""), f("INSTANCE", ""), f("SYMBOL", ""), f("ELLIPSE", "")]),
+        ("NodeType", 0, vec![f("DOCUMENT", ""), f("CANVAS", ""), f("FRAME", ""), f("GROUP", ""), f("TEXT", ""), f("RECTANGLE", ""), f("VECTOR", ""), f("INSTANCE", ""), f("SYMBOL", ""), f("ELLIPSE", ""), f("VARIABLE", ""), f("VARIABLE_SET", "")]),
         ("PaintType", 0, vec![f("SOLID", ""), f("IMAGE", ""), f("GRADIENT_LINEAR", "")]),
         ("ScaleMode", 0, vec![f("FILL", ""), f("FIT", ""), f("STRETCH", "")]),
         ("PropField", 0, vec![f("VISIBLE", ""), f("TEXT_DATA", "")]),
@@ -25,6 +25,14 @@ fn defs() -> Vec<DefSpec> {
         ("ParentIndex", 2, vec![f("guid", "GUID"), f("position", "string")]),
         ("Image", 2, vec![a("hash", "byte"), f("name", "string")]),
         ("Stop", 2, vec![f("color", "Color"), f("position", "float")]),
+        ("Alias", 2, vec![f("guid", "GUID")]),
+        ("VarRefValue", 2, vec![f("alias", "Alias")]),
+        ("VarRef", 2, vec![f("value", "VarRefValue")]),
+        ("Mode", 2, vec![f("id", "GUID"), f("name", "string")]),
+        ("ColorValue", 2, vec![f("colorValue", "Color")]),
+        ("ColorData", 2, vec![f("value", "ColorValue")]),
+        ("ModeValue", 2, vec![f("modeID", "GUID"), f("variableData", "ColorData")]),
+        ("ModeValues", 2, vec![a("entries", "ModeValue")]),
         (
             "Paint",
             2,
@@ -39,6 +47,7 @@ fn defs() -> Vec<DefSpec> {
                 a("stops", "Stop"),
                 f("originalImageWidth", "float"),
                 f("originalImageHeight", "float"),
+                f("colorVar", "VarRef"),
             ],
         ),
         ("TextData", 2, vec![f("characters", "string")]),
@@ -78,6 +87,9 @@ fn defs() -> Vec<DefSpec> {
                 a("componentPropRefs", "PropRef"),
                 f("internalOnly", "bool"),
                 f("resizeToFit", "bool"),
+                a("variableSetModes", "Mode"),
+                f("variableSetID", "Alias"),
+                f("variableDataValues", "ModeValues"),
             ],
         ),
         ("Blob", 2, vec![a("bytes", "byte")]),
@@ -241,12 +253,38 @@ pub fn scene() -> J {
     })
 }
 
+/// A dark board whose paints are bound to a two-mode color variable; one cached color is
+/// stale (from the light mode).
+pub fn themed_scene() -> J {
+    let pi = |p: J, pos: &str| json!({"guid": p, "position": pos});
+    let rgb = |v: f64| json!({"r": v, "g": v, "b": v, "a": 1});
+    let bound = |cached: f64| json!({"type": "SOLID", "color": rgb(cached), "opacity": 1, "visible": true, "colorVar": {"value": {"alias": {"guid": g(3, 1)}}}});
+    let rect = |l: u32, pos: &str, cached: f64| json!({"guid": g(1, l), "parentIndex": pi(g(1, 1), pos), "type": "FRAME", "name": format!("Card {l}"), "size": {"x": 10, "y": 10}, "transform": at(0.0, 0.0), "fillPaints": [bound(cached)]});
+    json!({
+        "nodeChanges": [
+            {"guid": g(0, 0), "type": "DOCUMENT", "name": "Document"},
+            {"guid": g(0, 1), "parentIndex": pi(g(0, 0), "!"), "type": "CANVAS", "name": "Page 1"},
+            {"guid": g(9, 1), "parentIndex": pi(g(0, 0), "~"), "type": "CANVAS", "name": "Internal Only Canvas", "internalOnly": true},
+            {"guid": g(3, 0), "parentIndex": pi(g(9, 1), "!"), "type": "VARIABLE_SET", "name": "Tokens", "variableSetModes": [{"id": g(4, 1), "name": "light"}, {"id": g(4, 2), "name": "dark"}]},
+            {"guid": g(3, 1), "parentIndex": pi(g(9, 1), "\""), "type": "VARIABLE", "name": "surface", "variableSetID": {"guid": g(3, 0)},
+             "variableDataValues": {"entries": [{"modeID": g(4, 1), "variableData": {"value": {"colorValue": rgb(1.0)}}}, {"modeID": g(4, 2), "variableData": {"value": {"colorValue": rgb(0.0)}}}]}},
+            {"guid": g(1, 1), "parentIndex": pi(g(0, 1), "!"), "type": "FRAME", "name": "Board", "size": {"x": 100, "y": 100}, "transform": at(0.0, 0.0)},
+            rect(2, "!", 0.0), rect(3, "\"", 0.0), rect(4, "#", 1.0),
+        ],
+        "blobs": [],
+    })
+}
+
 /// The scene as Figma clipboard HTML.
 pub fn html() -> String {
+    html_of(&scene())
+}
+
+pub fn html_of(scene: &J) -> String {
     let defs = defs();
     let schema = encode_schema(&defs);
     let mut msg = Writer::default();
-    encode_value(&defs, "Message", &scene(), &mut msg);
+    encode_value(&defs, "Message", scene, &mut msg);
     let mut archive = b"fig-kiwi".to_vec();
     archive.extend_from_slice(&15u32.to_le_bytes());
     for chunk in [miniz_oxide::deflate::compress_to_vec(&schema, 6), miniz_oxide::deflate::compress_to_vec_zlib(&msg.0, 6)] {
@@ -319,8 +357,20 @@ mod tests {
         assert_eq!(label.text.as_ref().unwrap().characters, "Submit");
         assert_eq!(label.text.as_ref().unwrap().font_weight, 600);
 
+        // Ops serialize with camelCase fields (the client reads `clipM`).
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(!json.contains("clip_m"));
+
         // Parents first, z-order bottom to top under the board.
         let kids: Vec<&str> = plan.nodes.iter().filter(|n| n.parent == Some(0)).map(|n| n.name.as_str()).collect();
         assert_eq!(kids, ["Title", "Photo", "Arrow", "Icons", "Button"]);
+    }
+
+    #[test]
+    fn variable_mode_is_inferred_from_cached_colors() {
+        let plan = crate::plan_html(&html_of(&themed_scene())).unwrap();
+        let fills: Vec<&str> = plan.nodes.iter().filter(|n| n.name.starts_with("Card")).map(|n| n.fill.as_deref().unwrap()).collect();
+        // Two cached colors say "dark", so the stale light one is re-resolved too.
+        assert_eq!(fills, ["#000000", "#000000", "#000000"]);
     }
 }

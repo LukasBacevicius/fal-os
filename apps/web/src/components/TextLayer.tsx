@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { getState, setState, useStore } from '../store';
 import { inView, worldRects } from '../geometry';
 import type { NodeView } from '../types';
@@ -8,8 +8,8 @@ export const NOTE_FONT = 12.5;
 /** Below this on-screen font size there is no DOM text: the engine's raster of the text
  *  (greeked lines when tiny) shows instead. Between MIN and FULL the DOM text (on the panel
  *  color, so it covers the raster) fades in: a crossfade with no pop. */
-const MIN_FONT_PX = 3.5;
-const FULL_FONT_PX = 6.5;
+const MIN_FONT_PX = 3.5; // also TEXT_MIN_FONT_PX in crates/client/src/web/mod.rs
+const FULL_FONT_PX = 6.5; // also TEXT_FULL_FONT_PX
 
 const isText = (n: NodeView) => n.kind === 'note' || n.kind === 'text';
 
@@ -30,6 +30,29 @@ export function createNote(screen: [number, number]) {
     app.setSelection([id]);
     setState({ editing: id });
   }
+}
+
+const SANS = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+const VALIGN: Record<string, string> = { top: 'flex-start', center: 'center', bottom: 'flex-end' };
+
+/** Styled text (a text node with a `color`, e.g. pasted from Figma): bare glyphs in its own
+ *  font, like the engine's raster of it (media.rs `drawStyled`). */
+function styledText(n: NodeView): React.CSSProperties {
+  const p = n.props ?? {};
+  if (n.kind !== 'text' || !p.color) return {};
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const lh = num(p.lineHeight);
+  return {
+    color: String(p.color),
+    fontFamily: p.font ? `"${String(p.font).replace(/"/g, '')}", ${SANS}` : SANS,
+    fontWeight: num(p.weight) ?? 400,
+    fontStyle: p.italic ? 'italic' : undefined,
+    lineHeight: lh ? `${lh}px` : 1.2,
+    letterSpacing: num(p.letterSpacing) ? `${p.letterSpacing}px` : undefined,
+    textAlign: (p.align as React.CSSProperties['textAlign']) ?? 'left',
+    whiteSpace: p.nowrap ? 'pre' : 'pre-wrap',
+    justifyContent: VALIGN[String(p.valign ?? 'top')] ?? 'flex-start',
+  };
 }
 
 /** Common prefix length (for keeping the caret in place across remote edits). */
@@ -111,7 +134,10 @@ export function TextLayer() {
   const shown = texts.filter((n) => {
     if (n.id === editing) return true;
     const r = rects.get(n.id);
-    return !!r && fontOf(n) * camera.zoom >= MIN_FONT_PX && r[3] * camera.zoom >= 8 && inView(r, camera);
+    // Styled text: the engine's raster fades out over the same font-size range (mod.rs
+    // `text_fade`), so it shows regardless of the box height.
+    const tall = (n.kind === 'text' && !!n.props?.color) || r[3] * camera.zoom >= 8;
+    return !!r && fontOf(n) * camera.zoom >= MIN_FONT_PX && tall && inView(r, camera);
   });
   const z = camera.zoom;
   return (
@@ -120,10 +146,10 @@ export function TextLayer() {
         const r = rects.get(n.id)!;
         const fs = fontOf(n);
         const fade = n.id === editing ? 1 : Math.min(1, Math.max(0, (fs * z - MIN_FONT_PX) / (FULL_FONT_PX - MIN_FONT_PX)));
-        const style = { left: r[0], top: r[1], width: r[2], height: r[3], fontSize: fs, opacity: fade };
+        const style: React.CSSProperties = { left: r[0], top: r[1], width: r[2], height: r[3], fontSize: fs, opacity: fade, ...styledText(n) };
         return (
-          <div key={n.id} className="note-text" style={style}>
-            {n.id === editing ? <Editor node={n} /> : n.text || (n.kind === 'text' ? <span className="faint">{n.name}</span> : null)}
+          <div key={n.id} className={n.kind === 'text' && n.props?.color ? 'note-text styled' : 'note-text'} style={style}>
+            {n.id === editing ? <Editor node={n} /> : n.kind === 'text' && n.props?.color ? <span>{n.text}</span> : n.text || (n.kind === 'text' ? <span className="faint">{n.name}</span> : null)}
           </div>
         );
       })}

@@ -184,6 +184,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Generating tiles (mode 1: dots; mode 2: dots until the media is resident, then a
     // crossfade to it).
     let mode = in.gen.z;
+    // A text raster under the page's (transparent) DOM text: fades out as that fades in.
+    if mode > 2.5 {
+        let k = 1.0 - smoothstep(in.gen.x, in.gen.y, cam.zoom / cam.dpr);
+        return vec4(rgb * coverage * k, a * coverage * k);
+    }
     if mode > 0.5 {
         var fade = 0.0;
         if mode > 1.5 && in.gen.w >= 0.0 {
