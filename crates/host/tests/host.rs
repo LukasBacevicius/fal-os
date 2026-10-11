@@ -726,6 +726,16 @@ async fn import_url_downloads_media_into_assets() {
     let wrong = "0".repeat(64);
     let r = post(json!({"url": format!("http://127.0.0.1:{cdn_port}/img"), "sha256": wrong})).await.unwrap();
     assert_eq!(r.status(), 400);
+    // By SHA-1 (Figma's image names): verified, then remembered, so a re-import skips the
+    // download even with a dead URL.
+    let h1: String = sha1::Sha1::digest(&png).iter().map(|b| format!("{b:02x}")).collect();
+    let r = post(json!({"url": format!("http://127.0.0.1:{cdn_port}/img"), "sha1": "1".repeat(40)})).await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = post(json!({"url": format!("http://127.0.0.1:{cdn_port}/img"), "sha1": h1})).await.unwrap();
+    assert!(r.status().is_success());
+    let r = post(json!({"url": "http://127.0.0.1:1/gone", "sha1": h1})).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Json>().await.unwrap()["id"], format!("sha256:{hex}"));
     // Not media, upstream errors, bad schemes.
     let r = post(json!({"url": format!("http://127.0.0.1:{cdn_port}/page")})).await.unwrap();
     assert_eq!(r.status(), 415);

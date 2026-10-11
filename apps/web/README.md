@@ -28,6 +28,10 @@ needs attention). Keyboard: `docs/SHORTCUTS.md` (`?` in the app, ⌘K palette).
 - `src/keys.ts` (all shortcuts), `src/actions.ts` (duplicate, group, copy/paste, Tab order),
   `src/components/Palette.tsx` (⌘K and the `?` list).
 - `src/controller.ts`: wasm events → store, IndexedDB persistence (`persist.ts`), file import.
+- `src/figma.ts` + `src/raster.ts`: Figma paste. `figmaPlan` (crates/figma, in the wasm
+  client) decodes the Figma clipboard scene; the import lands as one undo step (frames,
+  groups, styled text, image placeholders) and streams in the pixels: Figma images through
+  the host (`POST /import/url`, CORS), vector art rendered to PNG with Canvas 2D.
 
 ## Host (live collaboration)
 With a fal-os host running (`cargo run -p falos-host -- serve --project <dir>`), the page

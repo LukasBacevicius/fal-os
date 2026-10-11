@@ -124,12 +124,14 @@ pub fn commands_to_svg(blob: &[u8]) -> Option<String> {
     Some(p.0)
 }
 
+/// `(start vertex, start tangent, end vertex, end tangent)`.
+pub type Segment = (usize, (f64, f64), usize, (f64, f64));
+
 /// A decoded `vectorNetworkBlob` (coordinates in the network's normalized space).
 #[derive(Debug, Default, Clone)]
 pub struct Network {
     pub vertices: Vec<(f64, f64)>,
-    /// `(start, start tangent, end, end tangent)`.
-    pub segments: Vec<(usize, (f64, f64), usize, (f64, f64))>,
+    pub segments: Vec<Segment>,
     /// `(nonzero winding?, loops of segment indices)`.
     pub regions: Vec<(bool, Vec<Vec<usize>>)>,
 }

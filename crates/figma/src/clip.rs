@@ -84,7 +84,7 @@ pub fn decompress(chunk: &[u8]) -> Result<Vec<u8>> {
         dec.read_to_end(&mut out).map_err(|e| Error(format!("zstd: {e}")))?;
         return Ok(out);
     }
-    if chunk.len() > 2 && chunk[0] == 0x78 && (u16::from_be_bytes([chunk[0], chunk[1]]) % 31 == 0)
+    if chunk.len() > 2 && chunk[0] == 0x78 && u16::from_be_bytes([chunk[0], chunk[1]]).is_multiple_of(31)
         && let Ok(v) = miniz_oxide::inflate::decompress_to_vec_zlib(chunk)
     {
         return Ok(v);

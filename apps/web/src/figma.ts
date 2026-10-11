@@ -41,8 +41,9 @@ async function sha256Id(blob: Blob): Promise<string> {
 const ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const newId = () => Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => ID_CHARS[b % 36]).join('');
 
-/** Untracked prop updates, batched (one transaction per ~60 ms) and skipping nodes that are
- *  gone (e.g. the paste was undone meanwhile). */
+/** Untracked prop updates, batched (one transaction per ~250 ms: every transaction re-reads
+ *  the node list and re-renders the panels, which is what limits a big paste) and skipping
+ *  nodes that are gone (e.g. the paste was undone meanwhile). */
 function updater() {
   let queue: { id: string; props: Record<string, unknown> }[] = [];
   let timer = 0;
@@ -62,7 +63,7 @@ function updater() {
   return {
     push(id: string, props: Record<string, unknown>) {
       queue.push({ id, props });
-      timer ||= window.setTimeout(flush, 60);
+      timer ||= window.setTimeout(flush, 250);
     },
     flush() {
       window.clearTimeout(timer);
@@ -80,16 +81,20 @@ function registerLocal(id: string, blob: Blob, mime: string, name: string) {
 
 /** Downloads a Figma image: through the host when connected, else directly (works only for
  *  CORS-enabled URLs). Resolves to the asset id and a bitmap for rasters that draw it. */
-async function fetchImage(url: string, name: string): Promise<{ id: string; blob: Blob }> {
+async function fetchImage(url: string, sha1: string, name: string): Promise<{ id: string; blob: Blob }> {
   const sync = hostSync();
   if (sync?.connected) {
-    const a = await sync.importUrl(url);
+    // Figma names images by SHA-1: the host verifies it and skips known ones.
+    const a = await sync.importUrl(url, { sha1 });
     sync.markUploaded(a.id);
     const blob = await sync.assetBlob(a.id);
     registerLocal(a.id, blob, a.mime || blob.type, name);
     return { id: a.id, blob };
   }
-  const r = await fetch(url);
+  // No host: only CORS-enabled URLs work (Figma's don't), so say what would fix it.
+  const r = await fetch(url).catch(() => {
+    throw new Error('blocked by CORS: Figma images download through the fal-os host');
+  });
   if (!r.ok) throw new Error(`download ${r.status}`);
   const blob = await r.blob();
   const id = await sha256Id(blob);
@@ -166,7 +171,7 @@ export async function importFigma(html: string, at: [number, number] | null): Pr
     const url = plan.images[hash];
     try {
       if (!url) throw new Error('no download URL');
-      const img = await fetchImage(url, `figma-${hash.slice(0, 8)}`);
+      const img = await fetchImage(url, hash, `figma-${hash.slice(0, 8)}`);
       for (const id of nodes) fill.push(id, { asset: img.id });
       images.get(hash)!.resolve(img);
     } catch (e) {

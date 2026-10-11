@@ -386,6 +386,16 @@ pub struct ImportUrl {
     /// and the download must match it.
     #[serde(default)]
     pub sha256: Option<String>,
+    /// SHA-1 of the content (what Figma names its images by): the download must match it, and
+    /// is remembered (`assets/.sha1/<sha1>` → sha256) so the same image imports again without
+    /// a download.
+    #[serde(default)]
+    pub sha1: Option<String>,
+}
+
+fn sha1_hex(s: &str) -> Option<String> {
+    let h = s.strip_prefix("sha1:").unwrap_or(s).to_ascii_lowercase();
+    (h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit())).then_some(h)
 }
 
 /// `POST /import/url?project=<id>` `{url, sha256?}` → `{id, mime, size, width, height, file,
@@ -423,11 +433,22 @@ pub async fn import_url(
         )
             .into_response()
     };
-    let want = match req.sha256.as_deref().map(parse_id) {
+    let sha1 = match req.sha1.as_deref().map(sha1_hex) {
+        Some(None) => return text(StatusCode::BAD_REQUEST, "sha1 must be a sha1 hex digest"),
+        Some(Some(h)) => Some(h),
+        None => None,
+    };
+    let index = sha1.as_ref().map(|h| dir.join(".sha1").join(h));
+    let mut want = match req.sha256.as_deref().map(parse_id) {
         Some(None) => return text(StatusCode::BAD_REQUEST, "sha256 must be a sha256 hex digest"),
         Some(Some(h)) => Some(h),
         None => None,
     };
+    if want.is_none()
+        && let Some(i) = &index
+    {
+        want = std::fs::read_to_string(i).ok().and_then(|v| parse_id(v.trim()));
+    }
     if let Some(h) = &want
         && let Some(p) = find(&dir, h)
     {
@@ -476,8 +497,19 @@ pub async fn import_url(
         return text(StatusCode::UNSUPPORTED_MEDIA_TYPE, format!("not media: {}", if mime.is_empty() { "unknown type" } else { &mime }));
     }
     let hex: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-    if want.as_ref().is_some_and(|w| *w != hex) {
+    if want.as_ref().is_some_and(|w| *w != hex) && req.sha256.is_some() {
         return text(StatusCode::BAD_REQUEST, format!("sha256 mismatch: download hashes to {hex}"));
+    }
+    if let (Some(h1), Some(i)) = (&sha1, &index) {
+        use sha1::Digest as _;
+        let got: String = sha1::Sha1::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        if got != *h1 {
+            return text(StatusCode::BAD_REQUEST, format!("sha1 mismatch: download hashes to {got}"));
+        }
+        if let Some(parent) = i.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(i, &hex);
     }
     if let Some(p) = find(&dir, &hex) {
         return found(&p, true, bytes.len() as u64, Some(&bytes));

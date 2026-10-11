@@ -62,7 +62,7 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | ⌘⇧G | Ungroup (children keep their place) |
 | Click / double-click / Esc | A click on something inside a group selects the group. Double-click enters the group, and Esc goes back up a level |
 | ⌘-click | Select inside groups directly |
-| ⌘C / ⌘V | Copy or paste nodes. Pasting images or files creates media nodes, uploaded to the host like a drop; pasting text creates a note |
+| ⌘C / ⌘V | Copy or paste nodes. A Figma selection (⌘C in Figma) pastes as real layers: frames, groups, editable text, images (downloaded by the host) and vector art (rendered to images), one undo step. Pasting images (also Figma's Copy as PNG) or files creates media nodes, uploaded to the host like a drop; pasting text creates a note |
 | ⌫ / Delete | Delete |
 | Arrows / ⇧Arrows | Nudge 1 px / 10 px |
 | ⌘Z / ⌘⇧Z | Undo / redo your own changes (agents' changes are theirs; revert an agent turn with `[revert]` in the chat) |

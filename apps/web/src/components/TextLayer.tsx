@@ -134,10 +134,11 @@ export function TextLayer() {
   const shown = texts.filter((n) => {
     if (n.id === editing) return true;
     const r = rects.get(n.id);
+    if (!r) return false;
     // Styled text: the engine's raster fades out over the same font-size range (mod.rs
     // `text_fade`), so it shows regardless of the box height.
     const tall = (n.kind === 'text' && !!n.props?.color) || r[3] * camera.zoom >= 8;
-    return !!r && fontOf(n) * camera.zoom >= MIN_FONT_PX && tall && inView(r, camera);
+    return fontOf(n) * camera.zoom >= MIN_FONT_PX && tall && inView(r, camera);
   });
   const z = camera.zoom;
   return (
