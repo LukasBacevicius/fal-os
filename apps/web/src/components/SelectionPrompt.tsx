@@ -66,11 +66,21 @@ export function SelectionPrompt() {
     if (open) requestAnimationFrame(() => input.current?.focus());
   }, [open, key]);
 
+  // Track the prompt's own size for placement. Observed (not measured every render) and
+  // rounded, so placement → size → placement can never loop.
   useLayoutEffect(() => {
-    if (!el.current) return;
-    const r = el.current.getBoundingClientRect();
-    if (r.width !== size[0] || r.height !== size[1]) setSize([r.width, r.height]);
-  });
+    const node = el.current;
+    if (!open || !node) return;
+    const update = () => {
+      const r = node.getBoundingClientRect();
+      const next: [number, number] = [Math.round(r.width), Math.round(r.height)];
+      setSize((prev) => (prev[0] === next[0] && prev[1] === next[1] ? prev : next));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [open, !!box]);
 
   useLayoutEffect(() => {
     const t = input.current;
@@ -88,7 +98,10 @@ export function SelectionPrompt() {
   if (left + size[0] > camera.width - 8) left = Math.max(8, box.left - size[0] - 10);
   if (left < 8 || box.right - box.left > camera.width * 0.6) left = Math.min(Math.max(8, box.right - size[0]), camera.width - size[0] - 8);
   left = Math.max(8, left);
-  const top = Math.max(8, Math.min(box.top, camera.height - size[1] - 8));
+  // Wide selections: sit above the selection rather than covering it, when there's room.
+  const wide = box.right - box.left > camera.width * 0.6;
+  const above = box.top - size[1] - 10;
+  const top = wide && above >= 8 ? above : Math.max(8, Math.min(box.top, camera.height - size[1] - 8));
   const width = Math.min(340, camera.width - 16);
 
   const close = () => setState({ promptOpen: false });

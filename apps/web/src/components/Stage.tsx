@@ -7,6 +7,7 @@ import { NodeOverlays } from './NodeOverlays';
 import { PresenceLayer } from './PresenceLayer';
 import { StatusBar } from './StatusBar';
 import { ActivityBars } from './ActivityBars';
+import { Guard } from './Guard';
 import { SelectionPrompt } from './SelectionPrompt';
 import { addContext } from '../controller';
 import { TextLayer, createNote, editNode } from './TextLayer';
@@ -85,7 +86,8 @@ export function Stage() {
     if (!app) return;
     let last = '';
     const apply = (entry?: ResizeObserverEntry) => {
-      const s = canvasSizes(wrap.current!, entry);
+      if (!wrap.current) return; // unmounted
+      const s = canvasSizes(wrap.current, entry);
       const key = s.join(',');
       if (key === last) return;
       last = key;
@@ -245,10 +247,10 @@ export function Stage() {
       onDrop={onDrop}
     >
       <canvas ref={canvas} className="stage-canvas" />
-      <TextLayer />
-      <NodeOverlays />
-      <PresenceLayer />
-      <SelectionPrompt />
+      <Guard name="text"><TextLayer /></Guard>
+      <Guard name="overlays"><NodeOverlays /></Guard>
+      <Guard name="presence"><PresenceLayer /></Guard>
+      <Guard name="selection-prompt"><SelectionPrompt /></Guard>
       {!loading && !error && empty && (
         <div className="empty faint">
           <div>
