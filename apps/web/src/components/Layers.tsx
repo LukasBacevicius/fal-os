@@ -9,6 +9,7 @@ import { usd } from '../format';
 import type { NodeView } from '../types';
 import { fuzzy } from './Palette';
 import { NodeRef } from './Transcript';
+import { ProjectHeader } from './Projects';
 
 const ROW = 18;
 const isContainer = (n: NodeView) => n.kind === 'frame' || n.kind === 'group';
@@ -184,7 +185,7 @@ export function Layers() {
   return (
     <aside className="layers">
       <div className="layers-head">
-        <span className="dim">layers</span>
+        <ProjectHeader />
         <input
           ref={filterInput}
           className="layers-filter"

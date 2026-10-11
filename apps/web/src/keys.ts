@@ -11,6 +11,7 @@ import { copy, cycleSelection, duplicate, frameSelection, groupIntoFrame, paste,
 import { setDriver, toggleHistory } from './chatActions';
 import { openPrompt } from './components/SelectionPrompt';
 import { createNote, editNode } from './components/TextLayer';
+import { openPicker } from './components/Projects';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 export const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -19,7 +20,8 @@ export interface Shortcut { keys: string; desc: string; group: 'canvas' | 'chat'
 
 /** The shortcut list (shown by `?`, mirrored in docs/SHORTCUTS.md). */
 export const SHORTCUTS: Shortcut[] = [
-  { group: 'app', keys: '⌘K', desc: 'command palette: actions, chats, nodes' },
+  { group: 'app', keys: '⌘K', desc: 'command palette: actions, projects, chats, nodes' },
+  { group: 'app', keys: '⌘O', desc: 'projects: ⏎ open, n new, r rename, ⌘D duplicate, d delete' },
   { group: 'app', keys: '?', desc: 'this list' },
   { group: 'app', keys: '⌘\\', desc: 'show / hide the chat panel' },
   { group: 'app', keys: '⌘⇧\\', desc: 'show / hide layers and properties' },
@@ -27,7 +29,8 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'chat', keys: '⏎  ⌘⏎  ⇥', desc: 'in the ✦ prompt: new chat / current chat / open in chat' },
   { group: 'chat', keys: '⌘L', desc: 'add the selection to the chat' },
   { group: 'chat', keys: '⌘I  or  /', desc: 'focus the chat input (no selection)' },
-  { group: 'chat', keys: '⏎', desc: 'send (⇧⏎ new line); while running it queues' },
+  { group: 'chat', keys: '⏎', desc: 'send (⇧⏎ new line); while running it queues (after the next step)' },
+  { group: 'chat', keys: '⌘⏎', desc: 'while running: send now (steer); on a queued message: send it now' },
   { group: 'chat', keys: 'esc', desc: 'in the input: stop the run, else leave the input' },
   { group: 'chat', keys: '@  #', desc: 'in the input: mention a node / another chat' },
   { group: 'chat', keys: 'drop or paste', desc: 'images and files on the chat: import + attach' },
@@ -143,6 +146,7 @@ export function installKeys(): () => void {
     if (k === (isMac ? 'Meta' : 'Control') && !getState().modHeld) setState({ modHeld: true });
     // Global (also while typing).
     if (mod && !e.shiftKey && (k === 'k' || k === 'K')) return done(), setState({ overlay: overlay === 'palette' ? null : 'palette' });
+    if (mod && !e.shiftKey && !e.altKey && (k === 'o' || k === 'O')) return done(), openPicker();
     if (mod && e.shiftKey && (k === '\\' || k === '|')) return done(), toggleOutline();
     if (mod && k === '\\') return done(), toggleChat();
     if ((mod || ctrl) && !e.shiftKey && (k === 'n' || k === 'N')) return done(), newChat();

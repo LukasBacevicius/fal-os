@@ -475,3 +475,38 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .prompt-row { display: flex; gap: 1ch; }
 .prompt-text { flex: 1; min-width: 0; }
 .err { color: var(--text); }
+
+/* ---- projects ---- */
+.project-head { display: inline-flex; align-items: baseline; min-width: 0; max-width: 60%; white-space: nowrap; color: var(--text); }
+.project-head:hover { text-decoration: none; }
+.project-head:hover .project-name { text-decoration: underline; text-underline-offset: 2px; }
+.project-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.layers-head .project-head { max-width: none; flex: 0 1 auto; }
+.layers-head .project-head + .layers-filter { flex: 1 0 8ch; }
+.project-float { position: absolute; left: 10px; top: 6px; z-index: 3; max-width: 40%; color: var(--dim); }
+.proj-row { display: flex; gap: 1ch; align-items: center; padding: 0 10px; white-space: nowrap; }
+.proj-row.editing, .proj-row.confirming { background: var(--panel); }
+.proj-mark { flex: none; width: 1ch; color: var(--dim); }
+.palette-row.on .proj-mark { color: var(--bg); }
+.proj-ago { flex: none; min-width: 4ch; text-align: right; }
+.proj-input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; }
+.proj-note { padding: 0 10px 4px; white-space: normal; }
+.proj-keys { padding: 3px 10px; border-top: 1px solid var(--line); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette input:disabled { color: var(--faint); }
+
+/* ---- steering, capabilities, one-line rows ---- */
+.steer-hint { font-size: 11px; padding-left: 2ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queued-line:focus { outline: none; background: var(--panel); }
+.queued-line:focus .queued-text { color: var(--text); }
+.caps { margin-bottom: 4px; }
+.caps-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.caps-fix { color: var(--dim); }
+.act-line { display: flex; gap: 0; white-space: nowrap; min-width: 0; }
+.act-line > * { flex: none; }
+.act-line > .act-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.act-line.open { flex-wrap: wrap; white-space: normal; }
+.act-line.open > .act-label { white-space: pre-wrap; overflow: visible; }
+.sub-card.one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub-head .sub-name { flex: none; }
+.sub-head .sub-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.swarm-status { overflow: hidden; text-overflow: ellipsis; }

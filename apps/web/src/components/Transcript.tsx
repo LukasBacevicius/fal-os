@@ -2,7 +2,7 @@ import { Fragment, useState, type ReactNode } from 'react';
 import { setState, useStore } from '../store';
 import { hostSync } from '../sync';
 import { focusNode } from '../controller';
-import { actCost, actLabel, actNodes, chatColor, chatTitle, cleanError, slug, workSummary, type Item, type Turn } from '../chat';
+import { actCost, actLabel, actNodes, agentLine, chatColor, chatTitle, cleanError, slug, workSummary, type Item, type Turn } from '../chat';
 import { getState } from '../store';
 import { openChat, sendChatMessage } from '../chatActions';
 import { usd } from '../format';
@@ -103,7 +103,12 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
               <button className="link dim" onClick={() => openChat(item.fromChat!)}>from #{slug(item.fromTitle || chatTitle(state, item.fromChat))}:</button> {item.text}
             </div>
           ) : (
-            <div><span className="dim">&gt; </span>{item.text}</div>
+            <div>
+              <span className="dim">&gt; </span>
+              {item.to && <span className="dim">→ {item.to}  </span>}
+              {item.text}
+              {item.delivered === 'steer' && <span className="faint">  · sent now</span>}
+            </div>
           )}
           <Chips chips={item.context} />
         </div>
@@ -124,8 +129,8 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
       const cost = actCost(item);
       return (
         <div className="row">
-          <div className="row-line" onClick={() => setOpen(!open)}>
-            · {actLabel(item, kindOf)}
+          <div className={`row-line act-line ${open ? 'open' : ''}`} onClick={() => setOpen(!open)}>
+            <span className="act-label" title={open ? undefined : actLabel(item, kindOf)}>· {actLabel(item, kindOf)}</span>
             {nodes.length > 0 && nodes.length <= 4 && <> →<Refs ids={nodes} /></>}
             {nodes.length > 4 && (
               <>
@@ -152,7 +157,7 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
               {nodes.length > 4 && <div><Refs ids={nodes} max={200} /></div>}
               {item.calls.map((c) => (
                 <div key={c.id}>
-                  {c.name}{c.summary ? ` ${c.summary}` : ''}{c.state === 'error' ? ' · failed' : c.state === 'running' ? ' …' : ''}
+                  {c.summary || c.name}{c.state === 'error' ? ' · failed' : c.state === 'running' ? ' …' : ''}
                 </div>
               ))}
             </div>
@@ -162,12 +167,13 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
     }
     case 'sub': {
       const go = () => setState({ subView: item.agent });
+      const line = agentLine(item.agent, item.role, item.status);
       if (item.phase === 'start') {
         return (
-          <div className="row sub-card" onClick={go} title="open this agent's transcript">
+          <div className="row sub-card one-line" onClick={go} title={`open this agent's transcript${line.status ? ` · ${line.status}` : ''}`}>
             <span style={{ color }}>●</span> {item.agent}
-            <span className="faint">{item.role ? ` · ${item.role}` : ''}</span>
-            {item.status && <span> · {item.status}</span>}
+            <span className="faint">{line.role ? ` · ${line.role}` : ''}</span>
+            {line.status && <span> · {line.status}</span>}
           </div>
         );
       }
@@ -180,7 +186,7 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
             {item.ms != null && item.ms >= 1000 ? ` · ${secs(item.ms)}` : ''}
           </span>
           {item.nodes.length > 0 && <> →<Refs ids={item.nodes} max={4} /></>}
-          {item.status && <div className="row-body">{item.status}</div>}
+          {line.status && <div className="row-body">{line.status}</div>}
         </div>
       );
     }

@@ -29,6 +29,8 @@ export type ChatEvent =
   | { kind: 'queued'; id: string; text: string }
   | { kind: 'dequeued'; id: string }
   | { kind: 'reverted'; turn: string }
+  /** At chat start: which tools/drivers work; `missing` ones come with a fix to run. */
+  | { kind: 'capabilities'; available: string[]; missing: { name: string; fix?: string }[] }
   | { kind: string; [k: string]: unknown };
 
 /** Events as kept by the client: plus the local arrival time (or the host's `ts`). */
@@ -202,7 +204,9 @@ export function applyHistory(s: ChatState, chats: { chat: string; title?: string
     threads[c.chat] = { chat: c.chat, title: c.title, events, seq: Math.max(events.length, ...seqs, 0) };
     if (!order.includes(c.chat)) order.push(c.chat);
   }
-  const active = s.active ?? (s.pending ? null : order[order.length - 1] ?? null);
+  // Never land on an external agent's read-only pseudo-chat by default.
+  const own = order.filter((id) => !isExternal(id));
+  const active = s.active ?? (s.pending || s.creating ? null : own[own.length - 1] ?? null);
   return { ...s, threads, order, active, runtime: chats?.length ? 'connected' : s.runtime };
 }
 
@@ -223,7 +227,7 @@ export function applyEvent(s: ChatState, chat: string, seq: number | undefined, 
   } else if (pending && pending.chat === chat) {
     pending = null;
   }
-  if (active === null && !pending && !s.order.length && !s.creating) active = chat;
+  if (active === null && !pending && !s.order.length && !s.creating && !isExternal(chat)) active = chat;
   const quiet = ev.kind === 'cost' || ev.kind === 'status' || ev.kind === 'thinking';
   const unread = active === chat || quiet ? s.unread : { ...s.unread, [chat]: true };
   return { ...s, threads: { ...s.threads, [chat]: t }, order, pending, active, unread, runtime: 'connected' };
@@ -235,7 +239,14 @@ export function applyEvent(s: ChatState, chat: string, seq: number | undefined, 
 export interface Call { id: string; name: string; summary: string; state: string; nodes: string[]; cost: number }
 
 export type Item =
-  | { type: 'user'; key: string; text: string; context: Chip[]; author?: string; fromChat?: string; fromExt?: string; fromTitle?: string }
+  | {
+      type: 'user'; key: string; text: string; context: Chip[]; author?: string; fromChat?: string; fromExt?: string; fromTitle?: string;
+      /** Delivered into the running turn: `steer` = sent now (⌘⏎ / [send now]), `queued` =
+       *  injected after the next step. */
+      delivered?: 'steer' | 'queued';
+      /** A subagent the message was sent to (`chat.steer` with `agent`). */
+      to?: string;
+    }
   | { type: 'text'; key: string; agent: string; text: string }
   | { type: 'thinking'; key: string; agent: string; text: string; seconds: number | null; done: boolean }
   /** One activity line: consecutive calls of the same verb by the same agent, merged. */
@@ -267,6 +278,10 @@ export interface Transcript {
   batches: Extract<Item, { type: 'batch' }>[];
   /** The latest question still waiting for an answer. */
   question: Extract<Item, { type: 'question' }> | null;
+  /** The latest `capabilities` event (null = none: nothing to say). */
+  caps: { available: string[]; missing: { name: string; fix: string }[] } | null;
+  /** Every subagent's latest role / status / state (subagent view header). */
+  agents: Record<string, { role: string; status: string; state: string }>;
 }
 
 /** Verb families for activity lines. */
@@ -338,6 +353,9 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
   const stats = new Map<string, { t0: number | null; tools: Set<string>; nodes: Set<string>; role: string; status: string; state: string }>();
   const turns = new Map<string, DoneItem>();
   const queued = new Map<string, string>();
+  /** Queued ids taken out by a steer (`dequeued` reason `steer…`). */
+  const steered = new Set<string>();
+  let caps: Transcript['caps'] = null;
   const batches = new Map<string, Extract<Item, { type: 'batch' }>>();
   let plan: Extract<Item, { type: 'plan' }> | null = null;
   let turn: string | null = null;
@@ -355,9 +373,17 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
         const author = String(e.author ?? '');
         const fromChat = author.startsWith('chat:') ? author.slice(5) : undefined;
         const fromExt = author.startsWith('ext:') ? author.slice(4) : undefined;
-        for (const [id, text] of queued) if (text === e.text) { queued.delete(id); break; }
+        const qid = typeof e.queued === 'string' ? e.queued : null;
+        if (qid) queued.delete(qid);
+        else for (const [id, text] of queued) if (text === e.text) { queued.delete(id); break; }
         for (const it of items) if (it.type === 'question') it.answered = true;
-        if (view === null) items.push({ type: 'user', key, text: String(e.text ?? ''), context: e.context ?? [], author: e.author, fromChat, fromExt, fromTitle: e.from_title });
+        const to = typeof e.agent === 'string' && e.agent && e.agent !== 'director' ? e.agent : typeof e.to === 'string' ? e.to : undefined;
+        const isSteer = e.steer === true || e.mode === 'steer' || e.via === 'steer' || (qid !== null && steered.has(qid));
+        const delivered = isSteer ? 'steer' as const : qid !== null && running ? 'queued' as const : undefined;
+        if (view === null || (to && to === view)) {
+          items.push({ type: 'user', key, text: String(e.text ?? ''), context: e.context ?? [], author: e.author, fromChat, fromExt, fromTitle: e.from_title, delivered, to });
+        }
+        if (to) break; // a message to a subagent doesn't start a director turn
         running = true;
         textInTurn = false;
         break;
@@ -507,7 +533,15 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
         break;
       case 'dequeued':
         queued.delete(String(e.id));
+        if (/^steer/.test(String(e.reason ?? ''))) steered.add(String(e.id));
         break;
+      case 'capabilities': {
+        const missing = (Array.isArray(e.missing) ? e.missing : [])
+          .map((m: any) => (typeof m === 'string' ? { name: m, fix: '' } : { name: String(m?.name ?? ''), fix: String(m?.fix ?? '') }))
+          .filter((m: { name: string }) => m.name);
+        caps = { available: Array.isArray(e.available) ? e.available.map(String) : [], missing };
+        break;
+      }
       case 'done': {
         running = false;
         settleThinking();
@@ -525,7 +559,9 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
     .map(([agent, a]) => ({ agent, role: a.role, status: a.status, tools: a.tools.size }));
   const liveBatches = [...batches.values()].filter((b) => running && b.done + b.failed < b.total);
   const question = [...items].reverse().find((x): x is Extract<Item, { type: 'question' }> => x.type === 'question' && !x.answered) ?? null;
-  return { items, running, cost, swarm, queued: [...queued].map(([id, text]) => ({ id, text })), subagents: [...subs], question, batches: liveBatches };
+  const agents: Transcript['agents'] = {};
+  for (const [name, a] of stats) agents[name] = { role: a.role, status: a.status, state: a.state };
+  return { items, running, cost, swarm, queued: [...queued].map(([id, text]) => ({ id, text })), subagents: [...subs], question, batches: liveBatches, caps, agents };
 }
 
 /** One turn of a transcript, in display order: the user's message, the collapsed "work"
@@ -607,6 +643,34 @@ export function cleanError(text: string): string {
   return first.length > 160 ? `${first.slice(0, 159)}…` : first || 'the director stopped';
 }
 
+/** `summary` without a leading verb from `words` (the host may already say "ran …"). */
+export function stripLead(summary: string, words: string[]): string {
+  const t = summary.trim();
+  for (const w of words) {
+    const m = new RegExp(`^${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[\\s:·-]+|$)`, 'i').exec(t);
+    if (m) return t.slice(m[0].length).trim();
+  }
+  return t;
+}
+
+/** Whether a summary already starts with a verb ("generated …", "ran …", "wrote …"). */
+const VERBISH = /^(?:[a-z]+ed|ran|wrote|made|built|sent|read|found|got|did|took|saw|set|put|running|writing|reading|generating|editing|making|building|looking|searching|sending)\b/i;
+
+/** An agent's role and status for one line, without repeating its name: `motion · motion ·
+ *  Build film` → role '' and status 'Build film'. */
+export function agentLine(agent: string, role: string, status: string): { role: string; status: string } {
+  const a = agent.trim().toLowerCase();
+  let st = status.trim();
+  for (let i = 0; i < 3; i++) {
+    const next = stripLead(st, [agent, role].filter(Boolean));
+    if (next === st) break;
+    st = next;
+  }
+  const r = role.trim();
+  const sameRole = !r || r.toLowerCase() === a || st.toLowerCase().startsWith(r.toLowerCase());
+  return { role: sameRole ? '' : r, status: st };
+}
+
 /** Past-tense (or, while running, present) label for an activity line. `kindOf` maps node
  *  ids to node kinds, to say "images" or "videos". */
 export function actLabel(it: ActItem, kindOf: (id: string) => string | undefined): string {
@@ -628,10 +692,14 @@ export function actLabel(it: ActItem, kindOf: (id: string) => string | undefined
       s = runningNow ? 'looking at the canvas' : nodes.length ? `looked at ${plural(nodes.length, 'node')}` : n > 1 ? `looked at the canvas ${n}×` : 'looked at the canvas';
       break;
     case 'gen': {
-      const models = [...new Set(c.map((x) => x.summary.split(' · ')[0]).filter((m) => m && !/^fal Agent/.test(m) && !/failed/.test(m)))];
+      // Summaries are `model · prompt` (older runtimes) or already `generated 4 images (model)`.
+      const modelOf = (x: Call) => (VERBISH.test(x.summary) ? /\(([^)]+)\)/.exec(x.summary)?.[1] ?? '' : x.summary.split(' · ')[0]);
+      const models = [...new Set(c.map(modelOf).filter((m) => m && !/^fal Agent/.test(m) && !/failed/.test(m)))];
       const via = c.some((x) => x.name === 'fal_agent') ? 'fal Agent' : models.slice(0, 2).join(', ');
       const what = runningNow && !nodes.length ? (n > 1 ? `${n} outputs` : '') : media();
-      s = [runningNow ? 'generating' : 'generated', what, via ? `(${via})` : ''].filter(Boolean).join(' ');
+      // One call whose summary already says it all ("generated 4 images (flux/schnell)").
+      if (n === 1 && VERBISH.test(first) && !nodes.length) s = first;
+      else s = [runningNow ? 'generating' : 'generated', what, via ? `(${via})` : ''].filter(Boolean).join(' ');
       break;
     }
     case 'edit':
@@ -641,18 +709,37 @@ export function actLabel(it: ActItem, kindOf: (id: string) => string | undefined
       s = `${runningNow ? 'importing' : 'imported'} ${plural(n, 'file')}`;
       break;
     case 'file': {
-      const files = [...new Set(c.map((x) => x.summary.replace(/^(Write|Edit|MultiEdit|NotebookEdit)\s+/, '').split('/').pop()).filter(Boolean))];
-      s = `${runningNow ? 'editing' : 'edited'} ${files.slice(0, 3).join(', ') || plural(n, 'file')}${files.length > 3 ? ` +${files.length - 3}` : ''}`;
+      // "wrote X, edited X" is just "wrote X": a file written in this line counts as written.
+      const WRITE = ['Write', 'wrote', 'writing', 'created', 'creating'];
+      const EDIT = ['MultiEdit', 'NotebookEdit', 'Edit', 'edited', 'editing', 'updated', 'updating'];
+      const wrote: string[] = [];
+      const edited: string[] = [];
+      for (const x of c) {
+        const w = x.name === 'Write' || WRITE.some((v) => stripLead(x.summary, [v]) !== x.summary.trim());
+        const f = stripLead(stripLead(x.summary, WRITE), EDIT).split('/').pop() ?? '';
+        if (!f) continue;
+        if (w) {
+          if (!wrote.includes(f)) wrote.push(f);
+        } else if (!edited.includes(f)) edited.push(f);
+      }
+      const onlyEdited = edited.filter((f) => !wrote.includes(f));
+      const list = (fs: string[]) => `${fs.slice(0, 3).join(', ')}${fs.length > 3 ? ` +${fs.length - 3}` : ''}`;
+      const parts: string[] = [];
+      if (wrote.length) parts.push(`${runningNow ? 'writing' : 'wrote'} ${list(wrote)}`);
+      if (onlyEdited.length) parts.push(`${runningNow ? 'editing' : 'edited'} ${list(onlyEdited)}`);
+      s = parts.join(', ') || `${runningNow ? 'editing' : 'edited'} ${plural(n, 'file')}`;
       break;
     }
-    case 'bash':
-      s = n > 1 ? `${runningNow ? 'running' : 'ran'} ${n} commands` : `${runningNow ? 'running' : 'ran'} ${first || 'a command'}`;
+    case 'bash': {
+      const cmd = stripLead(first, ['ran', 'running', 'run', 'Bash']);
+      s = n > 1 ? `${runningNow ? 'running' : 'ran'} ${n} commands` : `${runningNow ? 'running' : 'ran'} ${cmd || 'a command'}`;
       break;
+    }
     case 'web':
       s = `${runningNow ? 'searching' : 'searched'} the web${n > 1 ? ` ${n}×` : ''}`;
       break;
     case 'codex':
-      s = `codex: ${first || (runningNow ? 'working' : 'done')}`;
+      s = `codex: ${stripLead(first, ['codex']) || (runningNow ? 'working' : 'done')}`;
       break;
     case 'chat':
       s = `${runningNow ? 'messaging' : 'messaged'} another chat`;
@@ -665,7 +752,7 @@ export function actLabel(it: ActItem, kindOf: (id: string) => string | undefined
       break;
     default: {
       const name = c[0].name;
-      s = first.toLowerCase().startsWith(name.toLowerCase()) ? first : `${name} ${first}`.trim();
+      s = first.toLowerCase().startsWith(name.toLowerCase()) || VERBISH.test(first) ? first : `${name} ${first}`.trim();
     }
   }
   if (failed) s += ' · failed';

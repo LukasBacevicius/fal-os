@@ -9,6 +9,7 @@ import { hostSync } from './sync';
 import { addChips, chipFromPick, type Chip } from './chat';
 import { trackNodes } from './activity';
 import { worldRects } from './geometry';
+import { loadCamera, saveCamera } from './projects';
 
 export const CANVAS_ID = 'main';
 
@@ -52,9 +53,14 @@ export function attach(app: CanvasApp) {
       case 'hover':
         setState({ hoverNode: payload.node });
         break;
-      case 'camera':
+      case 'camera': {
         setState({ camera: payload });
+        // Per-project camera memory (only once the project's own scene is in).
+        const sync = hostSync();
+        if (sync?.connected) saveCamera(sync.key, payload);
+        else if (!sync && getState().conn === 'local') saveCamera(CANVAS_ID, payload);
         break;
+      }
       case 'pick':
         addContext([chipFromPick(payload as Pick)]);
         break;
@@ -84,7 +90,11 @@ export async function restore(app: CanvasApp, hosted = false) {
   try {
     const [snapshot, assets] = await Promise.all([hosted ? undefined : persist.loadSnapshot(CANVAS_ID), persist.loadAssets()]);
     for (const a of assets) app.registerAsset(a.id, a.blob, a.mime, a.name);
-    if (snapshot) app.loadSnapshot(snapshot, true);
+    if (snapshot) {
+      const cam = loadCamera(CANVAS_ID);
+      app.loadSnapshot(snapshot, !cam);
+      if (cam) app.setCamera(cam.x, cam.y, cam.zoom);
+    }
   } catch (e) {
     console.warn('restore failed', e);
   } finally {
