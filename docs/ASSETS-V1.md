@@ -159,3 +159,12 @@ Prompts plus host enforcement:
 - **Chat event `files`:** `{kind:"files", files:[{path, name, node?, preset?, w?, h?, bytes, sha256}], dir}`.
 - **Node props** (doc): `role`, `protected`, `export` (array of `{preset|format, scale, suffix}`). Asset fields: `source`, `origin`, `media`, `lineage` (new shape). The text projection shows `src()`, `role()` and the lineage summary.
 - **Desktop commands** (Tauri invoke): `drag_out(paths[], icon?)`, `copy_files(paths[])`, `copy_image(path)`, `open_with_list(path) → [{name, bundle_id, path}]`, `open_with(path, app_path|bundle_id)`, `reveal(path)`, `materialize(sha|node, name?) → path` (clonefile into `<project>/.out/`). The host also exposes `POST /api/materialize {node|sha, name?}` → `{path}` for the web build.
+
+## 8. Goal: definition of done (POC)
+1. **Provenance:** imports are `source:import`, `role:input`, `protected`. Agents can't delete or overwrite them (verified by a test). Derived assets carry lineage plus a recipe; `rerun` works.
+2. **Ops:** from the UI right-click menu *and* from Opus: remove background, upscale, reframe 9:16/1:1, trim, extract frames, GIF, convert. Each creates a new node with a placeholder, then the result.
+3. **Export:** presets (reel, youtube-1080, square, web-image @2x, master-prores) write verified files to `<project>/exports|deliverables` with a manifest; chat shows file cards.
+4. **Out:** the desktop app can drag a node to Finder, copy a file (⌘V in Finder works), use "Open in…" and Reveal.
+5. **Library:** ⌘⇧L shows all workspace assets (a smooth grid), with text search, inputs/generated filters and drag-to-canvas. fal library items are pulled read-only; writes only if the key allows them.
+6. **Opus end to end:** "make a 10s teaser from my clip and photos, deliver 16:9 and 9:16" → inputs untouched, derived assets with lineage, finals exported with presets, file cards in chat.
+7. **Running state:** everything merged to `main`, tests green, the live host and web app restarted on the new build, and a short results summary in `docs/RESULTS-ASSETS-V1.md`, with screenshots in the scratchpad.
