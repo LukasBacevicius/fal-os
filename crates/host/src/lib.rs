@@ -12,6 +12,7 @@ pub mod fal;
 pub mod fal_relay;
 pub mod host;
 pub mod knowledge;
+pub mod library;
 pub mod mcp;
 pub mod presence;
 pub mod register;

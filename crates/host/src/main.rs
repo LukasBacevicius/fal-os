@@ -83,6 +83,12 @@ async fn main() -> Result<()> {
                 }
             };
             let default = space.default_host()?;
+            // The asset library lives in $FALOS_HOME (library.db, thumbs/).
+            if let Err(e) = tokio::task::block_in_place(|| {
+                falos_host::library::Library::enable(&space, &server::home_dir(), default.opts.fal_key.clone())
+            }) {
+                tracing::warn!("asset library disabled: {e:#}");
+            }
             let running = server::serve_workspace(space.clone(), port, &token).await?;
             let port = running.addr.port();
             HostFile {

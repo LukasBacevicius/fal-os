@@ -389,7 +389,7 @@ impl CanvasMcp {
         Ok(Self {
             host,
             ws,
-            tool_router: Self::tool_router() + Self::chat_tools() + Self::workspace_tools(),
+            tool_router: Self::tool_router() + Self::chat_tools() + Self::workspace_tools() + Self::library_tools(),
         })
     }
 

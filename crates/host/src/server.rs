@@ -208,7 +208,7 @@ async fn guard_inner(g: Guard, req: Request, next: Next) -> Response {
     }
     // CORS preflight (no credentials on it by spec) for the asset routes.
     if req.method() == axum::http::Method::OPTIONS
-        && (req.uri().path().starts_with("/assets/") || req.uri().path() == "/import/url")
+        && (req.uri().path().starts_with("/assets/") || req.uri().path().starts_with("/thumbs/") || req.uri().path() == "/import/url")
     {
         return (
             StatusCode::NO_CONTENT,
@@ -236,6 +236,7 @@ async fn guard_inner(g: Guard, req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let query_ok = path.starts_with("/sync/")
         || path == "/workspace"
+        || path.starts_with("/thumbs/")
         || (path.starts_with("/assets/")
             && matches!(
                 *req.method(),
@@ -282,6 +283,7 @@ pub fn router(space: Arc<Workspace>, token: &str, ct: CancellationToken) -> Rout
                 .put(crate::assets::put),
         )
         .route("/import/url", axum::routing::post(crate::assets::import_url))
+        .route("/thumbs/{file}", get(crate::library::http::get))
         .merge(crate::runtime::routes())
         .with_state(space)
         .nest_service("/mcp", mcp)

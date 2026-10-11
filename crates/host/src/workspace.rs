@@ -54,6 +54,8 @@ pub struct Workspace {
     /// Serializes create / duplicate / delete.
     ops: Mutex<()>,
     poller: std::sync::Once,
+    /// The asset library, when enabled (`library::Library::enable`).
+    pub library: std::sync::OnceLock<Arc<crate::library::Library>>,
 }
 
 fn mtime_ms(p: &Path) -> i64 {
@@ -151,6 +153,7 @@ impl Workspace {
             thumbs: Mutex::default(),
             ops: Mutex::new(()),
             poller: std::sync::Once::new(),
+            library: std::sync::OnceLock::new(),
         }
     }
 
@@ -604,8 +607,33 @@ async fn run(space: Arc<Workspace>, mut socket: WebSocket) {
     if socket.send(Message::Text(space.frame().into())).await.is_err() {
         return;
     }
+    // Library: per-client replies + broadcast `library.changed` / `library.show`.
+    let library = space.library.get().cloned();
+    let (ltx, mut lrx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut lib_events = library.as_ref().map(|l| l.subscribe());
+    if let Some(l) = &library {
+        let _ = ltx.send(l.status().to_string());
+    }
     loop {
         tokio::select! {
+            Some(f) = lrx.recv() => {
+                if socket.send(Message::Text(f.into())).await.is_err() {
+                    break;
+                }
+            }
+            f = async { match lib_events.as_mut() { Some(r) => r.recv().await, None => std::future::pending().await } } => match f {
+                Ok(f) => {
+                    if socket.send(Message::Text(f.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if socket.send(Message::Text(serde_json::json!({"type": "library.changed", "shas": [], "all": true}).to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => lib_events = None,
+            },
             f = rx.recv() => match f {
                 Ok(f) => {
                     if socket.send(Message::Text(f.into())).await.is_err() {
@@ -621,6 +649,19 @@ async fn run(space: Arc<Workspace>, mut socket: WebSocket) {
             },
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(t))) => {
+                    let parsed = serde_json::from_str::<Json>(&t).ok();
+                    if let Some(m) = parsed.filter(|m| m["type"].as_str().is_some_and(|t| t.starts_with("library.")))
+                    {
+                        match &library {
+                            Some(l) => {
+                                tokio::spawn(crate::library::ws::handle(l.clone(), m, ltx.clone()));
+                            }
+                            None => {
+                                let _ = ltx.send(json!({"type": "error", "id": m["id"], "scope": "library", "message": "the asset library isn't enabled on this host"}).to_string());
+                            }
+                        }
+                        continue;
+                    }
                     let reply = match serde_json::from_str::<Json>(&t) {
                         Ok(m) => {
                             let space = space.clone();
