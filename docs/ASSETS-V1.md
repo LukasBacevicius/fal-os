@@ -136,3 +136,26 @@ Prompts plus host enforcement:
 4. Finishing a piece: mark `final` → `export(deliverables, presets)` → `inspect(probe)` against the spec → a `files` event with cards.
 5. Upload user inputs to fal only when needed, and say so on the first upload.
 6. Use library search before generating something that may already exist; reuse the user's references and characters (fal entities).
+
+## 7. Contracts between work streams (build swarm)
+- **Host REST, for the UI** (token auth, `?project=<id>`, actor = the human), mirroring the MCP tools without a sessionId:
+  - `GET /api/ops` — list ops;
+  - `POST /api/inspect {inputs, what}`;
+  - `POST /api/transform {op, inputs, args, placement?, name?}`;
+  - `POST /api/compose {op, inputs|frame, args}`;
+  - `POST /api/rerun {node, overrides?, on?}`;
+  - `POST /api/export {nodes|frame|"deliverables", presets, dir?, naming?}` → `{files, dir}`;
+  - `POST /api/package {kind}`;
+  - `GET /api/presets`.
+
+  Long ops return immediately with placeholder node ids; progress arrives as `job` / `batch` events on `/sync`.
+- **Library over `/workspace` WS:**
+  - client → server: `{"type":"library.query","id","query":{text?, similar_to?:sha|node, color?:"#hex", source?:[], role?:[], kind?:[], project?:id|"*", favorite?:bool, collection?:id, sort?, cursor?, limit?}}`;
+  - server → client: `{"type":"library.results","id","items":[{sha, kind, mime, w, h, duration, source, role?, prompt?, model?, caption?, palette?, favorite, fal?:{assetRecordId,url,synced}, projects, thumb:"/thumbs/<sha>-256.webp", thumb_lg:"/thumbs/<sha>-1024.webp", created}],"next"}`;
+  - `{"type":"library.changed","shas":[…]}` on any change;
+  - client → server writes: `library.tag {shas, add?, remove?}`, `library.favorite {shas, value}`, `library.collect {shas, collection}`, `library.place {sha, project, x?, y?}` (creates a node), `library.upload {shas}` (push to fal), `library.local_only {shas, value}`.
+- **Thumbnails:** `GET /thumbs/<sha>-<256|1024>.webp` (token), generated on demand if missing.
+- **Library MCP tools:** `search_assets(sessionId, query)`, `get_asset(sessionId, sha|node)`, `place_asset(sessionId, canvas, sha, placement?)`, `tag_assets`, `collect_assets`, `show_assets(sessionId, shas)` (emits `{"type":"library.show","shas"}` to clients).
+- **Chat event `files`:** `{kind:"files", files:[{path, name, node?, preset?, w?, h?, bytes, sha256}], dir}`.
+- **Node props** (doc): `role`, `protected`, `export` (array of `{preset|format, scale, suffix}`). Asset fields: `source`, `origin`, `media`, `lineage` (new shape). The text projection shows `src()`, `role()` and the lineage summary.
+- **Desktop commands** (Tauri invoke): `drag_out(paths[], icon?)`, `copy_files(paths[])`, `copy_image(path)`, `open_with_list(path) → [{name, bundle_id, path}]`, `open_with(path, app_path|bundle_id)`, `reveal(path)`, `materialize(sha|node, name?) → path` (clonefile into `<project>/.out/`). The host also exposes `POST /api/materialize {node|sha, name?}` → `{path}` for the web build.
