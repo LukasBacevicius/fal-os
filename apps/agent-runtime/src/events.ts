@@ -38,6 +38,70 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 /** `fal-ai/flux/schnell` → `flux/schnell`. */
 export const shortModel = (m: unknown) => clean(m).replace(/^fal-ai\//, "");
 
+const IRREGULAR: Record<string, [string, string]> = {
+  // imperative → [past, present participle]
+  run: ["ran", "running"], make: ["made", "making"], write: ["wrote", "writing"], build: ["built", "building"],
+  get: ["got", "getting"], find: ["found", "finding"], read: ["read", "reading"], set: ["set", "setting"],
+  put: ["put", "putting"], cut: ["cut", "cutting"], send: ["sent", "sending"], take: ["took", "taking"],
+  draw: ["drew", "drawing"], do: ["did", "doing"], see: ["saw", "seeing"], split: ["split", "splitting"],
+  begin: ["began", "beginning"], encode: ["encoded", "encoding"], copy: ["copied", "copying"],
+};
+const VERBS = new Set([
+  ...Object.keys(IRREGULAR),
+  "render", "extract", "check", "list", "install", "create", "generate", "import", "export", "convert", "download", "upload",
+  "probe", "measure", "normalize", "master", "mix", "trim", "crop", "scale", "resize", "compile", "verify", "test", "preview",
+  "inspect", "look", "fix", "update", "remove", "delete", "move", "rename", "start", "stop", "kill", "wait", "count", "analyze",
+  "detect", "compose", "assemble", "concatenate", "add", "apply", "compare", "sample", "grab", "open", "show", "print", "clean",
+  "prepare", "transcode", "typecheck", "lint", "fetch", "search", "load", "save", "edit", "replace", "pull", "push", "link",
+]);
+const ALREADY = /^(?:[a-z]+ed|ran|wrote|made|built|sent|read|found|got|did|took|saw|drew|began|set|put|cut|split)\b/i;
+const ING = /^[a-z]+ing\b/i;
+
+function inflect(verb: string, form: 0 | 1): string {
+  const v = verb.toLowerCase();
+  if (IRREGULAR[v]) return IRREGULAR[v][form];
+  if (form === 0) return v.endsWith("e") ? `${v}d` : /[^aeiou]y$/.test(v) ? `${v.slice(0, -1)}ied` : /^(stop|grab|trim|drop|plan|ship)$/.test(v) ? `${v}${v.at(-1)}ed` : `${v}ed`;
+  return v.endsWith("e") && !v.endsWith("ee") ? `${v.slice(0, -1)}ing` : /^(stop|grab|trim|drop|plan|ship)$/.test(v) ? `${v}${v.at(-1)}ing` : `${v}ing`;
+}
+
+/**
+ * A command's description as an activity phrase with exactly one leading verb:
+ * "Build a contact sheet" → "built a contact sheet" (done) / "building a contact sheet"
+ * (running); text without a verb gets "ran" / "running". Never "ran ran …".
+ */
+export function actionPhrase(desc: string, done: boolean): string {
+  let d = clean(desc).replace(/[.。]+$/, "");
+  if (!d) return done ? "ran a command" : "running a command";
+  // Drop leading "Ran"/"Running" the model already wrote.
+  d = d.replace(/^(?:ran|run|running)\s+(?=\S)/i, (m) => (VERBS.has(d.split(/\s+/)[1]?.toLowerCase() ?? "") ? "" : m));
+  const [first, ...rest] = d.split(/\s+/);
+  const lowerRest = rest.join(" ");
+  const f = first.toLowerCase();
+  if (done ? ALREADY.test(f) : ING.test(f)) return `${f} ${lowerRest}`.trim();
+  if (VERBS.has(f)) return `${inflect(f, done ? 0 : 1)} ${lowerRest}`.trim();
+  if (ALREADY.test(f) || ING.test(f)) return `${f} ${lowerRest}`.trim();
+  return `${done ? "ran" : "running"} ${d}`;
+}
+
+/** Human role of a subagent type, never just its label again. */
+export const ROLES: Record<string, string> = {
+  storyboard: "script & shots",
+  generator: "fal media",
+  motion: "edit & render",
+  qa: "render check",
+  codex: "code",
+};
+
+/** A status line without the agent's own name in front ("motion: Build film" → "Build film"). */
+export function stripAgent(status: string, agent: string, role?: string): string {
+  let s = clean(status);
+  for (const w of [agent, role, agent.replace(/-\d+$/, "")].filter(Boolean) as string[]) {
+    const re = new RegExp(`^${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[:·\\-–—]\\s*`, "i");
+    s = s.replace(re, "");
+  }
+  return s;
+}
+
 /** Present-tense line while a tool runs. */
 export function runningSummary(name: string, input: any): string {
   switch (name) {
@@ -60,7 +124,7 @@ export function runningSummary(name: string, input: any): string {
     case "session":
       return `joining as ${input.agentName}`;
     case "Bash":
-      return clean(input.description ?? input.command).slice(0, 100);
+      return actionPhrase(String(input.description ?? input.command ?? ""), false).slice(0, 100);
     case "Read":
     case "Write":
     case "Edit":
@@ -109,7 +173,7 @@ export function doneSummary(name: string, input: any, json: any, nodes: string[]
     case "get_selection":
       return "looked at your selection";
     case "Bash":
-      return `ran ${clean(input.description ?? input.command).slice(0, 90)}`;
+      return actionPhrase(String(input.description ?? input.command ?? ""), true).slice(0, 100);
     case "Read":
       return `read ${clean(input.file_path).split("/").pop()}`;
     case "Write":

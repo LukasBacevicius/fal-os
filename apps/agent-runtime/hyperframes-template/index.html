@@ -1,0 +1,89 @@
+<!doctype html>
+<!--
+  fal-os HyperFrames template: kinetic typography, 1920×1080, 30 fps.
+  - Timing lives in data-* attributes (seconds); every timed element has class="clip".
+  - Animation = ONE paused GSAP timeline registered as window.__timelines["main"]. Never play,
+    pause or seek media from scripts; the renderer seeks frame by frame (deterministic).
+  - Music: put assets/music.mp3 and keep the <audio> clip (data-volume 0..1). Loudness is
+    normalized to -14 LUFS after the render (scripts/motion-qa.mjs --master).
+  - Edit the copy, palette (CSS variables) and beats (BEATS, seconds) for the brief.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="assets/gsap.min.js"></script>
+    <style>
+      :root {
+        --bg: #0b0b0f;
+        --fg: #f5f3ee;
+        --accent: #ff5b2e;
+        --muted: #8a8792;
+        --display: "Helvetica Neue", Inter, ui-sans-serif, system-ui, sans-serif;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--bg); }
+      #root { position: relative; width: 1920px; height: 1080px; font-family: var(--display); color: var(--fg); }
+      .scene { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 0 160px; }
+      .kicker { font-size: 34px; letter-spacing: 0.32em; text-transform: uppercase; color: var(--muted); margin-bottom: 28px; }
+      .headline { font-size: 168px; font-weight: 800; line-height: 0.92; letter-spacing: -0.045em; }
+      .headline .w { display: inline-block; overflow: hidden; vertical-align: bottom; padding-bottom: 0.08em; }
+      .headline .w > span { display: inline-block; }
+      .line { font-size: 96px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }
+      .accent { color: var(--accent); }
+      .bar { position: absolute; left: 160px; bottom: 140px; height: 10px; width: 0; background: var(--accent); }
+      .end { align-items: center; text-align: center; }
+      .end .brand { font-size: 150px; font-weight: 800; letter-spacing: -0.05em; }
+      .end .cta { margin-top: 36px; font-size: 44px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="8" data-fps="30" data-width="1920" data-height="1080">
+      <section id="s1" class="scene clip" data-start="0" data-duration="3" data-track-index="0">
+        <div class="kicker">Introducing</div>
+        <div class="headline" id="h1">
+          <span class="w"><span>Sound</span></span>
+          <span class="w"><span>you</span></span>
+          <span class="w"><span class="accent">feel.</span></span>
+        </div>
+        <div class="bar" id="bar1"></div>
+      </section>
+
+      <section id="s2" class="scene clip" data-start="3" data-duration="2.5" data-track-index="0">
+        <div class="line" id="l1">40 hours of battery.</div>
+        <div class="line" id="l2">Zero noise.</div>
+        <div class="line accent" id="l3">All you.</div>
+      </section>
+
+      <section id="s3" class="scene end clip" data-start="5.5" data-duration="2.5" data-track-index="0">
+        <div class="brand" id="brand">AURA</div>
+        <div class="cta" id="cta">Available now</div>
+      </section>
+
+      <!-- <audio id="music" class="clip" src="assets/music.mp3" data-start="0" data-duration="8" data-track-index="10" data-volume="0.9"></audio> -->
+    </div>
+
+    <script>
+      // Beat grid (seconds): align cuts and accents to the music's beats.
+      const BEATS = [0, 0.5, 1, 1.5, 2, 3, 3.5, 4, 5.5, 6];
+      const ease = "expo.out";
+      const tl = gsap.timeline({ paused: true });
+
+      tl.from("#s1 .kicker", { opacity: 0, y: 30, duration: 0.6, ease }, BEATS[0] + 0.1);
+      tl.from("#h1 .w > span", { yPercent: 110, duration: 0.9, ease, stagger: 0.18 }, BEATS[1]);
+      tl.to("#bar1", { width: 640, duration: 1.2, ease: "power3.inOut" }, BEATS[3]);
+      tl.to("#s1", { opacity: 0, duration: 0.15 }, 2.85);
+
+      tl.from("#l1", { x: -80, opacity: 0, duration: 0.4, ease }, BEATS[5]);
+      tl.from("#l2", { x: -80, opacity: 0, duration: 0.6, ease }, BEATS[6]);
+      tl.from("#l3", { scale: 0.85, opacity: 0, transformOrigin: "left center", duration: 0.7, ease: "back.out(2)" }, BEATS[7]);
+      tl.to("#s2", { opacity: 0, duration: 0.15 }, 5.35);
+
+      tl.from("#brand", { letterSpacing: "0.4em", opacity: 0, duration: 0.9, ease }, BEATS[8]);
+      tl.from("#cta", { opacity: 0, y: 20, duration: 0.6, ease }, BEATS[9]);
+
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

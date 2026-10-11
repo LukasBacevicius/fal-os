@@ -47,8 +47,29 @@ export const config = {
   /** Director turn cap (API round trips) per run. */
   maxTurns: Number(env.FALOS_MAX_TURNS || 500),
   motionTemplate: new URL("../motion-template/", import.meta.url).pathname,
+  /** HyperFrames (HTML + GSAP → MP4) template: the second renderer, for kinetic typography. */
+  hyperframesTemplate: new URL("../hyperframes-template/", import.meta.url).pathname,
+  /** Agent skills fetched by `scripts/install-skills.sh` (Remotion's and HyperFrames' official ones). */
+  skillsDir: env.FALOS_SKILLS_DIR || new URL("../skills/", import.meta.url).pathname,
+  /** QA script the motion and qa agents run on renders. */
+  motionQa: new URL("../scripts/motion-qa.mjs", import.meta.url).pathname,
   codexHome: env.CODEX_HOME || join(homedir(), ".codex"),
 };
+
+/** Remotion's downloaded chrome-headless-shell (HyperFrames renders with it too). */
+export function remotionChrome(): string | undefined {
+  const base = join(config.motionTemplate, "node_modules", ".remotion", "chrome-headless-shell");
+  for (const p of [
+    join(base, "mac-arm64", "chrome-headless-shell-mac-arm64", "chrome-headless-shell"),
+    join(base, "mac-x64", "chrome-headless-shell-mac-x64", "chrome-headless-shell"),
+    join(base, "linux64", "chrome-headless-shell-linux64", "chrome-headless-shell"),
+    join(base, "linux-arm64", "chrome-headless-shell-linux-arm64", "chrome-headless-shell"),
+  ])
+    if (existsSync(p)) return p;
+  return undefined;
+}
+
+export { which };
 
 /** Codex can run when signed in with ChatGPT (`codex login`) or given an API key. */
 export function codexAuthAvailable(): boolean {

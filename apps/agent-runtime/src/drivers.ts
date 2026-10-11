@@ -5,10 +5,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { codexAuthAvailable, config, falKey } from "./config.ts";
-import { doneSummary, generatedSummary, pastTense, runningSummary, scrubError } from "./events.ts";
-import { autoDecide, EXT, falAgentAvailable, type InputDecision, runAgentTask, uploadFile } from "./fal.ts";
+import { actionPhrase, doneSummary, generatedSummary, pastTense, runningSummary, scrubError } from "./events.ts";
+import { autoDecide, createFalConversation, ensureFalProject, EXT, falAgentAvailable, type InputDecision, runAgentTask, uploadFile } from "./fal.ts";
 import { HostMcp } from "./hostMcp.ts";
-import { type ChatRun, nodesOf, parseJson, promptText, queuedText } from "./run.ts";
+import { type ChatRun, nodesOf, parseJson, promptText, type Queued, queuedText, steerText } from "./run.ts";
 
 /** How long a fal Agent question waits for the user's answer before auto-answering. */
 const ANSWER_TIMEOUT_MS = 10 * 60 * 1000;
@@ -65,14 +65,38 @@ export async function runFalDriver(run: ChatRun) {
     emit({ kind: "status", state: "error", error: `the fal Agent isn't available for this key (${avail.reason})` });
     return;
   }
-  const host = new HostMcp(undefined, undefined, { "x-falos-chat": f.chat });
+  const host = new HostMcp(undefined, undefined, run.hostHeaders());
   const s = await host.call("session", { agentName: "fal Agent", canvas: f.canvas });
   const sid = s.sessionId as string;
   run.reportSession(sid, agent);
   const status = (text: string) => host.call("set_status", { sessionId: sid, canvas: f.canvas, text: text.slice(0, 200) }).catch(() => {});
   const statePath = join(run.workDir, "fal-agent.json");
   const sameDriver = !f.previous_driver || f.previous_driver === "fal";
-  let previous: string | undefined = sameDriver ? readState(statePath).responseId : undefined;
+  const state = sameDriver ? readState(statePath) : {};
+  let previous: string | undefined = state.responseId;
+  // The fal-os project ↔ one fal Agent project (shared memory, characters, assets); this chat is
+  // one conversation in it. Created lazily, on the first fal-driver turn of the project.
+  let conversation: string | undefined = state.conversation;
+  if (!conversation && !previous) {
+    try {
+      const project = await ensureFalProject(f.project, f.project_name || f.project, f.fal_project);
+      if (project !== f.fal_project) run.frameOut({ type: "project.fal", fal_project: project });
+      conversation = await createFalConversation(project, f.title || f.text.slice(0, 60));
+      writeFileSync(statePath, JSON.stringify({ conversation, falProject: project }));
+    } catch (e: any) {
+      console.error(`[runtime] fal Agent project for ${f.project}: ${e?.message ?? e}`);
+      emit({ kind: "text", agent, delta: `(couldn't link the fal Agent project: ${String(e?.message ?? e).slice(0, 120)}; continuing without it)\n` });
+    }
+  }
+  // Steering: answer a pending question, else cancel the running task and continue the same
+  // conversation with the message.
+  let steered: Queued[] = [];
+  let round$: AbortController | null = null;
+  run.steerHandler = (st) => {
+    if (run.enqueueAnswer(st)) return;
+    steered.push(st);
+    round$?.abort();
+  };
 
   // Context chips → attachments (public URLs; local-only media is uploaded to fal storage once).
   const parents: string[] = [];
@@ -102,11 +126,15 @@ export async function runFalDriver(run: ChatRun) {
       let lastPlan = "";
       let lastText = "";
       let lastCost = 0;
-      const result = await runAgentTask({
+      round$ = new AbortController();
+      let result: Awaited<ReturnType<typeof runAgentTask>>;
+      try {
+      result = await runAgentTask({
         task,
         attachments: round === 0 ? attachments : [],
         previousResponseId: previous,
-        signal: run.signal,
+        conversation,
+        signal: AbortSignal.any([run.signal, round$.signal]),
         decide: async (p) => {
           const questions = (p.questions ?? []).map((q: any) => ({ id: q.id, text: q.text, options: (q.options ?? []).map((o: any) => ({ id: o.id, label: o.label })) }));
           emit({ kind: "question", agent, id: p.id, prompt: p.prompt ?? questions[0]?.text ?? "", approval: p.kind === "approval", questions });
@@ -150,8 +178,18 @@ export async function runFalDriver(run: ChatRun) {
           }
         },
       });
+      } catch (e) {
+        // A steer cancelled this task: continue the same conversation with the message.
+        if (steered.length && !run.signal.aborted) {
+          task = steered.map((q) => steerText(q)).join("\n\n");
+          steered = [];
+          emit({ kind: "tool", agent, id: `fa_steer_${round}`, name: "fal_agent", summary: "interrupted for your message", state: "done" });
+          continue;
+        }
+        throw e;
+      }
       previous = result.id;
-      writeFileSync(statePath, JSON.stringify({ responseId: result.id }));
+      writeFileSync(statePath, JSON.stringify(conversation ? { conversation, responseId: result.id } : { responseId: result.id }));
       if (result.text.length > lastText.length) emit({ kind: "text", agent, delta: result.text.slice(lastText.length) });
       // Artifacts → canvas nodes with lineage, next to the referenced nodes / the user's selection.
       const nodes: string[] = [];
@@ -176,11 +214,12 @@ export async function runFalDriver(run: ChatRun) {
       if (nodes.length) emit({ kind: "tool", agent, id: `fa_out_${round}`, name: "fal_agent", summary: generatedSummary(kinds, "fal Agent"), state: "done", nodes });
       await host.call("finish_working", { sessionId: sid }).catch(() => {});
       emit({ kind: "done", summary: result.text.slice(0, 2000), nodes });
-      // Messages queued meanwhile: one more round in the same conversation.
-      const more = run.takePending();
+      // Messages queued (or steered) meanwhile: one more round in the same conversation.
+      const more = [...run.takePending(), ...steered.splice(0)];
       if (!more.length) break;
       task = more.map(queuedText).join("\n\n");
     }
+    run.steerHandler = null;
     await status("");
     emit({ kind: "status", state: "idle" });
   } catch (e: any) {
@@ -211,7 +250,7 @@ export async function runCodexDriver(run: ChatRun) {
   const codex = new Codex({
     config: {
       // X-Falos-Chat: Codex's fal-os session joins this chat (color, activity, revert).
-      mcp_servers: { "fal-os": { url: `${config.hostUrl}/mcp`, http_headers: { Authorization: `Bearer ${config.token}`, "X-Falos-Chat": f.chat } } },
+      mcp_servers: { "fal-os": { url: `${config.hostUrl}/mcp`, http_headers: { Authorization: `Bearer ${config.token}`, "X-Falos-Chat": f.chat, "X-Falos-Project": f.project } } },
     },
   });
   const statePath = join(run.workDir, "codex-thread.json");
@@ -223,12 +262,21 @@ export async function runCodexDriver(run: ChatRun) {
     { type: "text", text: (threadId ? "" : CODEX_PREAMBLE(f.canvas)) + promptText(f, { resume: Boolean(threadId), notes: [] }) },
     ...f.context.filter((c) => c?.file && /^image\//.test(c.mime ?? "")).map((c) => ({ type: "local_image", path: c.file })),
   ];
-  emit({ kind: "agent", agent, role: "Codex", state: "started", status: f.text.slice(0, 100) });
+  emit({ kind: "agent", agent, role: "code", state: "started", status: f.text.slice(0, 100) });
   let final = "";
   const touched: string[] = [];
+  // Steering: abort the running Codex turn and continue the same thread with the message.
+  let steered: Queued[] = [];
+  let round$: AbortController | null = null;
+  run.steerHandler = (st) => {
+    steered.push(st);
+    round$?.abort();
+  };
   try {
     for (let round = 0; round < 10; round++) {
-      const { events } = await thread.runStreamed(input, { signal: run.signal });
+      round$ = new AbortController();
+      try {
+      const { events } = await thread.runStreamed(input, { signal: AbortSignal.any([run.signal, round$.signal]) });
       for await (const ev of events) {
         if (ev.type === "thread.started") writeFileSync(statePath, JSON.stringify({ threadId: ev.thread_id }));
         else if (ev.type === "turn.failed") throw new Error(ev.error.message);
@@ -251,7 +299,7 @@ export async function runCodexDriver(run: ChatRun) {
               emit({ kind: "tool", agent, id: it.id, name: it.tool, summary: err ? scrubError(it.error?.message ?? text) : doneSummary(it.tool, args, json, nodes), state: err ? "error" : "done", nodes });
             }
           } else if (it.type === "command_execution") {
-            emit({ kind: "tool", agent, id: it.id, name: "Bash", summary: done ? `ran ${String(it.command).slice(0, 90)}` : String(it.command).slice(0, 100), state: done ? (it.exit_code ? "error" : "done") : "running" });
+            emit({ kind: "tool", agent, id: it.id, name: "Bash", summary: actionPhrase(String(it.command), done).slice(0, 100), state: done ? (it.exit_code ? "error" : "done") : "running" });
           } else if (it.type === "file_change" && done) {
             emit({ kind: "tool", agent, id: it.id, name: "Edit", summary: `edited ${it.changes.map((c: any) => String(c.path).split("/").pop()).join(", ")}`, state: "done" });
           } else if (it.type === "todo_list") {
@@ -259,11 +307,20 @@ export async function runCodexDriver(run: ChatRun) {
           }
         }
       }
-      // Codex can't take messages mid-turn: queued ones run as the next turn.
-      const more = run.takePending();
+      } catch (e) {
+        if (steered.length && !run.signal.aborted) {
+          input = steered.map((q) => steerText(q)).join("\n\n");
+          steered = [];
+          continue;
+        }
+        throw e;
+      }
+      // Codex can't take queued messages mid-turn: they run as the next turn.
+      const more = [...run.takePending(), ...steered.splice(0)];
       if (!more.length) break;
       input = more.map(queuedText).join("\n\n");
     }
+    run.steerHandler = null;
     emit({ kind: "agent", agent, state: "done", status: final.replace(/\s+/g, " ").slice(0, 160) });
     emit({ kind: "done", summary: final.slice(0, 2000), nodes: [...new Set(touched)].slice(0, 30) });
     emit({ kind: "status", state: "idle" });

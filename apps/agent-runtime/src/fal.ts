@@ -19,19 +19,66 @@ export function fal(): FalClient {
 export type AgentAvailability = { ok: true } | { ok: false; reason: string };
 let availability: Promise<AgentAvailability> | null = null;
 
-/** Whether the fal Agent API accepts our key (cached per process; refreshed after failures). */
+let availabilityAt = 0;
+/** Re-check a cached "ok" after this long; a failure is re-checked on every refresh. */
+const AVAILABILITY_TTL_MS = 10 * 60 * 1000;
+
+/** Whether the fal Agent API accepts our key (AGENT preset): a cached `GET /agent/projects`. */
 export function falAgentAvailable(refresh = false): Promise<AgentAvailability> {
-  if (refresh) availability = null;
-  availability ??= (async () => {
-    try {
-      await fal().agent.models.listAgentModels({ timeoutMs: 20_000 });
-      return { ok: true } as const;
-    } catch (e: any) {
-      const msg = e?.cause?.body?.error?.message ?? e?.message ?? String(e);
-      return { ok: false, reason: `${e?.status ?? ""} ${msg}`.trim() } as const;
-    }
-  })();
+  if (refresh && availability) {
+    // Keep a fresh "ok"; re-check failures and stale results.
+    availability = availability.then((a) => (a.ok && Date.now() - availabilityAt < AVAILABILITY_TTL_MS ? a : check()));
+    return availability;
+  }
+  availability ??= check();
   return availability;
+}
+
+async function check(): Promise<AgentAvailability> {
+  availabilityAt = Date.now();
+  try {
+    await fal().agent.projects.list({ timeoutMs: 20_000 });
+    return { ok: true };
+  } catch (e: any) {
+    const msg = e?.cause?.body?.error?.message ?? e?.body?.detail ?? e?.message ?? String(e);
+    return { ok: false, reason: `${e?.status ?? ""} ${typeof msg === "string" ? msg : JSON.stringify(msg)}`.trim().slice(0, 200) };
+  }
+}
+
+// ---- fal Agent projects ---------------------------------------------------------------------------
+
+const projectLinks = new Map<string, Promise<string>>();
+
+/** fal Agent project names are 1–40 characters. */
+export const falProjectName = (name: string) => (name.trim() || "fal-os project").slice(0, 40).trim();
+
+/**
+ * The fal Agent project linked to fal-os project `key`: `existing` when set, else one with the
+ * same name (reused), else a new one. One in-flight lookup per project, so parallel chats
+ * don't create duplicates.
+ */
+export function ensureFalProject(key: string, name: string, existing?: string | null): Promise<string> {
+  if (existing) return Promise.resolve(existing);
+  let p = projectLinks.get(key);
+  if (!p) {
+    p = (async () => {
+      const projects = fal().agent.projects;
+      const want = falProjectName(name);
+      const found = (await projects.list({ timeoutMs: 20_000 })).find((x: any) => x.name === want);
+      if (found) return found.id as string;
+      const created = await projects.create({ name: want }, { timeoutMs: 20_000 });
+      return created.id as string;
+    })();
+    projectLinks.set(key, p);
+    p.catch(() => projectLinks.delete(key));
+  }
+  return p;
+}
+
+/** A new conversation inside a fal Agent project (one per fal-driver chat). */
+export async function createFalConversation(project: string, title: string): Promise<string> {
+  const c = await fal().agent.projects.conversations.create(project, { title: title.slice(0, 80) || null }, { timeoutMs: 20_000 });
+  return c.id as string;
 }
 
 export const MIME: Record<string, string> = {
@@ -106,8 +153,10 @@ export async function runAgentTask(opts: {
   decide: (pending: any) => InputDecision | Promise<InputDecision>;
   onDecision?: (d: InputDecision, pending: any) => void;
   signal?: AbortSignal;
-  /** Continue a conversation (multi-turn chats on the fal driver). */
+  /** Continue a conversation (multi-turn chats on the fal driver, older chats). */
   previousResponseId?: string;
+  /** Run inside this conversation (of a fal Agent project): shared project memory. */
+  conversation?: string;
 }): Promise<AgentSnapshot> {
   const agent = fal().agent;
   const content: any[] = [{ type: "input_text", text: opts.task }];
@@ -116,7 +165,9 @@ export async function runAgentTask(opts: {
     else content.push({ type: "input_file", file_url: a.url, mime_type: a.mime });
   }
   const request: any = { input: content.length > 1 ? [{ role: "user", content }] : opts.task };
-  if (opts.previousResponseId) request.previous_response_id = opts.previousResponseId;
+  // `conversation` and `previous_response_id` are exclusive.
+  if (opts.conversation) request.conversation = opts.conversation;
+  else if (opts.previousResponseId) request.previous_response_id = opts.previousResponseId;
   let responseId: string | undefined;
   const onAbort = () => {
     if (responseId) agent.responses.cancel(responseId).catch(() => {});
