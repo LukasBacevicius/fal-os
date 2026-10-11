@@ -13,11 +13,12 @@ import { openPrompt } from './components/SelectionPrompt';
 import { createNote, editNode } from './components/TextLayer';
 import { openPicker } from './components/Projects';
 import { canvasVideoKey, focusKey, openFocus, spacePressed, spaceReleased } from './video';
+import { copyFiles, openExport } from './out';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 export const MOD = isMac ? '⌘' : 'Ctrl+';
 
-export interface Shortcut { keys: string; desc: string; group: 'canvas' | 'chat' | 'app' }
+export interface Shortcut { keys: string; desc: string; group: 'canvas' | 'chat' | 'app' | 'out' }
 
 /** The shortcut list (shown by `?`, mirrored in docs/SHORTCUTS.md). */
 export const SHORTCUTS: Shortcut[] = [
@@ -67,6 +68,11 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: '⇧1  ⇧2', desc: 'fit all / zoom to selection' },
   { group: 'canvas', keys: '⌘0  ⌘+  ⌘−', desc: '100% / zoom in / zoom out' },
   { group: 'canvas', keys: 'drop files', desc: 'import (uploaded to the host)' },
+  { group: 'out', keys: 'drag out of the window', desc: 'desktop: drag selected media to Finder or any app (also [⇲] by the selection)' },
+  { group: 'out', keys: 'right-click', desc: 'node menu: copy file / image, open in…, reveal, export, mark final, lineage' },
+  { group: 'out', keys: '⌘⇧C', desc: 'copy the selection as files (⌘V in Finder, Slack, Premiere); web: links' },
+  { group: 'out', keys: '⌘⇧E', desc: 'export panel for the selection; nothing selected: export all marked' },
+  { group: 'out', keys: '⌘K', desc: 'more: copy fal URL / prompt / recipe, mark candidate / rejected, ops (remove bg, upscale, reframe, trim, …)' },
   { group: 'canvas', keys: '⌘F', desc: 'in layers: filter' },
 ];
 
@@ -178,6 +184,8 @@ export function installKeys(): () => void {
     if (k === '/' && !mod) return done(), getState().selection.length ? openPrompt() : focusChat();
     if (mod && (k === 'l' || k === 'L')) return done(), addSelectionToChat();
     if (mod && (k === 'd' || k === 'D')) return done(), duplicate();
+    if (mod && e.shiftKey && e.code === 'KeyE') return done(), openExport();
+    if (mod && e.shiftKey && e.code === 'KeyC') return done(), void copyFiles();
     if (mod && e.code === 'KeyG') return done(), e.shiftKey ? ungroup() : e.altKey ? frameSelection() : groupIntoFrame();
     if (mod && k === '0') return done(), app.zoomTo(1);
     if (mod && (k === '=' || k === '+')) return done(), zoomBy(1.25);

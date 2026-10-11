@@ -424,6 +424,7 @@ mod mac {
         } else {
             None
         };
+        let is_image = img.is_some();
         let img = match img {
             Some(i) => i,
             None if paths.len() > 1 => {
@@ -433,8 +434,8 @@ mod mac {
             None => ws.iconForFile(&NSString::from_str(&first.to_string_lossy())),
         };
         let s = img.size();
-        let k = (max / s.width.max(s.height).max(1.0)).min(1.0).max(0.01);
-        let (w, h) = if paths.len() == 1 && load_image(first).is_some() { (s.width * k, s.height * k) } else { (max * 0.75, max * 0.75) };
+        let k = (max / s.width.max(s.height).max(1.0)).clamp(0.01, 1.0);
+        let (w, h) = if is_image { (s.width * k, s.height * k) } else { (max * 0.75, max * 0.75) };
         png_of(&img, w, h)
     }
 
@@ -451,10 +452,10 @@ mod mac {
         let url = file_url(path);
         let mut pinned = Vec::new();
         for (_, ids) in PINNED {
-            if let Some(a) = ids.iter().find_map(|id| ws.URLForApplicationWithBundleIdentifier(&NSString::from_str(id))) {
-                if let Some(info) = app_info(&a, true) {
-                    pinned.push(info);
-                }
+            if let Some(a) = ids.iter().find_map(|id| ws.URLForApplicationWithBundleIdentifier(&NSString::from_str(id)))
+                && let Some(info) = app_info(&a, true)
+            {
+                pinned.push(info);
             }
         }
         let offered: Vec<AppInfo> = ws.URLsForApplicationsToOpenURL(&url).iter().filter_map(|u| app_info(&u, false)).collect();
@@ -615,6 +616,23 @@ mod tests {
         }
         assert!(apps.iter().any(|a| a.bundle_id == "com.apple.Preview"));
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Against a running host (`FALOS_HOME` of a temp host, `FALOS_MAT_SHA` an asset in its
+    /// project `FALOS_MAT_PROJECT`): materialize by digest, and by node via the host.
+    #[test]
+    #[ignore]
+    fn live_materialize() {
+        let Ok(sha) = std::env::var("FALOS_MAT_SHA") else { return };
+        let project = std::env::var("FALOS_MAT_PROJECT").ok();
+        let p = materialize(&sha, Some("Live clone"), project.as_deref()).unwrap();
+        println!("by sha: {}", p.display());
+        assert!(p.ends_with(".out/Live clone.png"));
+        if let Ok(node) = std::env::var("FALOS_MAT_NODE") {
+            let q = materialize_via_host(&serde_json::json!({"node": node, "name": "Via host"}), project.as_deref()).unwrap();
+            println!("by node: {}", q.display());
+            assert!(q.ends_with(".out/Via host.png"));
+        }
     }
 
     /// Writes to the user's general pasteboard: run only on purpose, with

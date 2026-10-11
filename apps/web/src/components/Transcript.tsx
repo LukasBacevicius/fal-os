@@ -7,6 +7,7 @@ import { getState } from '../store';
 import { openChat, sendChatMessage } from '../chatActions';
 import { usd } from '../format';
 import { Chips } from './Chips';
+import { FileCards } from './FileCards';
 
 export function NodeRef({ id }: { id: string }) {
   const exists = useStore((s) => s.nodes.some((n) => n.id === id));
@@ -192,6 +193,8 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
     }
     case 'batch':
       return <BatchLine b={item} />;
+    case 'files':
+      return <FileCards files={item.files} dir={item.dir} />;
     case 'question':
       return (
         <div className={`msg question ${item.answered ? 'answered' : ''}`}>
