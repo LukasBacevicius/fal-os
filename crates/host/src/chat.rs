@@ -22,7 +22,7 @@ use rmcp::{schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use crate::runtime::RuntimeLink;
 
 use crate::context::untrusted;
 use crate::host::{Event, Host, now_ms};
@@ -158,45 +158,36 @@ impl ChatState {
     }
 }
 
-/// Chat routing state of one host.
+/// Chat routing state of one host (project).
 pub struct ChatHub {
-    /// Second secret (besides the per-install token) that only the supervised runtime
-    /// knows: guards `/runtime`.
+    /// The runtime connection (shared by every project of the workspace).
+    pub link: Arc<RuntimeLink>,
+    /// `link.token`: the second secret that guards `/runtime`.
     pub runtime_token: String,
-    /// Outgoing frames to the connected runtime (one at a time; a new one replaces it).
-    runtime: Mutex<Option<(u64, mpsc::UnboundedSender<String>)>>,
-    /// Runs sent while no runtime was connected; flushed on connect.
-    pending: Mutex<Vec<String>>,
     chats: Mutex<Option<HashMap<String, ChatState>>>,
     /// Canvases whose `chat.list` changed (flushed by the list task).
     dirty: Mutex<std::collections::HashSet<String>>,
     flusher: std::sync::Once,
     /// Cross-chat send times per (from, to).
     cross: Mutex<HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>>,
-    /// The host spawned a runtime (so a missing connection is transient).
-    pub supervised: std::sync::atomic::AtomicBool,
     turns: Mutex<HashMap<String, Turn>>,
 }
 
 impl Default for ChatHub {
     fn default() -> Self {
-        let runtime_token = std::env::var("FALOS_RUNTIME_TOKEN")
-            .ok()
-            .filter(|t| t.len() >= 16)
-            .unwrap_or_else(|| {
-                (0..24)
-                    .map(|_| format!("{:02x}", rand::random::<u8>()))
-                    .collect()
-            });
+        Self::new(Arc::default())
+    }
+}
+
+impl ChatHub {
+    pub fn new(link: Arc<RuntimeLink>) -> Self {
         Self {
-            runtime_token,
-            runtime: Mutex::default(),
-            pending: Mutex::default(),
+            runtime_token: link.token.clone(),
+            link,
             chats: Mutex::default(),
             dirty: Mutex::default(),
             flusher: std::sync::Once::new(),
             cross: Mutex::default(),
-            supervised: Default::default(),
             turns: Mutex::default(),
         }
     }
@@ -617,7 +608,7 @@ impl ChatHub {
             Self::save_index(host, chats);
             Ok::<_, anyhow::Error>(s.meta.canvas)
         })?;
-        self.to_runtime(json!({"type": "stop", "chat": chat}).to_string());
+        self.to_runtime(host, json!({"type": "stop", "chat": chat}));
         self.turns.lock().unwrap().retain(|_, t| t.chat != chat);
         let _ = std::fs::remove_file(log_path(host, chat));
         let _ = std::fs::remove_file(chats_dir(host).join(format!("{chat}.meta.json")));
@@ -725,7 +716,7 @@ impl ChatHub {
         });
         if removed.is_some() {
             let _ = self.append(host, chat, None, json!({"kind": "dequeued", "id": id, "reason": "cancelled"}));
-            self.to_runtime(json!({"type": "unqueue", "chat": chat, "id": id}).to_string());
+            self.to_runtime(host, json!({"type": "unqueue", "chat": chat, "id": id}));
         }
         removed.is_some()
     }
@@ -901,43 +892,18 @@ impl ChatHub {
         Ok(())
     }
 
-    /// Send a frame to the runtime, or queue it until one connects.
-    pub fn to_runtime(&self, frame: String) -> bool {
-        if let Some((_, tx)) = &*self.runtime.lock().unwrap()
-            && tx.send(frame.clone()).is_ok()
-        {
-            return true;
-        }
-        self.pending.lock().unwrap().push(frame);
-        false
-    }
-
-    /// Register a runtime connection; returns its id and receiver (queued runs first).
-    pub fn connect_runtime(&self) -> (u64, mpsc::UnboundedReceiver<String>) {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (tx, rx) = mpsc::unbounded_channel();
-        for f in self.pending.lock().unwrap().drain(..) {
-            let _ = tx.send(f);
-        }
-        *self.runtime.lock().unwrap() = Some((id, tx));
-        (id, rx)
+    /// Send a frame to the runtime (tagged with this project), or queue it until one connects.
+    pub fn to_runtime(&self, host: &Host, mut frame: Json) -> bool {
+        frame["project"] = Json::from(host.id.clone());
+        self.link.send(frame.to_string())
     }
 
     /// The runtime went away: running chats end with an error.
-    pub fn disconnect_runtime(&self, host: &Host, id: u64) {
-        {
-            let mut r = self.runtime.lock().unwrap();
-            if r.as_ref().is_some_and(|(i, _)| *i == id) {
-                *r = None;
-            } else {
-                return;
-            }
-        }
+    pub fn runtime_gone(&self, host: &Host) {
         let running: Vec<String> = self.with_chats(host, |chats| {
             chats
                 .iter()
-                .filter(|(_, s)| s.meta.state == "running")
+                .filter(|(_, s)| s.meta.state == "running" && !s.meta.external)
                 .map(|(k, _)| k.clone())
                 .collect()
         });
@@ -952,7 +918,17 @@ impl ChatHub {
     }
 
     pub fn runtime_connected(&self) -> bool {
-        self.runtime.lock().unwrap().is_some()
+        self.link.connected()
+    }
+
+    /// Chats running right now (not external pseudo-chats).
+    pub fn running_count(&self, host: &Host) -> usize {
+        self.with_chats(host, |chats| {
+            chats
+                .values()
+                .filter(|s| s.meta.state == "running" && !s.meta.external && !s.meta.archived)
+                .count()
+        })
     }
 
     /// Loop guard for cross-chat messages.
@@ -1105,9 +1081,9 @@ async fn deliver(
     }
     if hub.runtime_connected() {
         hub.to_runtime(
+            host,
             json!({"type": "queue", "chat": chat, "id": id, "text": text, "author": author,
-                   "from": from, "context": resolved})
-            .to_string(),
+                   "from": from, "context": resolved}),
         );
     }
     Ok(seq)
@@ -1130,9 +1106,10 @@ async fn start_run(
     // Prior turns, before this message is appended.
     let history = condensed_history(host, chat);
     let outline = history.is_empty().then(|| canvas_outline(host, &canvas)).flatten();
-    // `chat.continue`: resume the stopped run, no new user message.
+    // `chat.continue`: resume the stopped run, no new user message. A steer that found no
+    // running turn already has its user event.
     let resume = options["continue"] == true;
-    let seq = if resume {
+    let seq = if resume || options["steered"] == true {
         0
     } else {
         let mut ev = json!({"kind": "user", "text": text, "context": chips, "author": author});
@@ -1166,10 +1143,13 @@ async fn start_run(
         "context": resolved,
         "history": history,
         "options": options,
-        "project": host.dir().display().to_string(),
+        // `project` (the id) is added by `to_runtime`.
+        "project_dir": host.dir().display().to_string(),
+        "project_name": host.project().name,
+        "fal_project": host.fal_project(),
     });
-    let delivered = hub.to_runtime(frame.to_string());
-    if !delivered && !hub.supervised.load(std::sync::atomic::Ordering::Relaxed) {
+    let delivered = hub.to_runtime(host, frame);
+    if !delivered && !hub.link.supervised.load(std::sync::atomic::Ordering::Relaxed) {
         hub.append(
             host,
             chat,
@@ -1202,6 +1182,103 @@ pub async fn continue_chat(host: &Arc<Host>, chat: &str) -> Result<()> {
         None,
     )
     .await?;
+    Ok(())
+}
+
+/// `chat.steer`: deliver a message *now*. The runtime interrupts the current step and
+/// continues the same session with it as the next user message (or hands it to the running
+/// subagent `agent`). The message is a queued one (`id`, taken out of the queue) or new
+/// `text`. Without a running turn it is an ordinary message.
+#[allow(clippy::too_many_arguments)]
+pub async fn steer(
+    host: &Arc<Host>,
+    chat: &str,
+    canvas: &str,
+    author: &str,
+    id: Option<&str>,
+    text: Option<&str>,
+    chips: Vec<Json>,
+    agent: Option<String>,
+) -> Result<()> {
+    let hub = &host.chat;
+    if chat.starts_with("ext:") {
+        bail!("`{chat}` is an external agent's read-only transcript");
+    }
+    if !hub.is_runtime_chat(host, chat) {
+        bail!("unknown chat `{chat}`");
+    }
+    let q = match id {
+        Some(id) => hub
+            .with_chats(host, |chats| {
+                let s = chats.get_mut(chat)?;
+                let i = s.queue.iter().position(|q| q.id == id)?;
+                Some(s.queue.remove(i))
+            })
+            .ok_or_else(|| anyhow!("`{id}` is not queued (already sent?)"))?,
+        None => {
+            let text = text.unwrap_or_default().trim();
+            if text.is_empty() {
+                bail!("chat.steer needs text or the id of a queued message");
+            }
+            Queued {
+                id: short_id("q_"),
+                text: text.to_string(),
+                author: author.to_string(),
+                chips,
+                options: Json::Null,
+                from: None,
+            }
+        }
+    };
+    let canvas = hub.canvas_of(host, chat).unwrap_or_else(|| canvas.to_string());
+    if hub.active_turn(host, chat).is_none() || !hub.runtime_connected() {
+        if id.is_some() {
+            hub.append(host, chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "started"}))?;
+        }
+        deliver(host, chat, &canvas, &q.text, &q.author, q.chips, q.options, q.from).await?;
+        return Ok(());
+    }
+    if id.is_some() {
+        hub.append(host, chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "steered"}))?;
+    }
+    // `queued` keeps the turn's spend running (the message joins this turn).
+    let mut ev = json!({"kind": "user", "text": q.text, "context": q.chips, "author": q.author,
+                        "queued": q.id, "steer": true});
+    if let Some(a) = &agent {
+        ev["to"] = Json::from(a.clone());
+    }
+    hub.append(host, chat, None, ev)?;
+    let mut resolved = Vec::new();
+    for c in &q.chips {
+        resolved.push(match resolve_chip(host, &canvas, c).await {
+            Ok(r) => r,
+            Err(e) => json!({"chip": c, "error": format!("{e:#}")}),
+        });
+    }
+    hub.to_runtime(
+        host,
+        json!({"type": "steer", "chat": chat, "id": q.id, "text": q.text, "author": q.author,
+               "agent": agent, "context": resolved, "chips": q.chips}),
+    );
+    Ok(())
+}
+
+/// The runtime had no running turn for a `steer` (it just ended): start a run with it (its
+/// user event is already in the transcript).
+pub async fn steer_failed(host: &Arc<Host>, chat: &str, msg: &Json) -> Result<()> {
+    let hub = &host.chat;
+    let text = msg["text"].as_str().unwrap_or_default().to_string();
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let canvas = hub.canvas_of(host, chat).unwrap_or_else(|| "main".into());
+    let author = msg["author"].as_str().unwrap_or("user").to_string();
+    let chips = msg["chips"].as_array().cloned().unwrap_or_default();
+    if hub.active_turn(host, chat).is_some() {
+        deliver(host, chat, &canvas, &text, &author, chips, Json::Null, None).await?;
+    } else {
+        start_run(host, chat, &canvas, &text, &author, chips, json!({"steered": true}), None).await?;
+    }
     Ok(())
 }
 
@@ -1281,12 +1358,19 @@ pub async fn handle_client(
             continue_chat(host, &chat).await?;
             Ok(None)
         }
+        Some("chat.steer") => {
+            let chat = chat_arg()?;
+            let chips: Vec<Json> = msg["context"].as_array().cloned().unwrap_or_default();
+            let agent = msg["agent"].as_str().filter(|a| !a.trim().is_empty()).map(str::to_string);
+            steer(host, &chat, canvas, author, msg["id"].as_str(), msg["text"].as_str(), chips, agent).await?;
+            Ok(None)
+        }
         Some("chat.stop") => {
             let chat = chat_arg()?;
             for q in hub.take_queue(host, &chat) {
                 hub.append(host, &chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "cancelled"}))?;
             }
-            hub.to_runtime(json!({"type": "stop", "chat": chat}).to_string());
+            hub.to_runtime(host, json!({"type": "stop", "chat": chat}));
             Ok(None)
         }
         Some("chat.unqueue") => {
@@ -1351,7 +1435,7 @@ pub async fn handle_client(
         Some("chat.archive") => {
             let chat = chat_arg()?;
             hub.update_meta(host, &chat, |m| m.archived = true)?;
-            hub.to_runtime(json!({"type": "stop", "chat": chat}).to_string());
+            hub.to_runtime(host, json!({"type": "stop", "chat": chat}));
             Ok(None)
         }
         other => bail!("unknown chat message {other:?}"),

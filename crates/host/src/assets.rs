@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::host::Host;
+use crate::workspace::Workspace;
 
 /// Largest accepted upload.
 pub const MAX_ASSET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -128,10 +128,31 @@ fn parse_range(h: &str, len: u64) -> Result<Option<(u64, u64)>, ()> {
     Ok(Some((start, end)))
 }
 
+#[derive(serde::Deserialize)]
+pub struct AssetQuery {
+    /// Project id or name (default: the default project; GET also looks in the others).
+    project: Option<String>,
+}
+
+/// The stored file for `hex`: in `project`, else the default project, else any project.
+fn locate(space: &Workspace, project: Option<&str>, hex: &str) -> Option<PathBuf> {
+    if project.is_some() {
+        return find(&space.host_for_frame(project).ok()?.dir().join("assets"), hex);
+    }
+    if let Some(p) = space.default_host().ok().and_then(|h| find(&h.dir().join("assets"), hex)) {
+        return Some(p);
+    }
+    match space.root() {
+        Some(root) => space.ids().iter().find_map(|id| find(&root.join(id).join("assets"), hex)),
+        None => None,
+    }
+}
+
 pub async fn get(
     method: Method,
     UrlPath(id): UrlPath<String>,
-    State(host): State<Arc<Host>>,
+    State(space): State<Arc<Workspace>>,
+    Query(q): Query<AssetQuery>,
     headers: HeaderMap,
 ) -> Response {
     let Some(hex) = parse_id(&id) else {
@@ -140,8 +161,7 @@ pub async fn get(
             "asset id must be a sha256 hex digest",
         );
     };
-    let dir = host.dir().join("assets");
-    let Some(path) = find(&dir, &hex) else {
+    let Some(path) = locate(&space, q.project.as_deref(), &hex) else {
         return text(StatusCode::NOT_FOUND, "no such asset");
     };
     let mime = mime_of_ext(path.extension().and_then(|e| e.to_str()).unwrap_or(""));
@@ -200,7 +220,8 @@ pub async fn get(
 
 pub async fn put(
     UrlPath(id): UrlPath<String>,
-    State(host): State<Arc<Host>>,
+    State(space): State<Arc<Workspace>>,
+    Query(q): Query<AssetQuery>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -209,6 +230,10 @@ pub async fn put(
             StatusCode::BAD_REQUEST,
             "asset id must be a sha256 hex digest",
         );
+    };
+    let host = match space.host_for_frame(q.project.as_deref()) {
+        Ok(h) => h,
+        Err(e) => return text(StatusCode::NOT_FOUND, format!("{e:#}")),
     };
     let dir = host.dir().join("assets");
     if let Some(p) = find(&dir, &hex) {

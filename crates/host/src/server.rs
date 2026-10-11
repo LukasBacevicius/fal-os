@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::host::Host;
 use crate::mcp::CanvasMcp;
+use crate::workspace::Workspace;
 
 pub const DEFAULT_PORT: u16 = 7317;
 
@@ -108,7 +109,11 @@ pub struct HostFile {
     pub url: String,
     pub token: String,
     pub pid: u32,
+    /// The default project's folder (single-project mode: the project).
     pub project: String,
+    /// The workspace folder (`--workspace`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 impl HostFile {
@@ -224,10 +229,11 @@ async fn guard_inner(g: Guard, req: Request, next: Next) -> Response {
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(str::trim);
-    // Browsers can't set headers on WebSocket upgrades or `<video src>`, so /sync and asset
-    // reads also take ?token=.
+    // Browsers can't set headers on WebSocket upgrades or `<video src>`, so /sync, /workspace
+    // and asset reads also take ?token=.
     let path = req.uri().path();
     let query_ok = path.starts_with("/sync/")
+        || path == "/workspace"
         || (path.starts_with("/assets/")
             && matches!(
                 *req.method(),
@@ -251,15 +257,22 @@ async fn guard_inner(g: Guard, req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-pub fn router(host: Arc<Host>, token: &str, ct: CancellationToken) -> Router {
-    let mcp_host = host.clone();
+/// Idle MCP sessions are dropped after this long. rmcp's default (5 min) is shorter than a
+/// long render; an expired session answers `404 Session not found`.
+pub const MCP_SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+pub fn router(space: Arc<Workspace>, token: &str, ct: CancellationToken) -> Router {
+    let mcp_space = space.clone();
+    let mut sessions = LocalSessionManager::default();
+    sessions.session_config.keep_alive = Some(MCP_SESSION_IDLE);
     let mcp: StreamableHttpService<CanvasMcp, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(CanvasMcp::new(mcp_host.clone())),
-        Default::default(),
+        move || CanvasMcp::new(mcp_space.clone()).map_err(|e| std::io::Error::other(format!("{e:#}"))),
+        Arc::new(sessions),
         StreamableHttpServerConfig::default().with_cancellation_token(ct),
     );
     Router::new()
         .route("/sync/{canvas}", get(crate::sync::handler))
+        .route("/workspace", get(crate::workspace::ws_handler))
         .route(
             "/assets/{id}",
             get(crate::assets::get)
@@ -267,7 +280,7 @@ pub fn router(host: Arc<Host>, token: &str, ct: CancellationToken) -> Router {
                 .put(crate::assets::put),
         )
         .merge(crate::runtime::routes())
-        .with_state(host)
+        .with_state(space)
         .nest_service("/mcp", mcp)
         .layer(middleware::from_fn_with_state(
             Guard {
@@ -281,11 +294,17 @@ pub struct Running {
     pub addr: SocketAddr,
     pub cancel: CancellationToken,
     pub task: tokio::task::JoinHandle<()>,
+    pub workspace: Arc<Workspace>,
+}
+
+/// Serve one project (single-project mode).
+pub async fn serve(host: Arc<Host>, port: u16, token: &str) -> Result<Running> {
+    serve_workspace(Workspace::single(host), port, token).await
 }
 
 /// Bind 127.0.0.1 on `port` (0 = ephemeral), falling back to the next 10 ports, then to
-/// an ephemeral one. Starts the autosave loop and serves until `cancel`.
-pub async fn serve(host: Arc<Host>, port: u16, token: &str) -> Result<Running> {
+/// an ephemeral one. Starts the projects' background tasks and serves until `cancel`.
+pub async fn serve_workspace(space: Arc<Workspace>, port: u16, token: &str) -> Result<Running> {
     let mut listener = None;
     if port != 0 {
         for p in port..port.saturating_add(10) {
@@ -302,23 +321,19 @@ pub async fn serve(host: Arc<Host>, port: u16, token: &str) -> Result<Running> {
             .context("binding 127.0.0.1")?,
     };
     let addr = listener.local_addr()?;
-    *host.endpoint.lock().unwrap() = Some((mcp_url(addr.port()), token.to_string()));
-    host.start_sweeper();
-    host.chat.start_list_task(&host);
+    space.set_endpoint(mcp_url(addr.port()), token.to_string());
+    space.start();
     let cancel = CancellationToken::new();
-    let app = router(host.clone(), token, cancel.clone());
-    let saver = tokio::spawn(host.clone().autosave());
+    let app = router(space.clone(), token, cancel.clone());
     let ct = cancel.clone();
+    let ws = space.clone();
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async move { ct.cancelled_owned().await })
             .await;
-        saver.abort();
-        if let Err(e) = host.flush() {
-            tracing::error!("final save failed: {e:#}");
-        }
+        ws.flush_all();
     });
-    Ok(Running { addr, cancel, task })
+    Ok(Running { addr, cancel, task, workspace: space })
 }
 
 #[cfg(test)]

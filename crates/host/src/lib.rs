@@ -20,5 +20,6 @@ pub mod runtime;
 pub mod server;
 pub mod sync;
 pub mod transcript;
+pub mod workspace;
 
 pub use host::{Event, Host, HostOptions};

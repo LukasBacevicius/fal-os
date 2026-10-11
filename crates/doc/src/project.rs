@@ -17,6 +17,9 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub canvases: Vec<CanvasEntry>,
+    /// Other fields (e.g. the host's `fal_project`, `touched`), kept as they are.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,6 +56,7 @@ impl Project {
             id: id.into(),
             name: name.into(),
             canvases: vec![],
+            extra: Default::default(),
         }
     }
 

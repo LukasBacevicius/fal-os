@@ -316,7 +316,13 @@ impl Default for HostOptions {
 }
 
 pub struct Host {
+    /// Project id: the project folder's name (stable; `project.json`'s `name` is the label).
+    pub id: String,
     dir: PathBuf,
+    /// Cancelled when the project is closed (deleted / moved to the trash): sync clients
+    /// disconnect and nothing is written to the folder any more.
+    pub closed: tokio_util::sync::CancellationToken,
+    autosaver: std::sync::Once,
     project: Mutex<Project>,
     canvases: Mutex<HashMap<String, Arc<Mutex<Open>>>>,
     sessions: Mutex<HashMap<String, Session>>,
@@ -357,6 +363,15 @@ fn random_hex(bytes: usize) -> String {
 impl Host {
     /// Open (or create) the project at `dir`. Ensures at least one canvas exists.
     pub fn open(dir: &Path, opts: HostOptions) -> Result<Arc<Self>> {
+        Self::open_with(dir, opts, Arc::default())
+    }
+
+    /// [`Host::open`] sharing a runtime link with the other projects of a workspace.
+    pub fn open_with(
+        dir: &Path,
+        opts: HostOptions,
+        link: Arc<crate::runtime::RuntimeLink>,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let dir = dir.canonicalize()?;
         let mut project = if dir.join("project.json").exists() {
@@ -374,8 +389,15 @@ impl Host {
             project.save_canvas(&dir, &Canvas::new("main", "Main"))?;
         }
         let (events, _) = broadcast::channel(1024);
+        let id = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project.id.clone());
         Ok(Arc::new(Self {
+            id,
             dir,
+            closed: Default::default(),
+            autosaver: std::sync::Once::new(),
             project: Mutex::new(project),
             canvases: Mutex::default(),
             sessions: Mutex::default(),
@@ -385,7 +407,7 @@ impl Host {
             save_needed: Notify::new(),
             opts,
             http: reqwest::Client::new(),
-            chat: Default::default(),
+            chat: crate::chat::ChatHub::new(link),
             endpoint: Mutex::default(),
             batches: Default::default(),
             sweeper: std::sync::Once::new(),
@@ -398,6 +420,59 @@ impl Host {
 
     pub fn project(&self) -> Project {
         self.project.lock().unwrap().clone()
+    }
+
+    /// Change `project.json` (name, extra fields) and save it.
+    pub fn update_project(&self, f: impl FnOnce(&mut Project)) -> Result<()> {
+        if self.closed.is_cancelled() {
+            bail!("project `{}` is closed", self.id);
+        }
+        let mut p = self.project.lock().unwrap();
+        f(&mut p);
+        p.save(&self.dir)?;
+        Ok(())
+    }
+
+    /// The linked fal Agent project (`fal_project` in `project.json`).
+    pub fn fal_project(&self) -> Option<String> {
+        self.project.lock().unwrap().extra.get("fal_project")?.as_str().map(str::to_string)
+    }
+
+    pub fn set_fal_project(&self, id: Option<&str>) -> Result<()> {
+        self.update_project(|p| match id {
+            Some(id) => {
+                p.extra.insert("fal_project".into(), serde_json::Value::from(id));
+            }
+            None => {
+                p.extra.remove("fal_project");
+            }
+        })
+    }
+
+    /// Start the per-host background tasks (sweeper, chat list broadcasts, autosave); idempotent.
+    pub fn start_tasks(self: &Arc<Self>) {
+        self.start_sweeper();
+        self.chat.start_list_task(self);
+        self.autosaver.call_once(|| {
+            tokio::spawn(self.clone().autosave());
+        });
+    }
+
+    /// Close the project: flush, stop its running chats, disconnect its clients; nothing is
+    /// written to its folder afterwards (it is about to move).
+    pub fn close(&self) {
+        if let Err(e) = self.flush() {
+            tracing::error!("saving {} before closing: {e:#}", self.id);
+        }
+        for row in self.chat.list(self, None).as_array().into_iter().flatten() {
+            if row["state"] == "running"
+                && row["external"] != true
+                && let Some(chat) = row["chat"].as_str()
+            {
+                self.chat.to_runtime(self, serde_json::json!({"type": "stop", "chat": chat}));
+            }
+        }
+        self.closed.cancel();
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -548,6 +623,9 @@ impl Host {
 
     /// Write every dirty canvas to disk (atomic, via `Project::save_canvas`).
     pub fn flush(&self) -> Result<()> {
+        if self.closed.is_cancelled() {
+            return Ok(());
+        }
         let open: Vec<_> = self.canvases.lock().unwrap().values().cloned().collect();
         for o in open {
             let mut o = o.lock().unwrap();
@@ -565,7 +643,10 @@ impl Host {
     /// Debounced autosave loop; run it on the runtime for the host's lifetime.
     pub async fn autosave(self: Arc<Self>) {
         loop {
-            self.save_needed.notified().await;
+            tokio::select! {
+                _ = self.save_needed.notified() => {}
+                _ = self.closed.cancelled() => return,
+            }
             tokio::time::sleep(AUTOSAVE_DEBOUNCE).await;
             if let Err(e) = self.flush() {
                 tracing::error!("autosave failed: {e:#}");

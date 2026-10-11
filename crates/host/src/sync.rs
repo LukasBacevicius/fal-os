@@ -22,6 +22,8 @@ pub struct SyncQuery {
     actor: Option<String>,
     /// Display name.
     name: Option<String>,
+    /// Canvas of the project (default: its first canvas).
+    canvas: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -67,15 +69,17 @@ pub fn agent_register(host: &Host, msg: &serde_json::Value) -> serde_json::Value
     }
 }
 
+/// `/sync/<project>` (workspace) or `/sync/<canvas>` (single-project mode and older clients:
+/// a canvas of the default project).
 pub async fn handler(
     ws: WebSocketUpgrade,
-    Path(canvas): Path<String>,
+    Path(key): Path<String>,
     Query(q): Query<SyncQuery>,
-    State(host): State<Arc<Host>>,
+    State(space): State<Arc<crate::workspace::Workspace>>,
 ) -> Response {
-    let canvas = match host.resolve_canvas(&canvas) {
-        Ok(c) => c,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    let (host, canvas) = match space.resolve_sync(&key, q.canvas.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::NOT_FOUND, format!("{e:#}")).into_response(),
     };
     ws.on_upgrade(move |socket| run(host, canvas, q, socket))
 }
@@ -127,6 +131,12 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
     }
     loop {
         tokio::select! {
+            // The project was deleted (moved to the trash).
+            _ = host.closed.cancelled() => {
+                let _ = send_json(&mut socket, json!({"type": "error", "message": "this project was deleted"})).await;
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            }
             ev = rx.recv() => match ev {
                 Ok(e) => {
                     if e.canvas().is_some_and(|c| c != canvas) {
