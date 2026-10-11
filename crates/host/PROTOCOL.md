@@ -5,8 +5,21 @@ One loopback HTTP server (`127.0.0.1`, port 7317 or the next free one) serves:
 | Path | What |
 |---|---|
 | `POST/GET /mcp` | Canvas MCP server, Streamable HTTP (agents) |
-| `GET /sync/{canvas}` → WebSocket | Canvas sync (the canvas UI, running falos-doc in wasm) |
-| `GET/HEAD/PUT /assets/{sha256}` | Content-addressed project media (`<project>/assets/<hex>.<ext>`) |
+| `GET /sync/{project}` → WebSocket | Canvas sync of a project (the canvas UI, running falos-doc in wasm); `/sync/{canvas}` in single-project mode |
+| `GET/HEAD/PUT /assets/{sha256}?project=<id>` | Content-addressed project media (`<project>/assets/<hex>.<ext>`) |
+| `GET /workspace` → WebSocket | Projects list + `project.*` ops (see docs/CHAT-PROTOCOL.md → Projects) |
+| `GET /runtime` → WebSocket | The agent runtime (one for the workspace; frames carry `project`) |
+
+## Workspace and projects
+`falos-host serve --workspace <dir>` (default `~/fal-os-projects`; `--project <dir>` = single
+project). Each subfolder with a `project.json` is a project; its id is the folder name. Projects
+load lazily and run concurrently, each with its own canvas, sessions, claims, event bus, chats
+and turns. `/sync/<project>` (first canvas, `?canvas=` for another) — `/sync/<canvas>` still works
+(single-project mode, or a canvas of the default project). Assets take `?project=<id>`.
+Deleted projects move to `<workspace>/.trash/`. `project.json` keeps unknown fields; the host adds
+`fal_project` (linked fal Agent project) and `touched` (ms). `host.json` gains `workspace`.
+MCP sessions are dropped after 6 h idle (rmcp's default 5 min made long renders fail with
+`404 Session not found`).
 
 ## Assets
 `{sha256}` is the hex digest, optionally prefixed `sha256:` (the doc's asset id form).
@@ -110,6 +123,7 @@ from `~/.fal-os/host.json`), adding `X-Falos-From: stdio`. For clients that pref
 - `X-Falos-Chat: c_…`: sent by the agent runtime on its agents' connections; sessions created
   there join that chat (color, activity, turn tracking for revert).
 - `X-Falos-From: stdio`: set by the relay.
+- `X-Falos-Project: <id or name>`: the project for `session` calls without `project` (the runtime's agents).
 
 ## MCP tools
 All tools except `session` and `get_knowledge` require `sessionId` (no shared fallback).
@@ -120,7 +134,9 @@ tool result under `notices`.
 
 | Tool | Hints | Notes |
 |---|---|---|
-| `session(agentName, project?, canvas?)` | | → `sessionId`, actor, canvases, guide, knowledge keys. Creates `canvas` if new. |
+| `session(agentName, project?, canvas?)` | | → `sessionId`, actor, project `{id, name}`, canvases, guide, knowledge keys. `project` = id or name (else `X-Falos-Project`, else the most recently used project); every later call with that `sessionId` runs in that project. External agents' `ext:` chats live in that project. Creates `canvas` if new. |
+| `list_projects()` | read-only | `[{id, name, updated, running}]`, newest first. |
+| `create_project(name)` | | → `{id, name}` (then `session(project=id)`). |
 | `read(sessionId, canvas, root?, depth?, filter?, detail?)` | read-only | Text projection + `version`; `detail:"blurry"` = depth 1, no annotations. Records the read version. |
 | `edit(sessionId, canvas, text, expectedVersion?, requestId?)` | destructive | `apply_edit`; → `version, created, touched, warnings, stale, preview`. Baseline defaults to the last read. `requestId` idempotent for 2 min. |
 | `undo(sessionId, canvas, steps?)` | destructive | Own transactions only. |

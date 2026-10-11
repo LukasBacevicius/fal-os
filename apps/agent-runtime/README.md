@@ -7,9 +7,9 @@ The swarm behind the chat panel. You type "OPUS please direct me an ad for the h
 | Director | `claude-opus-5-5` | Reads the canvas and the attached references (it looks at images and video frames itself). Lays out the Brief / Storyboard / Assets / Motion / Final frames, writes the brief, plans, delegates, and keeps you posted in chat. |
 | storyboard | `claude-opus-5-5` | Writes the script and the shot list as notes in the Storyboard frame. |
 | generator (one or more, in parallel) | `claude-opus-5-5` | Makes stills, video clips and music with **fal** into the Assets frame. Placeholders appear at once and turn into the media. |
-| motion | `claude-opus-5-5` (+ **Codex**) | Builds the edit in **Remotion** (motion graphics as code) from the canvas assets, renders a 1080p MP4 and imports it into the Final frame. |
-| qa | `claude-opus-5-5` | Runs ffprobe on the render, looks at extracted frames, pins annotations, and sends motion back once if needed. |
-| Codex | Codex CLI (your ChatGPT sign-in) | A coding worker the motion agent uses to write and iterate the composition. It has its own fal-os session. |
+| motion | `claude-opus-5-5` | Builds the edit in **Remotion** (or **HyperFrames** for typography-led kinetic pieces) from the canvas assets with the official Remotion / HyperFrames agent skills, renders 1080p30, runs the motion QA (contact sheet, beat timing, typography, loudness → -14 LUFS), fixes what it finds and imports the MP4 into the Final frame. |
+| qa | `claude-opus-5-5` | Independent check: the motion-QA report, the contact sheet and frames; pins annotations and sends motion back once if needed. |
+| Codex | Codex CLI (your ChatGPT sign-in) | Only when the user asks for it (or picks the codex driver): a coding worker with its own fal-os session. Opus writes code itself otherwise. |
 
 ```
 host ──ws /runtime──► runtime (this) ── Claude Agent SDK query per chat turn
@@ -21,10 +21,14 @@ host ──ws /runtime──► runtime (this) ── Claude Agent SDK query per
 ```sh
 pnpm --dir apps/agent-runtime install
 pnpm --dir apps/agent-runtime/motion-template install   # Remotion; the first render downloads chrome-headless-shell
-cargo run -p falos-host -- serve --project ~/fal-os-projects/demo   # spawns + supervises this runtime
+pnpm --dir apps/agent-runtime/hyperframes-template install --ignore-workspace   # HyperFrames (renders with Remotion's chrome-headless-shell)
+apps/agent-runtime/scripts/install-skills.sh            # official Remotion + HyperFrames agent skills → apps/agent-runtime/skills/
+cargo run -p falos-host -- serve                        # workspace ~/fal-os-projects; spawns + supervises this runtime
+cargo run -p falos-host -- serve --project ~/fal-os-projects/demo   # single-project mode
 ```
 - The host auto-detects `apps/agent-runtime`. You can also pass `--runtime <dir>` or set `FALOS_RUNTIME`. Use `--no-runtime` to disable it.
-- When the host spawns the runtime it passes `FALOS_HOST_URL`, `FALOS_TOKEN` (canvas MCP bearer), `FALOS_RUNTIME_TOKEN` (for the `/runtime` socket) and `FALOS_PROJECT_DIR`.
+- When the host spawns the runtime it passes `FALOS_HOST_URL`, `FALOS_TOKEN` (canvas MCP bearer), `FALOS_RUNTIME_TOKEN` (for the `/runtime` socket) and `FALOS_WORKSPACE`.
+- One runtime serves every project of the workspace: frames carry `project`, runs are keyed by (project, chat), work dirs live in each project (`<project>/work/<chat>/`), and every MCP connection sends `X-Falos-Project`.
 - To run it by hand, set `FALOS_RUNTIME_TOKEN` to the same value for both the host and `pnpm start`.
 
 ## Requirements and auth
@@ -33,6 +37,20 @@ cargo run -p falos-host -- serve --project ~/fal-os-projects/demo   # spawns + s
   - If the fal Agent API rejects the key (for example, the key lacks the AGENT preset), the runtime says so in chat once. Generators then fall back to direct fal model calls (`fal_model`, the same key on the queue API). These are still real generations.
 - **Codex** (optional): `@openai/codex-sdk` bundles the Codex CLI. It uses `codex login` (ChatGPT sign-in, `~/.codex/auth.json`) or `OPENAI_API_KEY`. If neither is present, chat shows "run `npx codex login` to enable Codex" and Claude does the code work.
 - `ffmpeg`/`ffprobe` on PATH: used for frames, crops, QA, and the host's media probing.
+
+## Capabilities
+Probed at start and before every turn (`src/capabilities.ts`): Claude, fal Agent (AGENT preset, cached `GET /agent/projects`), fal models, Codex (sign-in **and** the host MCP answering on a fresh session), Remotion (deps + chrome-headless-shell), HyperFrames, ffmpeg, and the skills. The list goes into every system prompt and out as a `capabilities` chat event (missing ones with their fix).
+
+## Steering
+`steer` frames (UI: send now) interrupt the current step (`priority: "now"`, after `backgroundTasks()` so foreground subagents and commands keep running; `perTaskStopAffordance` so the interrupt doesn't kill them) and continue the same session. A steer for a running subagent goes into its context after its next tool call (PostToolUse / SubagentStop hook `additionalContext`). fal driver: answers a pending question or cancels the task and continues the conversation; Codex driver: aborts the turn and continues the thread.
+
+## Motion quality
+- **Skills:** `scripts/install-skills.sh` fetches Remotion's official skills (`remotion-dev/claude-code-plugin`; its plugin.json says MIT but the repo has no LICENSE file, so they are fetched, not vendored) and HyperFrames' (`heygen-com/hyperframes` `.claude-plugin` + `skills/`, Apache-2.0) at pinned commits into `skills/` (git-ignored). They load as local plugins (`plugins` option, `Skill` tool); the motion agent preloads `remotion:remotion-best-practices` / `hyperframes:hyperframes`. Remotion itself needs a company license for larger for-profit teams.
+- **HyperFrames** (HeyGen, Apache-2.0, `hyperframes@0.8.146`): HTML + GSAP compositions rendered frame by frame; `hyperframes-template/` is a kinetic-typography starter (copied to `work/<chat>/hyperframes`). It renders with Remotion's chrome-headless-shell (`HYPERFRAMES_BROWSER_PATH`); telemetry is off (`HYPERFRAMES_NO_TELEMETRY=1`).
+- **QA:** `scripts/motion-qa.mjs <video> [--master] [--fps 30] [--duration s]` checks 1920×1080 / fps / h264 / duration / audio, measures loudness (EBU R128) and with `--master` normalizes to -14 LUFS / -1.5 dBTP (two-pass loudnorm, video copied → `<name>.master.mp4`), finds black / frozen stretches, estimates the music's BPM and beat grid and scores cuts against it, and writes a 4×3 contact sheet + `qa.json` with a typography checklist. On an audio file it prints the BPM and beat grid for planning cuts. The motion agent must pass it before `import_file`.
+
+## fal Agent projects
+Each fal-os project links one fal Agent project (`project.json` `fal_project`): created (or found by name) on the first fal-driver chat in the project; each fal-driver chat is a conversation in it (`conversation` instead of `previous_response_id`), so memory, characters and assets are shared across the project's chats.
 
 ## Config (env)
 | Var | Default | |
@@ -108,6 +126,7 @@ npx remotion render src/index.ts Ad out/ad.mp4 --props=props.json
 ```
 
 ## Dev scripts
+- `scripts/e2e-steer.ts`: lists projects over `/workspace`, creates/reuses a project, starts a chat on `/sync/<project>` and steers it after N seconds (optionally to a subagent).
 - `scripts/e2e.ts`: seeds a "user" product photo (PUT `/assets` + image node), sends a chat over `/sync` and logs every event until the turn ends.
 - `scripts/fal-key-check.ts`: shows whether the key can use the Agent API and the queue API.
 - `scripts/fal-agent-smoke.ts`: a single fal Agent task, printing the snapshot shapes.

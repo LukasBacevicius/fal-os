@@ -80,6 +80,8 @@ export function actionPhrase(desc: string, done: boolean): string {
   if (done ? ALREADY.test(f) : ING.test(f)) return `${f} ${lowerRest}`.trim();
   if (VERBS.has(f)) return `${inflect(f, done ? 0 : 1)} ${lowerRest}`.trim();
   if (ALREADY.test(f) || ING.test(f)) return `${f} ${lowerRest}`.trim();
+  // A capitalized plain word starting a short sentence ("Survey the skill …") is an imperative.
+  if (/^[A-Z][a-z]{2,}$/.test(first) && !/^(remotion|hyperframes|ffmpeg|ffprobe|node|npx|pnpm|npm|python|codex|claude|chrome|final|music|audio|video|the|this|all|new)$/.test(f) && rest.length && /^[a-z0-9"'`(]/.test(rest[0])) return `${inflect(f, done ? 0 : 1)} ${lowerRest}`.trim();
   return `${done ? "ran" : "running"} ${d}`;
 }
 
@@ -125,6 +127,8 @@ export function runningSummary(name: string, input: any): string {
       return `joining as ${input.agentName}`;
     case "Bash":
       return actionPhrase(String(input.description ?? input.command ?? ""), false).slice(0, 100);
+    case "Skill":
+      return `loading the ${clean(input.skill ?? input.name ?? "")} skill`.replace("the  skill", "a skill");
     case "Read":
     case "Write":
     case "Edit":
@@ -174,6 +178,8 @@ export function doneSummary(name: string, input: any, json: any, nodes: string[]
       return "looked at your selection";
     case "Bash":
       return actionPhrase(String(input.description ?? input.command ?? ""), true).slice(0, 100);
+    case "Skill":
+      return `loaded the ${clean(input.skill ?? input.name ?? "")} skill`.replace("the  skill", "a skill");
     case "Read":
       return `read ${clean(input.file_path).split("/").pop()}`;
     case "Write":

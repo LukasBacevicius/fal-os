@@ -75,7 +75,8 @@ const MOTION_CRAFT = `Craft (make it great, not generic):
 - Typography: ≤ 2 typefaces, headline ≥ 96 px, body ≥ 40 px, ≤ 6 words per line, inside the 5% title-safe area, contrast ≥ 4.5:1 (scrim over busy footage), each line on screen ≥ 1.2 s + 0.25 s/word.
 - Footage: Ken Burns / parallax on stills, trim clips to their best 1–2 s, match the brief's palette in backgrounds and accents.
 - Sound: music bed with fades, optional whooshes on transitions; master to -14 LUFS integrated, true peak ≤ -1 dBTP.
-- Output: 1920×1080, 30 fps, h264 yuv420p, AAC 48 kHz.`;
+- Output: 1920×1080, 30 fps, h264 yuv420p, AAC 48 kHz.
+- Fonts: use installed system fonts (macOS: "Helvetica Neue", "Avenir Next", "SF Pro Display" via -apple-system, files in /System/Library/Fonts and /Library/Fonts) or a font file you copy into the project. Never search the whole disk (no \`find /\`, no \`mdfind\` over everything): it takes minutes.`;
 
 export type AgentOpts = {
   canvas: string;
