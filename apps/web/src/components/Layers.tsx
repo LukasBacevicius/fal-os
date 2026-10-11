@@ -10,6 +10,11 @@ import type { NodeView } from '../types';
 import { fuzzy } from './Palette';
 import { NodeRef } from './Transcript';
 import { ProjectHeader } from './Projects';
+import { openPrompt } from './SelectionPrompt';
+import {
+  applyRecipe, assetOf, assetRecord, copyPrompt, copyRecipe, FILTERS, matchesFilter, parentRefs, promptOf, rerun, roleOf,
+  setRole, sourceOf, upstreamChanged, type Filter, type ParentRef,
+} from '../out';
 
 const ROW = 18;
 const isContainer = (n: NodeView) => n.kind === 'frame' || n.kind === 'group';
@@ -64,6 +69,7 @@ export function Layers() {
   const app = useStore((s) => s.app);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [filter, setFilter] = useState('');
+  const [chips, setChips] = useState<Set<Filter>>(() => new Set());
   const [editing, setEditing] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ id: string; where: 'in' | 'before' | 'after' } | null>(null);
   const [scroll, setScroll] = useState(0);
@@ -95,10 +101,13 @@ export function Layers() {
     const out: FlatRow[] = [];
     const q = filter.trim();
     let keep: Set<string> | null = null;
-    if (q) {
+    if (q || chips.size) {
       keep = new Set();
       for (const n of nodes) {
-        if (fuzzy(q, n.name || n.text || n.kind) >= 0 || n.id === q) {
+        const byName = !q || fuzzy(q, n.name || n.text || n.kind) >= 0 || n.id === q;
+        const src = chips.size && assetOf(n) ? sourceOf(assetRecord(n.id)) : null;
+        const byChip = !chips.size || [...chips].some((f) => matchesFilter(n, f, src));
+        if (byName && byChip) {
           for (let c: NodeView | undefined = n; c; c = c.parent ? byId.get(c.parent) : undefined) keep.add(c.id);
         }
       }
@@ -114,7 +123,7 @@ export function Layers() {
     };
     walk(null, 0);
     return out;
-  }, [kids, expanded, filter, nodes, byId]);
+  }, [kids, expanded, filter, nodes, byId, chips]);
 
   useLayoutEffect(() => {
     const el = list.current;
@@ -206,6 +215,23 @@ export function Layers() {
           }}
         />
       </div>
+      <div className="layers-chips">
+        {FILTERS.map((f) => (
+          <button
+            key={f}
+            className={`link ${chips.has(f) ? '' : 'faint'}`}
+            title={`show only ${f}`}
+            onClick={() => setChips((c) => {
+              const n = new Set(c);
+              if (n.has(f)) n.delete(f);
+              else n.add(f);
+              return n;
+            })}
+          >
+            {f}
+          </button>
+        ))}
+      </div>
       <div className="layers-list" ref={list} tabIndex={0} onKeyDown={onKey} onScroll={(e) => setScroll(e.currentTarget.scrollTop)} onMouseLeave={() => app?.setHighlight([])}>
         <div style={{ height: rows.length * ROW, position: 'relative' }}>
           {rows.slice(first, last).map((r, i) => {
@@ -285,13 +311,14 @@ export function Layers() {
                 ) : (
                   <span className={`layer-name ${isContainer(n) ? '' : 'dim'}`}>{name}</span>
                 )}
+                {roleOf(n) === 'final' && <span className="dim" title="final">★</span>}
                 {color && <span className="layer-dot" style={{ background: color }} title="made or touched by an agent" />}
                 {n.locked && <span className="faint">⊘</span>}
               </div>
             );
           })}
         </div>
-        {!rows.length && <div className="faint layers-empty">{filter ? 'no match' : 'no layers yet · drop files or press N'}</div>}
+        {!rows.length && <div className="faint layers-empty">{filter || chips.size ? 'no match' : 'no layers yet · drop files or press N'}</div>}
       </div>
       <Properties />
     </aside>
@@ -300,7 +327,25 @@ export function Layers() {
 
 // ---- properties ------------------------------------------------------------------------
 
-interface Lineage { model?: string; params?: Record<string, unknown>; seed?: number; parents?: string[]; cost?: number; actor?: string }
+interface Lineage { model?: string; op?: string; kind?: string; params?: Record<string, unknown>; recipe?: Record<string, unknown>; seed?: number; parents?: unknown[]; cost?: number; actor?: string }
+
+const ROLES = ['input', 'candidate', 'wip', 'final', 'rejected'];
+
+/** `← op{args} of <parent>` lines up the first-parent chain (at most 4). */
+function chain(id: string): { op: string; parent: string | null; asset: string }[] {
+  const out: { op: string; parent: string | null; asset: string }[] = [];
+  const nodes = getState().nodes;
+  let cur: string | null = id;
+  for (let i = 0; i < 4 && cur; i++) {
+    const lin: Lineage | undefined = assetRecord(cur)?.lineage;
+    if (!lin || (!lin.op && (!lin.model || lin.model === 'import'))) break;
+    const ref: ParentRef | undefined = parentRefs(lin)[0];
+    const parent: string | null = ref ? (ref.node && nodes.some((n) => n.id === ref.node) ? ref.node : nodes.find((n) => n.props.asset === ref.asset)?.id ?? null) : null;
+    out.push({ op: String(lin.op ?? lin.model), parent, asset: ref?.asset ?? '' });
+    cur = parent;
+  }
+  return out;
+}
 
 /** One editable mono field: Enter or blur applies, Esc reverts. `value` null = mixed. */
 function Field({ label, value, onSet, width = 7 }: { label: string; value: string | null; onSet: (v: string) => void; width?: number }) {
@@ -361,9 +406,13 @@ function Properties() {
   const locked = sel.every((n) => n.locked);
   const raw = detail?.asset?.lineage;
   // Imported media carry an `import` lineage: no generation to rerun.
-  const lin = raw && raw.model && raw.model !== 'import' ? raw : undefined;
-  const media = one && (one.kind === 'image' || one.kind === 'video' || one.kind === 'audio');
-  const prompt = lin ? String((lin.params as any)?.prompt ?? '') : '';
+  const lin = raw && (raw.op || (raw.model && raw.model !== 'import')) ? raw : undefined;
+  const media = one && !!assetOf(one);
+  const prompt = one ? promptOf(one.id) : '';
+  const src = one ? sourceOf((detail?.asset as Record<string, any> | undefined) ?? null) : null;
+  const steps = one && lin ? chain(one.id) : [];
+  const stale = one && lin ? upstreamChanged(one.id) : [];
+  const role = sel.length && sel.every((n) => roleOf(n) === roleOf(sel[0])) ? roleOf(sel[0]) : null;
   const chip = one ? [{ kind: 'node' as const, node: one.id }] : [];
   const current = () => {
     const a = getState().chat.active;
@@ -399,26 +448,43 @@ function Properties() {
           <button className="link dim" title="delete the placeholder (cancels the job)" onClick={() => app.apply({ op: 'delete', id: gen.id })}>[cancel]</button>
         </div>
       )}
+      <div className="props-roles">
+        <span className="faint">role</span>
+        {ROLES.map((r) => (
+          <button key={r} className={`link ${role === r ? '' : 'faint'}`} onClick={() => setRole(sel.map((n) => n.id), role === r ? null : r)}>{r}</button>
+        ))}
+      </div>
       {media && (
         <div className="props-sec">
+          <div><span className="faint">src </span>{src ?? 'import'}{lin?.actor ? <span className="faint"> by @{lin.actor}</span> : null}</div>
           {lin ? (
             <>
+              {steps.map((st, i) => (
+                <div key={i} className="props-chain">
+                  <span className="faint">{'  '.repeat(i)}← </span>{st.op}
+                  {st.parent ? <> <span className="faint">of</span> <NodeRef id={st.parent} /></> : st.asset ? <span className="faint"> of {st.asset.replace('sha256:', '').slice(0, 6)}</span> : null}
+                </div>
+              ))}
+              {stale.length > 0 && (
+                <div className="props-stale" title="a parent node now shows different bytes than this was made from">
+                  ! upstream changed:{stale.map((p) => <span key={p}> <NodeRef id={p} /></span>)}
+                </div>
+              )}
               {prompt && <div className="props-prompt">{prompt}</div>}
-              <div><span className="faint">model </span>{lin.model}</div>
               {lin.seed != null && <div><span className="faint">seed </span>{lin.seed}</div>}
-              {lin.parents?.length ? <div><span className="faint">parents</span>{lin.parents.map((p) => <span key={p}> <NodeRef id={p} /></span>)}</div> : null}
               {lin.cost != null && <div><span className="faint">cost </span>{usd(lin.cost)}</div>}
             </>
-          ) : (
-            <div className="faint">no generation source (imported)</div>
-          )}
+          ) : null}
           <div className="props-actions">
-            {prompt && (
-              <button className="link dim" onClick={() => navigator.clipboard?.writeText(prompt).then(() => toast('prompt copied'), () => toast('copy failed'))}>[copy prompt]</button>
-            )}
             {lin && (
-              <button className="link dim" title="ask the current chat to run it again" onClick={() => sendTo(current(), `Rerun this generation (${lin.model}) with the same prompt and settings.`, chip)}>[rerun]</button>
+              <>
+                <button className="link dim" title="run the same recipe again (host op registry), else ask the chat" onClick={() => void rerun(one!.id).catch(() => sendTo(current(), 'Rerun this with the same settings.', chip))}>[rerun]</button>
+                <button className="link dim" title="say what to change" onClick={openPrompt}>[rerun with changes]</button>
+                <button className="link dim" onClick={() => copyRecipe(one!.id)}>[copy recipe]</button>
+                {selection.length > 1 && <button className="link dim" title="the first selected node's recipe on the others" onClick={applyRecipe}>[apply to selection]</button>}
+              </>
             )}
+            {prompt && <button className="link dim" onClick={() => copyPrompt(one!.id)}>[copy prompt]</button>}
             <button className="link dim" title="ask the current chat for variations" onClick={() => sendTo(current(), 'Make 4 variations of this.', chip)}>[variations]</button>
             <button className="link dim" title="add as a chip to the chat" onClick={() => { addContext(chip); setState({ chatOpen: true }); }}>[use as reference]</button>
             <button className="link dim" onClick={() => one && focusNode(one.id)}>[zoom]</button>

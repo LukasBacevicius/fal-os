@@ -10,6 +10,7 @@ import { addChips, chipFromPick, type Chip } from './chat';
 import { trackNodes } from './activity';
 import { worldRects } from './geometry';
 import { loadScene, saveCamera } from './projects';
+import { prepare, syncLineage, watchDeliverables } from './out';
 
 export const CANVAS_ID = 'main';
 
@@ -21,6 +22,7 @@ function refreshNodes(app: CanvasApp) {
   hostSync()?.syncAssets(nodes);
   trackNodes(nodes);
   setState({ nodes });
+  watchDeliverables(nodes);
 }
 
 function scheduleSave(app: CanvasApp) {
@@ -45,6 +47,11 @@ export function attach(app: CanvasApp) {
       case 'selection':
         setState({ selection: payload as string[] });
         hostSync()?.sendSelection(payload as string[]);
+        prepare(payload as string[]);
+        if (getState().lineage) {
+          if (!(payload as string[]).length) setState({ lineage: false });
+          syncLineage();
+        }
         break;
       case 'doc':
         if (payload.nodes) refreshNodes(app);

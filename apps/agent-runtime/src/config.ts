@@ -12,7 +12,9 @@ function falosHome(): string {
 /** FAL_KEY from the environment, else `$FALOS_HOME/fal.env`, else `~/.fal-os/fal.env` (a `FAL_KEY=…` line). Never logged. */
 export function falKey(): string | undefined {
   if (env.FAL_KEY) return env.FAL_KEY.trim();
-  for (const dir of [falosHome(), join(homedir(), ".fal-os")]) {
+  // The packaged app passes the key in the env (from the Keychain) and only ever uses its own FALOS_HOME.
+  const dirs = env.FALOS_PACKAGED ? [falosHome()] : [falosHome(), join(homedir(), ".fal-os")];
+  for (const dir of dirs) {
     const p = join(dir, "fal.env");
     if (!existsSync(p)) continue;
     for (const line of readFileSync(p, "utf8").split("\n")) {
@@ -46,9 +48,10 @@ export const config = {
   maxFalTasks: Number(env.FALOS_MAX_FAL_TASKS || 100),
   /** Director turn cap (API round trips) per run. */
   maxTurns: Number(env.FALOS_MAX_TURNS || 500),
-  motionTemplate: new URL("../motion-template/", import.meta.url).pathname,
+  /** Remotion template. The packaged app installs it (with node_modules) into `$FALOS_HOME/templates/` on first run. */
+  motionTemplate: env.FALOS_MOTION_TEMPLATE || new URL("../motion-template/", import.meta.url).pathname,
   /** HyperFrames (HTML + GSAP → MP4) template: the second renderer, for kinetic typography. */
-  hyperframesTemplate: new URL("../hyperframes-template/", import.meta.url).pathname,
+  hyperframesTemplate: env.FALOS_HYPERFRAMES_TEMPLATE || new URL("../hyperframes-template/", import.meta.url).pathname,
   /** Agent skills fetched by `scripts/install-skills.sh` (Remotion's and HyperFrames' official ones). */
   skillsDir: env.FALOS_SKILLS_DIR || new URL("../skills/", import.meta.url).pathname,
   /** QA script the motion and qa agents run on renders. */
@@ -56,6 +59,10 @@ export const config = {
   /** Edit list → OpenTimelineIO writer (motion agent: an editable timeline next to the render). */
   otio: new URL("../scripts/otio.mjs", import.meta.url).pathname,
   codexHome: env.CODEX_HOME || join(homedir(), ".codex"),
+  /** Codex CLI binary. The packaged app doesn't bundle `@openai/codex` (~300 MB) and uses the user's `codex`. */
+  codexPath: env.FALOS_CODEX_PATH || (env.FALOS_PACKAGED ? which("codex") : undefined),
+  /** Running from the packaged desktop app (fixes point at its Setup screen, not dev commands). */
+  packaged: Boolean(env.FALOS_PACKAGED),
 };
 
 /** Remotion's downloaded chrome-headless-shell (HyperFrames renders with it too). */

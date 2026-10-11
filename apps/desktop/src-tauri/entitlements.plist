@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened-runtime entitlements for fal-os.app (Developer ID builds only; see docs/PACKAGING.md).
+     None needed today: WKWebView JITs JS/wasm in WebKit's own processes, the app is not sandboxed
+     (it spawns falos-host, node and the user's claude/codex), and it needs no camera/mic. -->
+<plist version="1.0">
+<dict/>
+</plist>

@@ -315,10 +315,43 @@ impl OverlayPrim {
     pub const RAIN: u32 = 10;
     /// An outline that fades in, holds and fades out (sequential child outlines).
     pub const BLINK: u32 = 11;
+    /// A tiny mono provenance badge (docs/ASSETS-V1.md §5): a glyph (`seed`, one of the
+    /// `BADGE_*` ids) in `stroke` on a faint `fill` square, constant size on screen. `t0`/`dur` carry the
+    /// node's world width/height: the shader hides the badge while the node is small on
+    /// screen. Not animated.
+    pub const GLYPH: u32 = 12;
+
+    /// Badge glyphs: `↓` import, `✦` generated, `ƒ` derived, `▶` render, `★` final, and the
+    /// `↑` dot (uploaded to fal).
+    pub const BADGE_IMPORT: u32 = 0;
+    pub const BADGE_GENERATE: u32 = 1;
+    pub const BADGE_DERIVE: u32 = 2;
+    pub const BADGE_RENDER: u32 = 3;
+    pub const BADGE_FINAL: u32 = 4;
+    pub const BADGE_UPLOADED: u32 = 5;
 
     /// Whether the shape animates (needs frames while live).
     pub fn animated(&self) -> bool {
-        self.shape >= Self::PULSE
+        self.shape >= Self::PULSE && self.shape != Self::GLYPH
+    }
+
+    /// A badge of `px` physical pixels at the node's top-left corner (inset 3 px), `slot`
+    /// badges to the right. `node_size`: the world size the shader tests against its
+    /// minimum on-screen size (pass something huge to always show it).
+    pub fn glyph(node: [f32; 4], node_size: [f32; 2], glyph: u32, slot: f32, px: f32, [fill, stroke]: [u32; 2], dpr: f32) -> Self {
+        Self {
+            world: [node[0], node[1]],
+            px_offset: [3.0 * dpr + slot * (px + dpr), 3.0 * dpr],
+            px_size: [px; 2],
+            fill,
+            stroke,
+            stroke_px: 1.1 * dpr,
+            shape: Self::GLYPH,
+            t0: node_size[0],
+            dur: node_size[1],
+            seed: glyph as f32,
+            ..Self::zeroed()
+        }
     }
 
     /// An animated world rect: `shape` is one of the activity shapes.

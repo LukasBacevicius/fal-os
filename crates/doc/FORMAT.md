@@ -43,9 +43,21 @@ jbuzws frame "Moodboard" s(2000,1200) by(@lukas)
   | connector | `from(id) to(id) kind(lineage\|reference\|flow) label` |
 
   Unknown props are kept, and the edit result warns about them.
+- **provenance props** (any type, printed after the type props):
+  - `role(input|candidate|wip|final|rejected)`: what the human means by the node (imports
+    default to `input`, generations to `candidate`; a final deliverable is `final`).
+  - `protected`: agents can't delete, overwrite (`asset`), move to another parent or
+    unprotect it; they derive a new node instead. Imports are protected by default.
+  - `export([{"preset":"reel"},{"format":"webp","scale":"2x","suffix":"@2x"}])`: saved
+    export settings ("Export all marked").
 - **read-only**: `by(@actor)` (creator), `upd(@actor)` (last editor, shown when it differs
-  from the creator), and `more(n)` (descendants hidden by the depth limit). Edits ignore
-  all three: attribution always comes from the actor who makes the edit.
+  from the creator), `more(n)` (descendants hidden by the depth limit), `src(import|gen|derive|render|capture)`
+  (how the node's asset bytes came to exist) and, at the very end of a row, the lineage
+  summary `← op:reframe{9:16,pad-blur} of 881s9r by @motion` (`gen:<model>` for
+  generations, `render:<engine>` for renders; parents by node id, else a short asset id,
+  prefixed with their role when not `input`, e.g. `mask:x1y2z3`). Edits ignore all of
+  them (everything after `←` is a comment): attribution always comes from the actor who
+  makes the edit.
 
 ### Values
 `key(value)`:

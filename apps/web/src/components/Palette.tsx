@@ -9,6 +9,7 @@ import { cycleSelection, duplicate, frameSelection, groupIntoFrame, ungroup, zoo
 import { createNote } from './TextLayer';
 import { focusChat, newChat, SHORTCUTS, toggleChat, toggleOutline } from '../keys';
 import { byRecent, openProject } from '../projects';
+import { outActions } from '../outActions';
 
 interface Entry { label: string; hint: string; run: () => void }
 
@@ -38,6 +39,9 @@ function actions(): Entry[] {
     { label: 'switch project…', hint: '⌘O', run: () => setState({ overlay: 'projects' }) },
     { label: 'new project…', hint: 'project', run: () => setState({ overlay: 'projects' }) },
     { label: 'connect agent (Claude Code, Codex, Cursor, …)', hint: 'mcp', run: () => setState({ overlay: 'connect' }) },
+    ...((window as any).__TAURI_INTERNALS__
+      ? [{ label: 'setup (fal key, Claude Code, motion tools)…', hint: 'app', run: () => setState({ overlay: 'setup' as const }) }]
+      : []),
     { label: 'ask about the selection', hint: '/', run: openPrompt },
     { label: 'all chats (history)', hint: '⌘Y', run: toggleHistory },
     { label: `agent for next message: next (now ${getState().driver})`, hint: '⌘.', run: () => setDriver() },
@@ -61,6 +65,7 @@ function actions(): Entry[] {
     { label: 'undo', hint: '⌘Z', run: () => app()?.undo() },
     { label: 'redo', hint: '⌘⇧Z', run: () => app()?.redo() },
     { label: 'keyboard shortcuts', hint: '?', run: () => setState({ overlay: 'help' }) },
+    ...outActions(),
   ];
 }
 
@@ -153,7 +158,7 @@ export function Help() {
     window.addEventListener('keydown', kd);
     return () => window.removeEventListener('keydown', kd);
   }, []);
-  const groups: ('app' | 'chat' | 'canvas')[] = ['app', 'chat', 'canvas'];
+  const groups: ('app' | 'chat' | 'canvas' | 'out')[] = ['app', 'chat', 'canvas', 'out'];
   return (
     <div className="modal" onPointerDown={() => setState({ overlay: null })}>
       <div className="help" onPointerDown={(e) => e.stopPropagation()}>

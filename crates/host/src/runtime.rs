@@ -285,10 +285,16 @@ pub fn detect() -> Option<PathBuf> {
     None
 }
 
-/// The command that starts the runtime in `dir`: its local `tsx`, else `pnpm start`.
+/// The command that starts the runtime in `dir`: the bundled `dist/main.mjs` with `$FALOS_NODE`
+/// (the packaged app, see scripts/package-macos.sh), else its local `tsx`, else `pnpm start`.
 fn command(dir: &Path) -> tokio::process::Command {
     let tsx = dir.join("node_modules/.bin/tsx");
-    let mut c = if tsx.exists() {
+    let bundled = dir.join("dist/main.mjs");
+    let mut c = if let (Some(node), true) = (std::env::var_os("FALOS_NODE"), bundled.exists()) {
+        let mut c = tokio::process::Command::new(node);
+        c.arg(bundled);
+        c
+    } else if tsx.exists() {
         let mut c = tokio::process::Command::new(tsx);
         c.arg(dir.join("src/main.ts"));
         c

@@ -492,6 +492,10 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .prompt-row { display: flex; gap: 1ch; }
 .prompt-text { flex: 1; min-width: 0; }
 .err { color: var(--text); }
+.setup { min-height: 0; }
+.setup-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.setup-input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); padding: 2px 6px; outline: none; }
+.setup-input:focus { border-color: var(--dim); }
 
 /* ---- projects ---- */
 .project-head { display: inline-flex; align-items: baseline; min-width: 0; max-width: 60%; white-space: nowrap; color: var(--text); }
@@ -594,3 +598,48 @@ button, textarea, select, input { font: inherit; color: inherit; }
   background: #000;
   cursor: pointer;
 }
+
+/* ---- out: context menu, export panel, file cards, provenance ---- */
+.menu-veil { padding: 0; }
+.menu-row { position: relative; }
+.menu-row.on { background: var(--text); color: var(--bg); }
+.menu-row.on .dim { color: var(--bg); }
+.menu-sub { position: absolute; left: 100%; top: -3px; color: var(--text); max-height: 60vh; overflow-y: auto; }
+.menu-sub .menu-row { color: var(--text); }
+.menu-sub .menu-row:hover { color: var(--bg); }
+.menu-sep { border-top: 1px solid var(--line); }
+.toast-action { margin-left: 1.5ch; }
+.grip { cursor: grab; }
+
+.export { background: var(--bg); border: 1px solid var(--line); width: min(460px, 92vw); padding: 6px 10px 8px; display: flex; flex-direction: column; gap: 3px; }
+.export-head { display: flex; gap: 1.5ch; margin-bottom: 4px; }
+.export-head .dim { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-row { display: flex; gap: 1ch; align-items: center; }
+.export > .link { align-self: flex-start; }
+.export select, .export input { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 0; padding: 0 3px; height: 18px; outline: none; }
+.export input:focus, .export select:focus { border-color: var(--dim); }
+.export input.bad { border-color: var(--text); text-decoration: line-through; }
+.ex-preset { width: 15ch; }
+.ex-scale { width: 7ch; }
+.ex-format { width: 7ch; }
+.ex-suffix { width: 7ch; }
+.export-line { display: flex; gap: 1.5ch; align-items: center; flex-wrap: wrap; }
+.export-line > .faint:first-child { width: 4ch; }
+.export-line input { flex: 1; min-width: 0; }
+
+.files { display: flex; flex-direction: column; gap: 4px; }
+.file-card { display: flex; gap: 1ch; border: 1px solid var(--line); padding: 3px; cursor: grab; user-select: none; }
+.file-card:hover { border-color: var(--dim); }
+.file-thumb { width: 44px; height: 44px; flex: none; display: flex; align-items: center; justify-content: center; background: var(--panel); overflow: hidden; }
+.file-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.file-body { min-width: 0; flex: 1; }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-actions, .file-apps { display: flex; flex-wrap: wrap; gap: 0 1ch; }
+.file-apps { border-top: 1px solid var(--line); margin-top: 2px; padding-top: 2px; }
+
+.layers-chips { display: flex; flex-wrap: wrap; gap: 0 1ch; padding: 2px 8px; border-bottom: 1px solid var(--line); font-size: 11px; }
+.props-roles { display: flex; flex-wrap: wrap; gap: 0 1ch; }
+.layers-chips .link.faint, .props-roles .link.faint { color: var(--faint); }
+.export .link.dim, .file-card .link.dim, .files .link.faint, .toast .link.dim { color: var(--dim); }
+.props-chain { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.props-stale { color: var(--text); }

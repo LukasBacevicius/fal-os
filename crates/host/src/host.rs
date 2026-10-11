@@ -89,6 +89,9 @@ pub enum Event {
         queue_position: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// USD spent (fal-backed ops), on `done`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
     },
     /// A chat event (see `chat.rs`, `docs/CHAT-PROTOCOL.md`).
     #[serde(rename = "chat.event")]
@@ -338,6 +341,8 @@ pub struct Host {
     pub endpoint: Mutex<Option<(String, String)>>,
     /// Running and finished batch generations (`generate_batch`).
     pub batches: crate::batch::Batches,
+    /// Running and finished op runs (`transform` / `compose`).
+    pub ops_runs: crate::ops::Runs,
     sweeper: std::sync::Once,
 }
 
@@ -410,6 +415,7 @@ impl Host {
             chat: crate::chat::ChatHub::new(link),
             endpoint: Mutex::default(),
             batches: Default::default(),
+            ops_runs: Default::default(),
             sweeper: std::sync::Once::new(),
         }))
     }

@@ -4,6 +4,7 @@ The fal creative hub: a desktop app (and website) built around a high-performanc
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Agents, context, feedback & memory](docs/AGENTS-CONTEXT-MEMORY.md)
+- [Packaging & sharing the desktop app](docs/PACKAGING.md) (`scripts/package-macos.sh` → DMG)
 - Research:
   - [Brilliant renderer teardown](docs/research/brilliant-renderer.md)
   - [Brilliant document model](docs/research/brilliant-document-model.md)

@@ -67,6 +67,19 @@ Each fal-os project links one fal Agent project (`project.json` `fal_project`): 
 | `FALOS_MAX_CONSECUTIVE_FAILURES` | `3` | Circuit breaker: generation tools refuse after this many failed fal tasks in a row |
 | `FALOS_MAX_FAL_TASKS` | `100` | Runaway guard: swarm fal tasks (`fal_agent` / `fal_model`) per chat run; a `generate_batch` call counts as none |
 | `FALOS_MAX_TURNS` | `500` | Director API round-trips per turn |
+| `FALOS_MOTION_TEMPLATE` / `FALOS_HYPERFRAMES_TEMPLATE` | `./motion-template`, `./hyperframes-template` | Template dirs (with `node_modules`); the packaged app uses `$FALOS_HOME/templates/…` |
+| `FALOS_SKILLS_DIR` | `./skills` | Agent skills dir |
+| `FALOS_CODEX_PATH` | bundled `@openai/codex` | Codex CLI binary (packaged: `which codex`) |
+| `FALOS_PACKAGED` | unset | Set by the desktop app. Capability fixes point at its Setup screen, and the key is read only from the env / `$FALOS_HOME/fal.env` |
+
+## Packaged build
+- `pnpm bundle` → `dist/main.mjs` + `dist/setup.mjs` (esbuild, everything inlined except the `claude`/`codex` native CLIs; the user's own are used).
+- The host runs `$FALOS_NODE dist/main.mjs` when both exist.
+- `node dist/setup.mjs doctor | check-key | install [skills|remotion|chrome|hyperframes]` is the desktop app's first-run helper:
+  - Installs the templates with npm into `$FALOS_HOME/templates`.
+  - Runs `remotion browser ensure`.
+  - Fetches the skills as GitHub tarballs at the commits pinned in `scripts/install-skills.sh`.
+- See `docs/PACKAGING.md`.
 
 ## Budgets and spend
 - There is **no spend cap**. Chat shows the fal spend as it happens (`cost` events, cumulative per turn):

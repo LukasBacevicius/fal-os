@@ -117,6 +117,8 @@ pub struct SceneNode {
     pub card: String,
     /// Engine handle, `None` for nodes that are not drawn (groups, connectors, empty rects).
     pub handle: Option<Handle>,
+    /// `role` prop (input / candidate / wip / final / rejected), for the provenance badge.
+    pub role: Option<String>,
 }
 
 impl SceneNode {
@@ -165,6 +167,7 @@ impl SceneNode {
             parent: n.parent.clone(),
             text: n.text.clone(),
             handle: None,
+            role: n.props.get("role").and_then(|v| v.as_str()).map(String::from),
         }
     }
 

@@ -18,6 +18,22 @@ cargo run --release --features custom-protocol --manifest-path apps/desktop/src-
 ```
 To make a `.app`: `cargo install tauri-cli --version "^2" --locked`, then run `cargo tauri build` in `apps/desktop/src-tauri`.
 
+## Packaged app (DMG for colleagues)
+`scripts/package-macos.sh` builds `fal-os.app` and an ad-hoc signed DMG. The bundle contains the shell with the embedded frontend, `falos-host` as a sidecar, a Node 22 runtime and the esbuild-bundled agent runtime. Install steps, signing and notarization are in [docs/PACKAGING.md](../../docs/PACKAGING.md).
+
+In a packaged bundle, `src/sidecar.rs` does the following:
+- Starts `falos-host serve` (and through it the agent runtime) on launch, and stops its process group on quit.
+- Exposes setup commands for the web UI's first-run screen: `setup_status`, `check_fal_key`, `save_fal_key` (Keychain, fallback `$FALOS_HOME/fal.env`), `forget_fal_key`, `install_extras` and `restart_host`.
+
+`cargo run` from a checkout spawns nothing (no bundled runtime next to the binary), and `host_info` reads `host.json` as before.
+
+Env overrides:
+- `FALOS_HOME`: settings, token, templates and logs.
+- `FALOS_PROJECTS`: workspace folder instead of `~/fal-os-projects`.
+- `FALOS_KEYCHAIN_SERVICE`: Keychain service name.
+- `FALOS_NO_KEYCHAIN=1`: file fallback only.
+- `FALOS_NO_SIDECAR=1`: don't start the host.
+
 ## Bench / probe env vars
 - `FALOS_URL=http://127.0.0.1:8789/?bench` loads any URL. `tauri://localhost/?bench` also works with `custom-protocol`.
 - `FALOS_PROBE=http://127.0.0.1:8789/bench` POSTs WebGPU availability, page state and the bench result to serve.py.

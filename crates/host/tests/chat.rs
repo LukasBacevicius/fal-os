@@ -177,7 +177,7 @@ async fn import_file_and_get_context() {
         .await
         .unwrap();
     assert_eq!(r.is_error, Some(true));
-    let txt = env.dir.path().join("notes.txt");
+    let txt = env.dir.path().join("notes.xyz");
     std::fs::write(&txt, "x").unwrap();
     let r = c
         .call_tool(
@@ -221,10 +221,10 @@ async fn import_file_and_get_context() {
     );
     let l = asset.lineage.unwrap();
     assert_eq!(
-        (l.model.as_str(), l.fal_request_id.as_deref(), l.cost),
+        (l.op.as_str(), l.fal_request_id.as_deref(), l.cost),
         ("fal-agent", Some("resp_1"), Some(0.03))
     );
-    assert_eq!(l.params["task"], "hero shot");
+    assert_eq!(l.recipe["task"], "hero shot");
     assert_eq!(asset.uri.as_deref(), Some("https://cdn/x.png"));
 
     // A generation placeholder converts in place: same id, its spot and width.

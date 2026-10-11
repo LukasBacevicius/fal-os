@@ -15,13 +15,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
-use falos_doc::{Actor, Asset, Canvas, Command, Lineage, NodeKind, Props, ReadOpts, Version};
+use falos_doc::{Actor, Asset, Canvas, Command, ReadOpts, Version};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
-use sha2::{Digest, Sha256};
 use crate::runtime::RuntimeLink;
 
 use crate::context::untrusted;
@@ -1682,11 +1681,11 @@ fn lineage_lines(c: &Canvas, asset: Option<String>) -> Vec<String> {
         let Some(rec) = c.asset(&id) else { break };
         let mut s = format!("asset {id}");
         if let Some(l) = &rec.lineage {
-            let _ = write!(s, " ← {} by @{} params {}", l.model, l.actor, l.params);
+            let _ = write!(s, " ← {} {} by @{} recipe {}", l.kind.as_str(), l.op, l.actor, l.recipe);
             if let Some(rid) = &l.fal_request_id {
                 let _ = write!(s, " request {rid}");
             }
-            next = l.parents.first().cloned();
+            next = l.parents.first().map(|p| p.asset.clone());
         }
         out.push(s);
     }
@@ -1902,224 +1901,7 @@ pub async fn probe(path: &Path) -> Result<Probe> {
     Ok(p)
 }
 
-fn media_kind(ext: &str) -> Option<(NodeKind, &'static str)> {
-    Some(match ext {
-        "png" => (NodeKind::Image, "image/png"),
-        "jpg" | "jpeg" => (NodeKind::Image, "image/jpeg"),
-        "webp" => (NodeKind::Image, "image/webp"),
-        "gif" => (NodeKind::Image, "image/gif"),
-        "mp4" | "m4v" => (NodeKind::Video, "video/mp4"),
-        "mov" => (NodeKind::Video, "video/quicktime"),
-        "webm" => (NodeKind::Video, "video/webm"),
-        "mp3" => (NodeKind::Audio, "audio/mpeg"),
-        "wav" => (NodeKind::Audio, "audio/wav"),
-        "m4a" | "aac" => (NodeKind::Audio, "audio/mp4"),
-        "ogg" => (NodeKind::Audio, "audio/ogg"),
-        "flac" => (NodeKind::Audio, "audio/flac"),
-        _ => return None,
-    })
-}
-
-pub struct Imported {
-    pub node: String,
-    pub asset: String,
-    pub file: PathBuf,
-    pub kind: NodeKind,
-    pub probe: Probe,
-    pub w: f64,
-    pub h: f64,
-}
-
-/// Provenance for an imported file (e.g. a fal Agent artifact or a Remotion render).
-#[derive(Deserialize, schemars::JsonSchema, Default, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct LineageArgs {
-    /// What produced it, e.g. "fal-agent", "fal-agent:fal-ai/flux/dev", "remotion".
-    pub model: Option<String>,
-    /// Inputs worth keeping: task text, prompt, composition props, ... (JSON object).
-    pub params: Option<Json>,
-    /// fal request / Agent response id.
-    pub fal_request_id: Option<String>,
-    /// USD.
-    pub cost: Option<f64>,
-    /// Asset ids (sha256:...) or node ids this was made from.
-    pub parents: Option<Vec<String>>,
-    /// Remote URL of the original (e.g. the fal CDN url), kept as the asset uri.
-    pub uri: Option<String>,
-}
-
-#[derive(Default)]
-pub struct ImportOpts {
-    pub place: Option<PlacementArgs>,
-    pub name: Option<String>,
-    pub lineage: Option<LineageArgs>,
-    /// A `generation` placeholder node to convert in place (same id, parent and z-order).
-    pub replace: Option<String>,
-}
-
-/// Copy a local media file into the project's assets (by sha256) and create its node
-/// (or convert a placeholder `generation` node into it).
-pub async fn import_file(
-    host: &Host,
-    actor: &Actor,
-    canvas: &str,
-    path: &Path,
-    opts: ImportOpts,
-) -> Result<Imported> {
-    let canvas = host.resolve_canvas(canvas)?;
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let (kind, mime) = media_kind(&ext).ok_or_else(|| {
-        anyhow!("import_file takes image/video/audio files (png jpg webp gif mp4 mov webm mp3 wav m4a ogg flac), not `.{ext}`")
-    })?;
-    let bytes = tokio::fs::read(path)
-        .await
-        .with_context(|| format!("reading {}", path.display()))?;
-    let hex: String = Sha256::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let dir = host.dir().join("assets");
-    tokio::fs::create_dir_all(&dir).await?;
-    let file = dir.join(format!("{hex}.{ext}"));
-    if !file.exists() {
-        tokio::fs::write(&file, &bytes).await?;
-    }
-    let probe = probe(&file).await.unwrap_or_default();
-    let placeholder = match &opts.replace {
-        Some(id) => Some(
-            host.read(&canvas, |c| c.node(id))?
-                .filter(|n| n.kind == NodeKind::Generation)
-                .ok_or_else(|| anyhow!("`{id}` is not a generation node on this canvas"))?,
-        ),
-        None => None,
-    };
-    let mut p = opts.place.unwrap_or_default();
-    // Place next to these when no x/y is given: `near`, else the lineage parents (node ids).
-    let mut near = p.near.clone().unwrap_or_default();
-    if near.is_empty()
-        && let Some(l) = &opts.lineage
-    {
-        near = l.parents.clone().unwrap_or_default();
-    }
-    if let Some(n) = &placeholder {
-        // Keep the placeholder's spot and width; the height follows the media.
-        p = PlacementArgs {
-            x: Some(n.x),
-            y: Some(n.y),
-            w: Some(n.w),
-            h: None,
-            parent: n.parent.clone(),
-            near: None,
-        };
-    }
-    let (w, h) = match (kind, probe.width, probe.height) {
-        (NodeKind::Audio, _, _) => (p.w.unwrap_or(480.0), p.h.unwrap_or(96.0)),
-        (_, Some(iw), Some(ih)) if iw > 0.0 && ih > 0.0 => match (p.w, p.h) {
-            (Some(w), Some(h)) => (w, h),
-            (Some(w), None) => (w, w * ih / iw),
-            (None, Some(h)) => (h * iw / ih, h),
-            (None, None) => {
-                let w = iw.min(960.0);
-                (w, w * ih / iw)
-            }
-        },
-        _ => (p.w.unwrap_or(512.0), p.h.unwrap_or(512.0)),
-    };
-    let (x, y) = match (p.x, p.y) {
-        (Some(x), Some(y)) => (x, y),
-        _ => host.find_space(&canvas, p.parent.as_deref(), &near, w, h)?,
-    };
-    let name = opts
-        .name
-        .or_else(|| {
-            placeholder
-                .as_ref()
-                .map(|n| n.name.clone())
-                .filter(|n| !n.is_empty())
-        })
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
-    let l = opts.lineage.unwrap_or_default();
-    let mut params = l.params.unwrap_or_else(|| json!({}));
-    if let Some(o) = params.as_object_mut() {
-        o.entry("source")
-            .or_insert(json!(path.display().to_string()));
-        if let Some(d) = probe.duration {
-            o.entry("duration").or_insert(json!(d));
-        }
-    }
-    let asset = Asset {
-        id: format!("sha256:{hex}"),
-        mime: Some(mime.into()),
-        uri: l.uri,
-        lineage: Some(Lineage {
-            model: l.model.unwrap_or_else(|| "import".into()),
-            params,
-            seed: None,
-            parents: l.parents.unwrap_or_default(),
-            fal_request_id: l.fal_request_id,
-            cost: l.cost,
-            actor: actor.id.clone(),
-        }),
-    };
-    let props: Props =
-        serde_json::from_value(json!({"x": x, "y": y, "w": w, "h": h, "asset": asset.id}))?;
-    let replace = placeholder.as_ref().map(|n| n.id.clone());
-    let res = host.mutate(&canvas, &actor.id, None, |c| {
-        let mut cmds = vec![Command::PutAsset(asset.clone())];
-        let mut index = None;
-        if let Some(id) = &replace {
-            let siblings: Vec<String> = match c.node(id).and_then(|n| n.parent) {
-                Some(par) => c.node(&par).map(|n| n.children).unwrap_or_default(),
-                None => c
-                    .nodes()
-                    .into_iter()
-                    .filter(|x| x.parent.is_none())
-                    .map(|x| x.id)
-                    .collect(),
-            };
-            index = siblings.iter().position(|s| s == id);
-            cmds.push(Command::DeleteNode { id: id.clone() });
-        }
-        cmds.push(Command::CreateNode {
-            id: replace.clone(),
-            kind,
-            parent: p.parent.clone(),
-            index,
-            name: name.chars().take(80).collect(),
-            props,
-            text: None,
-        });
-        c.apply(actor, None, &cmds)
-    })?;
-    let node = match replace {
-        Some(id) => id,
-        None => res
-            .created
-            .iter()
-            .find(|id| {
-                host.read(&canvas, |c| c.node(id).is_some())
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .context("import created no node")?,
-    };
-    Ok(Imported {
-        node,
-        asset: asset.id,
-        file,
-        kind,
-        probe,
-        w,
-        h,
-    })
-}
+pub use crate::ingest::{ImportOpts, Imported, LineageArgs, import_file};
 
 // ---- MCP tools -----------------------------------------------------------------------------
 
@@ -2137,6 +1919,8 @@ pub struct ImportFileArgs {
     pub lineage: Option<LineageArgs>,
     /// Id of a `generation` placeholder node to turn into this media node (same id/spot).
     pub replace: Option<String>,
+    /// Node role: input|candidate|wip|final|rejected (default: input without lineage, candidate for generations).
+    pub role: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -2364,7 +2148,7 @@ impl CanvasMcp {
     }
 
     #[tool(
-        description = "Import a local image/video/audio file (e.g. a Remotion render or a downloaded fal Agent artifact) into the project: copies it into assets by sha256 and creates the media node sized from the file (or converts the `replace` generation placeholder in place), with optional lineage. Returns the node id.",
+        description = "Import a local file (image, video, audio, svg, pdf, glb/usdz, heic/tiff/exr (PNG proxy, original kept), srt/vtt, .cube LUT, fonts, md/txt) into the project: copies it into assets by sha256 and creates its node (or converts the `replace` generation placeholder in place). Without lineage it is a protected user input; pass lineage {kind:derive|render|generate, op, recipe, parents} for files you made (e.g. ffmpeg in Bash, a Remotion render). Returns the node id.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2380,7 +2164,7 @@ impl CanvasMcp {
             if !path.is_absolute() {
                 bail!("path must be absolute");
             }
-            let opts = ImportOpts { place: a.placement, name: a.name, lineage: a.lineage, replace: a.replace };
+            let opts = ImportOpts { place: a.placement, name: a.name, lineage: a.lineage, replace: a.replace, role: a.role, ..Default::default() };
             let i = import_file(&host, &actor, &a.canvas, &path, opts).await?;
             host.activity(&a.session_id, &a.canvas, "write", std::slice::from_ref(&i.node));
             host.touch_nodes(&a.session_id, &a.canvas, std::slice::from_ref(&i.node));
