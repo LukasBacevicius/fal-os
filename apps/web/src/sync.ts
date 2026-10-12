@@ -5,6 +5,7 @@
 // chat (docs/CHAT-PROTOCOL.md: chat.send / chat.stop out, chat.history / chat.event in), and
 // asset upload/download over /assets.
 
+import { setUpload } from './dnd';
 import { discoverHost, explicitHost, type HostInfo } from './host';
 import { getState, setState, toast } from './store';
 import type { CanvasApp } from './wasm';
@@ -474,13 +475,20 @@ export class HostSync {
     try {
       const head = await fetch(this.assetUrl(id), { method: 'HEAD', headers: this.auth() });
       if (head.ok) return;
-      const r = await fetch(this.assetUrl(id), {
-        method: 'PUT',
-        headers: { ...this.auth(), 'Content-Type': blob.type || 'application/octet-stream' },
-        body: blob,
+      // XHR for upload progress (a 1px bar under the node while it uploads).
+      setUpload(id, 0);
+      await new Promise<void>((resolve, reject) => {
+        const x = new XMLHttpRequest();
+        x.open('PUT', this.assetUrl(id));
+        for (const [k, v] of Object.entries({ ...this.auth(), 'Content-Type': blob.type || 'application/octet-stream' })) x.setRequestHeader(k, v as string);
+        x.upload.onprogress = (e) => e.lengthComputable && setUpload(id, e.loaded / e.total);
+        x.onload = () => (x.status >= 200 && x.status < 300 ? resolve() : reject(new Error(`${x.status} ${x.responseText}`)));
+        x.onerror = () => reject(new Error('network error'));
+        x.send(blob);
       });
-      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+      setUpload(id, null);
     } catch (e) {
+      setUpload(id, null);
       this.uploaded.delete(id);
       toast(`Upload to host failed: ${e}`);
     }

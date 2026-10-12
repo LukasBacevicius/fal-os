@@ -7,7 +7,7 @@ import { getState, setState } from './store';
 import { addSelectionToChat } from './controller';
 import { hostSync } from './sync';
 import { selectChat, tabs } from './chat';
-import { copy, cycleSelection, duplicate, frameSelection, groupIntoFrame, paste, ungroup, zoomBy } from './actions';
+import { copy, cycleSelection, duplicate, frameSelection, groupIntoFrame, paste, reorder, ungroup, zoomBy } from './actions';
 import { setDriver, toggleHistory } from './chatActions';
 import { openPrompt } from './components/SelectionPrompt';
 import { createNote, editNode } from './components/TextLayer';
@@ -60,6 +60,7 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: 'esc', desc: 'deselect' },
   { group: 'canvas', keys: '⌘D', desc: 'duplicate' },
   { group: 'canvas', keys: '⌘G  ⌘⌥G  ⌘⇧G', desc: 'group / frame the selection / ungroup' },
+  { group: 'canvas', keys: '⌘]  ⌘[', desc: 'bring forward / send backward' },
   { group: 'canvas', keys: 'double-click  esc', desc: 'enter a group / back up a level' },
   { group: 'canvas', keys: '⌘ click', desc: 'select inside groups directly' },
   { group: 'canvas', keys: 'drag onto the chat', desc: 'attach the dragged node as a chip' },
@@ -69,13 +70,27 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: '⌘Z  ⌘⇧Z', desc: 'undo / redo (your own changes)' },
   { group: 'canvas', keys: '⇧1  ⇧2', desc: 'fit all / zoom to selection' },
   { group: 'canvas', keys: '⌘0  ⌘+  ⌘−', desc: '100% / zoom in / zoom out' },
-  { group: 'canvas', keys: 'drop files', desc: 'import (uploaded to the host)' },
+  { group: 'canvas', keys: 'drop files', desc: 'import at the pointer as a grid, into the frame under it (uploaded to the host)' },
+  { group: 'canvas', keys: 'drag into a frame', desc: 'reparent (the frame highlights); drag out to leave it; hold space to keep the parent; esc cancels' },
   { group: 'out', keys: 'drag out of the window', desc: 'desktop: drag selected media to Finder or any app (also [⇲] by the selection)' },
   { group: 'out', keys: 'right-click', desc: 'node menu: copy file / image, open in…, reveal, export, mark final, lineage' },
   { group: 'out', keys: '⌘⇧C', desc: 'copy the selection as files (⌘V in Finder, Slack, Premiere); web: links' },
   { group: 'out', keys: '⌘⇧E', desc: 'export panel for the selection; nothing selected: export all marked' },
   { group: 'out', keys: '⌘K', desc: 'more: copy fal URL / prompt / recipe, mark candidate / rejected, ops (remove bg, upscale, reframe, trim, …)' },
   { group: 'canvas', keys: '⌘F', desc: 'in layers: filter' },
+];
+
+/** Where the same actions live as clicks (the `?` overlay lists these; every button's
+ *  tooltip shows its key). */
+export const CLICKS: { where: string; what: string }[] = [
+  { where: '[≡]  top-left', what: 'projects, layers / library, chats, import, export, connect agent, undo / redo, theme, reduce motion, shortcuts, palette' },
+  { where: 'layers · library', what: 'left panel tabs; [⤢] full-screen library, [×] closes the panel' },
+  { where: 'right-click a node', what: 'ask, add to chat, copy file, open in, export, final, copy / paste, duplicate, delete, group, frame, order, zoom, lineage' },
+  { where: 'right-click canvas', what: 'paste, add note, import files, select all, zoom to fit / 100%, undo / redo' },
+  { where: '−  43%  +', what: 'bottom-left zoom; click the level to fit all' },
+  { where: '[✦]  [⇲]', what: 'by the selection: ask about it / drag out (click downloads on the web)' },
+  { where: 'chat', what: '+ new · ≡ history · opus fal codex · [+] attach files · [+ N selected] · [send] · [stop]' },
+  { where: 'library tiles', what: 'drag onto the canvas / a frame / the chat; double-click places; [place] [+ chat] [look] [♥] [tag] [collect] [upload] [local] [similar]' },
 ];
 
 export function editable(t: EventTarget | null) {
@@ -192,6 +207,7 @@ export function installKeys(): () => void {
     if (mod && e.shiftKey && e.code === 'KeyE') return done(), openExport();
     if (mod && e.shiftKey && e.code === 'KeyC') return done(), void copyFiles();
     if (mod && e.code === 'KeyG') return done(), e.shiftKey ? ungroup() : e.altKey ? frameSelection() : groupIntoFrame();
+    if (mod && !e.shiftKey && (k === ']' || k === '[')) return done(), reorder(k === ']' ? 1 : -1);
     if (mod && k === '0') return done(), app.zoomTo(1);
     if (mod && (k === '=' || k === '+')) return done(), zoomBy(1.25);
     if (mod && (k === '-' || k === '_')) return done(), zoomBy(0.8);

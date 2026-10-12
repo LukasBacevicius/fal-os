@@ -67,6 +67,8 @@ struct App {
     reduce_motion: bool,
     /// Nodes highlighted from outside the canvas (layers row hover).
     highlight: Vec<String>,
+    /// Frame highlighted as the target of a drag from outside the canvas (files, library).
+    drop_target: Option<String>,
     /// Asset id → (source badge, uploaded to fal), refreshed when asset records change.
     sources: HashMap<String, (u32, bool)>,
     /// Lineage view: the nodes kept bright (the selection's ancestors and descendants);
@@ -477,6 +479,7 @@ impl App {
             cursors: &cursors,
             activity: &activity,
             highlight: &highlight,
+            drop_target: self.ix.drop_target().or(self.drop_target.as_deref()).and_then(|id| self.scene.get(id)).map(|n| n.rect),
             badges: &badges,
             dim: &dim,
             dpr: self.dpr,
@@ -617,11 +620,21 @@ impl App {
     }
 
     /// Interaction works in world space; the doc stores positions relative to the parent.
+    /// A `MoveNode` earlier in the same batch (drag reparenting) changes the parent the
+    /// following updates of that node are relative to.
     fn to_parent_space(&self, cmds: Vec<Command>) -> Vec<Command> {
+        let mut moved: HashMap<String, Option<String>> = HashMap::new();
         cmds.into_iter()
             .map(|c| match c {
+                Command::MoveNode { id, parent, index } => {
+                    moved.insert(id.clone(), parent.clone());
+                    Command::MoveNode { id, parent, index }
+                }
                 Command::UpdateNode { id, mut props } => {
-                    let o = self.scene.parent_origin(&id);
+                    let o = match moved.get(&id) {
+                        Some(p) => p.as_deref().and_then(|p| self.scene.get(p)).map_or([0.0, 0.0], |p| [p.rect[0], p.rect[1]]),
+                        None => self.scene.parent_origin(&id),
+                    };
                     for (k, off) in [("x", o[0]), ("y", o[1])] {
                         if off != 0.0
                             && let Some(v) = props.get(k).and_then(|v| v.as_f64())
@@ -969,17 +982,19 @@ impl App {
         }
     }
 
-    /// Creates nodes for imported files as one transaction; returns the new node ids.
-    fn create_imported(&mut self, items: Vec<Imported>, at: [f32; 2]) -> Vec<String> {
+    /// New nodes for imported files (one transaction; returns the new node ids): a tidy grid (about square, rows top-aligned) centered
+    /// on `at` (world), inside `parent` (a frame) when given.
+    fn create_imported(&mut self, items: Vec<Imported>, at: [f32; 2], parent: Option<String>) -> Vec<String> {
         let mut cmds = Vec::new();
-        let gap = 40.0;
         let sizes: Vec<[f32; 2]> = items.iter().map(|i| i.size()).collect();
-        let total_w: f32 = sizes.iter().map(|s| s[0]).sum::<f32>() + gap * (sizes.len().saturating_sub(1)) as f32;
-        let mut x = at[0] - total_w * 0.5;
-        for (item, size) in items.iter().zip(&sizes) {
+        let parent = parent.filter(|p| self.scene.get(p).is_some_and(|n| matches!(n.kind, NodeKind::Frame | NodeKind::Group)));
+        let frame = parent.as_deref().and_then(|p| self.scene.get(p)).map(|n| n.rect);
+        let rects = grid_layout(&sizes, at, frame);
+        let origin = parent.as_deref().and_then(|p| self.scene.get(p)).map_or([0.0, 0.0], |n| [n.rect[0], n.rect[1]]);
+        for (item, r) in items.iter().zip(&rects) {
             cmds.push(Command::PutAsset(Asset { id: item.id.clone(), mime: Some(item.mime.clone()), ..Default::default() }));
             let mut props: Props = serde_json::from_value(json!({
-                "x": x.round(), "y": (at[1] - size[1] * 0.5).round(), "w": size[0].round(), "h": size[1].round(),
+                "x": (r[0] - origin[0]).round(), "y": (r[1] - origin[1]).round(), "w": r[2].round(), "h": r[3].round(),
             }))
             .unwrap_or_default();
             if item.kind != NodeKind::Text {
@@ -992,13 +1007,12 @@ impl App {
             cmds.push(Command::CreateNode {
                 id: None,
                 kind: item.kind,
-                parent: None,
+                parent: parent.clone(),
                 index: None,
                 name: item.name.clone(),
                 props,
                 text: item.text.clone(),
             });
-            x += size[0] + gap;
         }
         match self.commit(&cmds) {
             Ok(r) => {
@@ -1013,6 +1027,48 @@ impl App {
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// Grid placement for `sizes` (world): `ceil(sqrt(n))` columns, rows top-aligned, the
+/// whole block centered on `at`. Dropped into a `frame` (world rect), the block is scaled
+/// down to fit inside it (with a margin) and kept within it. Mirrored by `gridLayout` in
+/// apps/web/src/dnd.ts (drop previews), so ghosts and placed nodes line up.
+pub fn grid_layout(sizes: &[[f32; 2]], at: [f32; 2], frame: Option<[f32; 4]>) -> Vec<[f32; 4]> {
+    const GAP: f32 = 40.0;
+    const PAD: f32 = 24.0;
+    let n = sizes.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let cols = (n as f32).sqrt().ceil() as usize;
+    let block = |k: f32| {
+        let rows: Vec<&[[f32; 2]]> = sizes.chunks(cols).collect();
+        let row_w: Vec<f32> = rows.iter().map(|r| r.iter().map(|s| s[0] * k).sum::<f32>() + GAP * k * (r.len() - 1) as f32).collect();
+        let row_h: Vec<f32> = rows.iter().map(|r| r.iter().map(|s| s[1] * k).fold(0.0, f32::max)).collect();
+        let total_w = row_w.iter().copied().fold(0.0, f32::max);
+        let total_h = row_h.iter().sum::<f32>() + GAP * k * (rows.len() - 1) as f32;
+        (rows, row_h, total_w, total_h)
+    };
+    let (_, _, w1, h1) = block(1.0);
+    let k = frame.map_or(1.0, |f| (((f[2] - 2.0 * PAD) / w1).min((f[3] - 2.0 * PAD) / h1)).clamp(0.05, 1.0));
+    let (rows, row_h, total_w, total_h) = block(k);
+    let mut c = at;
+    if let Some(f) = frame {
+        let clamp = |v: f32, lo: f32, hi: f32| if lo > hi { (lo + hi) * 0.5 } else { v.clamp(lo, hi) };
+        c[0] = clamp(c[0], f[0] + PAD + total_w * 0.5, f[0] + f[2] - PAD - total_w * 0.5);
+        c[1] = clamp(c[1], f[1] + PAD + total_h * 0.5, f[1] + f[3] - PAD - total_h * 0.5);
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut y = c[1] - total_h * 0.5;
+    for (r, row) in rows.iter().enumerate() {
+        let mut x = c[0] - total_w * 0.5;
+        for s in row.iter() {
+            out.push([x, y, s[0] * k, s[1] * k]);
+            x += (s[0] + GAP) * k;
+        }
+        y += row_h[r] + GAP * k;
+    }
+    out
 }
 
 struct Imported {
@@ -1182,6 +1238,7 @@ impl CanvasApp {
                 working: Vec::new(),
                 reduce_motion: false,
                 highlight: Vec::new(),
+                drop_target: None,
                 sources: HashMap::new(),
                 lineage: None,
                 palette: overlay::DARK,
@@ -1454,18 +1511,23 @@ impl CanvasApp {
 
     // ---- media ----
 
-    /// Imports files dropped at CSS point (x, y). Resolves to the new node ids.
+    /// Imports files dropped at CSS point (x, y), laid out as a grid centered there.
+    /// `opts`: `{ parent?: string }` puts them inside that frame (drop into a frame). Emits
+    /// `import {done, total}` after each file (drop placeholders show progress). Resolves to
+    /// the new node ids.
     #[wasm_bindgen(js_name = importFiles)]
-    pub fn import_files(&self, files: js_sys::Array, x: f32, y: f32) -> js_sys::Promise {
+    pub fn import_files(&self, files: js_sys::Array, x: f32, y: f32, opts: JsValue) -> js_sys::Promise {
         let app = self.app.clone();
         let files: Vec<web_sys::File> = files.iter().filter_map(|f| f.dyn_into().ok()).collect();
+        let parent = Reflect::get(&opts, &"parent".into()).ok().and_then(|p| p.as_string());
         wasm_bindgen_futures::future_to_promise(async move {
             let at = {
                 let a = app.borrow();
                 a.camera.screen_to_world([x * a.dpr, y * a.dpr])
             };
+            let total = files.len();
             let mut items = Vec::new();
-            for f in files {
+            for (i, f) in files.into_iter().enumerate() {
                 let name = f.name();
                 let mime = f.type_();
                 let blob: web_sys::Blob = f.into();
@@ -1475,11 +1537,31 @@ impl CanvasApp {
                         app.borrow_mut().emit("error", json!({"message": format!("import {name}: {}", e.as_string().unwrap_or_default())}));
                     }
                 }
+                app.borrow_mut().emit("import", json!({"done": i + 1, "total": total}));
+                dispatch(&app);
             }
-            let ids = app.borrow_mut().create_imported(items, at);
+            let ids = app.borrow_mut().create_imported(items, at, parent);
             dispatch(&app);
             Ok(to_js(&json!(ids)))
         })
+    }
+
+    /// The frame a drop at CSS point (x, y) would land in (deepest frame under it).
+    #[wasm_bindgen(js_name = frameAt)]
+    pub fn frame_at(&self, x: f32, y: f32) -> Option<String> {
+        let a = self.app.borrow();
+        let w = a.camera.screen_to_world([x * a.dpr, y * a.dpr]);
+        crate::interact::drop_frame(&a.scene, w, &[])
+    }
+
+    /// Highlights a frame as the target of a drag from outside the canvas (`null` clears).
+    #[wasm_bindgen(js_name = setDropTarget)]
+    pub fn set_drop_target(&self, id: Option<String>) {
+        let mut a = self.app.borrow_mut();
+        if a.drop_target != id {
+            a.drop_target = id;
+            a.dirty = true;
+        }
     }
 
     /// Imports a media URL (fetched into a blob) at CSS point (x, y).
@@ -1495,7 +1577,7 @@ impl CanvasApp {
                 let a = app.borrow();
                 a.camera.screen_to_world([x * a.dpr, y * a.dpr])
             };
-            let ids = app.borrow_mut().create_imported(vec![item], at);
+            let ids = app.borrow_mut().create_imported(vec![item], at, None);
             dispatch(&app);
             Ok(to_js(&json!(ids)))
         })

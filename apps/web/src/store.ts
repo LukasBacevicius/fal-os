@@ -35,7 +35,7 @@ export interface State {
    *  picker (⌘O). */
   overlay: 'palette' | 'help' | 'connect' | 'projects' | 'export' | 'setup' | null;
   /** Node context menu (right-click) at a screen point. */
-  menu: { x: number; y: number; ids: string[] } | null;
+  menu: { x: number; y: number; ids: string[]; at?: [number, number] } | null;
   /** Nodes the export panel works on (empty = every node with saved export settings). */
   exportIds: string[];
   /** Lineage view: everything outside the selection's ancestors/descendants is dimmed. */

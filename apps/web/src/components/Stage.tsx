@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { ASSET_MIME, libraryDrop } from '../library';
+import { dnd, endDrag, filesSession, startDrag } from '../dnd';
+import { DropLayer, dropOver } from './DropLayer';
 import { createCanvasApp } from '../wasm';
 import { getState, setState, useStore } from '../store';
 import { attach, CANVAS_ID, importFiles, restore } from '../controller';
@@ -14,7 +16,7 @@ import { addContext } from '../controller';
 import { TextLayer, createNote, editNode } from './TextLayer';
 import { installKeys, pointer } from '../keys';
 import { theme } from '../theme';
-import { ProjectHeader } from './Projects';
+import { FloatingHead } from './AppMenu';
 import { VideoLayer } from './VideoLayer';
 import { openFocus, pointerPressed } from '../video';
 import { openMenuAt } from './ContextMenu';
@@ -47,12 +49,13 @@ function canvasSizes(wrap: HTMLElement, entry?: ResizeObserverEntry): [number, n
 export function Stage() {
   const wrap = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
-  const [dragging, setDragging] = useState(false);
+
   const app = useStore((s) => s.app);
   const error = useStore((s) => s.error);
   const loading = useStore((s) => s.loading);
   const empty = useStore((s) => s.nodes.length === 0);
   const layers = useStore((s) => s.outlineOpen ?? s.nodes.length > 0);
+  const library = useStore((s) => s.library);
 
   // Create the app once.
   useEffect(() => {
@@ -217,7 +220,7 @@ export function Stage() {
     const ctx = (e: MouseEvent) => {
       e.preventDefault();
       const [x, y] = pos(e);
-      openMenuAt(e.clientX, e.clientY, app.hitTest(x, y) ?? null);
+      openMenuAt(e.clientX, e.clientY, app.hitTest(x, y) ?? null, [x, y]);
     };
     // Double-click: edit a note/text in place, or create a note on empty canvas.
     const dbl = (e: MouseEvent) => {
@@ -257,14 +260,22 @@ export function Stage() {
   // Keyboard: see keys.ts (one handler for the whole app).
   useEffect(() => installKeys(), []);
 
+  // Files from Finder and library tiles: sized ghosts at the pointer, the frame under it
+  // highlighted, and the drop lands there as a grid (into the frame). Esc cancels (native).
+  const local = (e: React.DragEvent): [number, number] => {
+    const r = canvas.current!.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  };
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
-    setDragging(false);
-    if (libraryDrop(e, canvas.current!.getBoundingClientRect())) return;
+    const p = local(e);
+    const frame = app?.frameAt(p[0], p[1]) ?? null;
+    dropOver(null);
+    endDrag();
+    if (libraryDrop(e, canvas.current!.getBoundingClientRect(), frame)) return;
     const files = Array.from(e.dataTransfer.files);
     if (!files.length) return;
-    const r = canvas.current!.getBoundingClientRect();
-    await importFiles(files, [e.clientX - r.left, e.clientY - r.top]);
+    await importFiles(files, p, { parent: frame });
   };
 
   return (
@@ -272,17 +283,17 @@ export function Stage() {
       className="stage"
       ref={wrap}
       onDragOver={(e) => {
-        if (e.dataTransfer.types.includes(ASSET_MIME)) {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'copy';
-        } else if (e.dataTransfer.types.includes('Files')) {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'copy';
-          setDragging(true);
-        }
+        const types = e.dataTransfer.types;
+        const lib = types.includes(ASSET_MIME);
+        if (!lib && !types.includes('Files')) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        if (!dnd().session) startDrag(lib ? { source: 'library', items: [{ w: 512, h: 512, kind: 'image' }] } : filesSession(e.dataTransfer));
+        const p = local(e);
+        dropOver(p, app?.frameAt(p[0], p[1]) ?? null);
       }}
       onDragLeave={(e) => {
-        if (e.currentTarget === e.target || !wrap.current?.contains(e.relatedTarget as Node)) setDragging(false);
+        if (!wrap.current?.contains(e.relatedTarget as Node)) dropOver(null);
       }}
       onDrop={onDrop}
     >
@@ -302,10 +313,10 @@ export function Stage() {
         </div>
       )}
       {error && <div className="empty">can't start the canvas: {error}</div>}
-      {dragging && <div className="drop-hint">drop to import</div>}
+      <Guard name="drop"><DropLayer /></Guard>
       <ActivityBars />
       <StatusBar />
-      {!layers && <ProjectHeader floating />}
+      {!layers && library !== 'panel' && <FloatingHead />}
     </div>
   );
 }

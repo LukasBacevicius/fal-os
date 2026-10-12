@@ -11,6 +11,7 @@ import { trackNodes } from './activity';
 import { worldRects } from './geometry';
 import { loadScene, saveCamera } from './projects';
 import { prepare, syncLineage, watchDeliverables } from './out';
+import { addPlaceholder, fileGhost, finishPlaceholder, frameRect, gridLayout, importProgress, trackImport } from './dnd';
 
 export const CANVAS_ID = 'main';
 
@@ -83,6 +84,9 @@ export function attach(app: CanvasApp) {
       case 'stats':
         setState({ stats: payload });
         break;
+      case 'import':
+        importProgress(payload.done);
+        break;
       case 'error':
         toast(payload.message);
         break;
@@ -109,15 +113,24 @@ export async function restore(app: CanvasApp, hosted = false) {
   setState({ canvasName: app.canvasName(), camera: app.camera() });
 }
 
-export async function importFiles(files: File[], at?: [number, number]) {
+/** Imports files at a canvas point (CSS px; the view center by default) as a grid, inside
+ *  `parent` (a frame) when given. Placeholder tiles (pixel dots + progress) show at once
+ *  where the files will land and fade out as the media comes in. */
+export async function importFiles(files: File[], at?: [number, number], opts: { parent?: string | null } = {}) {
   const { app, camera } = getState();
   if (!app || !files.length) return [];
   const [x, y] = at ?? [camera.width / 2, camera.height / 2];
+  const [wx, wy] = app.screenToWorld(x, y);
+  const ph = addPlaceholder(gridLayout(files.map((f) => fileGhost(f.type, f.name)).map((g) => [g.w, g.h]), [wx, wy], frameRect(opts.parent)));
+  trackImport(ph);
   try {
-    return (await app.importFiles(files, x, y)) as string[];
+    return (await app.importFiles(files, x, y, { parent: opts.parent ?? undefined })) as string[];
   } catch (e) {
     toast(`import failed: ${e}`);
     return [];
+  } finally {
+    trackImport(null);
+    finishPlaceholder(ph);
   }
 }
 
@@ -151,6 +164,26 @@ export function emptySpot(want = 220): [number, number] {
   const right = Math.max(...rects.map((r) => r[0] + r[2]));
   const [sx, sy] = app.worldToScreen(right + 40, wy);
   return [sx + size / 2, sy];
+}
+
+/** A native file picker (the click path for importing and attaching files). */
+export function pickFiles(onFiles: (files: File[]) => void) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.style.display = 'none';
+  input.onchange = () => {
+    const files = Array.from(input.files ?? []);
+    input.remove();
+    if (files.length) onFiles(files);
+  };
+  document.body.appendChild(input);
+  input.click();
+}
+
+/** "import files…": picked files land at `at` (CSS px on the canvas) or in empty space. */
+export function importPicked(at?: [number, number]) {
+  pickFiles((files) => void importFiles(files, at ?? emptySpot()));
 }
 
 /** Files dropped or pasted on the chat: imported as canvas nodes in empty space near the

@@ -2,15 +2,19 @@
 // grid of host thumbnails, virtualized in bands with hysteresis (rows are materialized a
 // screen and a half around the viewport and only re-banded after travelling a quarter
 // screen), a search box (words, #hex color, "similar to" from a tile) and a few filter words.
-// Keys: arrows move, space quick look, ⏎ places on the canvas, f favorite, t tag, c collect,
+// Keys: arrows move, space quick look, ⏎ places on the canvas (a selection as a grid), f favorite, t tag, c collect,
 // u upload to fal, l local-only, s similar, esc closes.
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { setState, useStore } from '../store';
+import { getState, setState, useStore } from '../store';
 import {
-  ASSET_MIME, GLYPH, VIEWS, collectSelected, findSimilar, hostUrl, lib, place, runQuery, setLib, setSearch, setView, tagSelected,
+  ASSET_MIME, GLYPH, VIEWS, collectSelected, findSimilar, hostUrl, lib, libGhost, placeMany, runQuery, setLib, setSearch, setView, tagSelected,
   toggleFavorite, toggleLocalOnly, uploadSelected, useLib, type LibItem,
 } from '../library';
+import { endDrag, startDrag } from '../dnd';
+import { BLANK_DRAG } from './DropLayer';
+import { PanelTabs } from './AppMenu';
+import { emptySpot } from '../controller';
 
 const GAP = 4;
 
@@ -80,11 +84,20 @@ const Tile = memo(function Tile({ it, x, y, w, h, on, cursor, index }: { it: Lib
       style={{ transform: `translate(${x}px,${y}px)`, width: w, height: h }}
       data-i={index}
       draggable
+      title="drag onto the canvas or the chat · double-click places (⏎) · space quick look"
       onDragStart={(e) => {
-        e.dataTransfer.setData(ASSET_MIME, it.sha);
+        // Dragging a selected tile takes the whole selection along.
+        const s = lib();
+        const shas = s.selected.includes(it.sha) ? s.selected : [it.sha];
+        if (!s.selected.includes(it.sha)) setLib({ selected: [it.sha], cursor: index });
+        e.dataTransfer.setData(ASSET_MIME, shas.join('\n'));
         e.dataTransfer.setData('text/plain', it.prompt ?? it.sha);
         e.dataTransfer.effectAllowed = 'copy';
+        // The thumbnail follows the pointer as our own DOM ghost (true size on the canvas).
+        e.dataTransfer.setDragImage(BLANK_DRAG, 0, 0);
+        startDrag({ source: 'library', shas, items: shas.map(libGhost) });
       }}
+      onDragEnd={() => endDrag()}
       onMouseMove={it.strip ? (e) => {
         const r = e.currentTarget.getBoundingClientRect();
         setScrub(Math.min(11, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * 12))));
@@ -193,7 +206,10 @@ function Grid({ rowH }: { rowH: number }) {
   return (
     <div className="lib-grid" ref={el} onScroll={() => reband()} onClick={pick} onDoubleClick={(e) => {
       const t = (e.target as HTMLElement).closest('.lib-tile') as HTMLElement | null;
-      if (t) place(items[Number(t.dataset.i)].sha);
+      if (!t) return;
+      const sha = items[Number(t.dataset.i)].sha;
+      const sel = lib().selected;
+      placeMany(sel.includes(sha) ? sel : [sha]);
     }}>
       <div className="lib-space" style={{ height: L.height }}>{tiles}</div>
     </div>
@@ -220,6 +236,38 @@ function QuickLook() {
         {it.lineage && <div className="dim">{it.lineage}</div>}
         <div className="faint">{[it.palette?.join(' '), it.tags.length ? '#' + it.tags.join(' #') : '', it.projects.join(', '), it.sha.slice(0, 12)].filter(Boolean).join(' · ')}</div>
       </div>
+    </div>
+  );
+}
+
+/** Click actions for the selected tiles (each shows its key): place, quick look, favorite,
+ *  tag, collect, upload to fal, local-only, similar, attach to the chat. */
+function LibActions() {
+  const selected = useLib((s) => s.selected);
+  const quick = useLib((s) => s.quick);
+  const fav = useLib((s) => s.items.find((i) => i.sha === s.selected[0])?.favorite ?? false);
+  const local = useLib((s) => s.items.find((i) => i.sha === s.selected[0])?.local_only ?? false);
+  if (!selected.length) return null;
+  const toChat = () => {
+    const app = getState().app;
+    if (!app) return;
+    const [x, y] = emptySpot();
+    const [wx, wy] = app.screenToWorld(x, y);
+    placeMany(selected, [wx, wy], { attach: true });
+    setState({ chatOpen: true });
+  };
+  return (
+    <div className="lib-actions">
+      <span className="faint">{selected.length > 1 ? `${selected.length} selected` : '1 selected'}</span>
+      <button className="link" title="place on the canvas (⏎ · double-click · drag)" onClick={() => placeMany(selected)}>[place]</button>
+      <button className="link dim" title="attach to the chat (or drag onto it)" onClick={toChat}>[+ chat]</button>
+      <button className={`link ${quick ? '' : 'dim'}`} title="quick look (space)" onClick={() => setLib({ quick: !quick })}>[look]</button>
+      <button className="link dim" title={fav ? 'unfavorite (f)' : 'favorite (f)'} onClick={toggleFavorite}>{fav ? '[♥]' : '[♡]'}</button>
+      <button className="link dim" title="tag (t)" onClick={tagSelected}>[tag]</button>
+      <button className="link dim" title="add to a collection (c)" onClick={collectSelected}>[collect]</button>
+      <button className="link dim" title="upload to your fal library (u)" onClick={uploadSelected}>[upload]</button>
+      <button className="link dim" title={local ? 'allow upload to fal (l)' : 'keep local only (l)'} onClick={toggleLocalOnly}>{local ? '[local ✓]' : '[local]'}</button>
+      <button className="link dim" title="find similar (s)" onClick={() => findSimilar(lib().items[lib().cursor]?.sha ?? selected[0])}>[similar]</button>
     </div>
   );
 }
@@ -283,7 +331,7 @@ export function Library() {
     if (k === 'Enter') {
       e.preventDefault();
       const shas = s.selected.length ? s.selected : s.items[s.cursor] ? [s.items[s.cursor].sha] : [];
-      shas.forEach((sha) => place(sha));
+      placeMany(shas);
       return;
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -299,6 +347,7 @@ export function Library() {
   if (!mode) return null;
   return (
     <div className={`library ${mode}`} ref={root} tabIndex={-1} onKeyDown={onKey}>
+      {mode === 'panel' && <PanelTabs />}
       <div className="lib-head">
         <input
           ref={input}
@@ -309,8 +358,8 @@ export function Library() {
           onChange={(e) => setSearch(e.target.value.replace(/^similar \S*\s?/, ''))}
         />
         {loading && <span className="faint">…</span>}
-        <button className="link dim" onClick={() => setState({ library: mode === 'full' ? 'panel' : 'full' })} title="⌘⇧A panel · ⌘⇧L full">{mode === 'full' ? '[–]' : '[+]'}</button>
-        <button className="link dim" onClick={() => setState({ library: null })}>[×]</button>
+        {mode === 'full' && <button className="link dim" onClick={() => setState({ library: 'panel' })} title="back to the left panel (⌘⇧A)">[⤡]</button>}
+        {mode === 'full' && <button className="link dim" onClick={() => setState({ library: null })} title="close (esc)">[×]</button>}
       </div>
       <div className="lib-views">
         {VIEWS.map((v) => (
@@ -321,6 +370,7 @@ export function Library() {
       {(fal === 'off' || writes === 'unavailable') && <div className="lib-note faint">{fal === 'off' ? 'fal not connected: local library only' : 'fal writes not available'}</div>}
       <Grid rowH={mode === 'full' ? 200 : 96} />
       {empty && !loading && <div className="lib-empty faint">{search || similar ? 'nothing matches' : 'no assets yet'}</div>}
+      <LibActions />
       {quick && <QuickLook />}
     </div>
   );

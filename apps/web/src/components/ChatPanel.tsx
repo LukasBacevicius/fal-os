@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { getState, setState, useStore } from '../store';
 import { hostSync } from '../sync';
-import { attachFiles } from '../controller';
+import { addSelectionToChat, attachFiles, emptySpot, pickFiles } from '../controller';
+import { ASSET_MIME, draggedShas, placeMany } from '../library';
 import { addChips, agentLine, chatColor, chatTitle, groupTurns, isExternal, slug, transcript, type Chip, type Transcript } from '../chat';
 import { DRIVERS, sendChatMessage, setDriver, steerQueued, steerText } from '../chatActions';
 import { toast } from '../store';
@@ -36,6 +37,7 @@ function Composer({ running, readOnly, question, agent, queued }: {
     if (chatDriver === 'opus' || chatDriver === 'fal' || chatDriver === 'codex') setDriver(chatDriver);
   }, [chat.active, chatDriver]);
   const nodes = useStore((s) => s.nodes);
+  const selection = useStore((s) => s.selection);
   const draftKey = chat.active ?? '';
   const text = useStore((s) => s.drafts[draftKey] ?? '');
   const [caret, setCaret] = useState(0);
@@ -149,6 +151,7 @@ function Composer({ running, readOnly, question, agent, queued }: {
         ? running ? 'steer: ⏎ queue · ⌘⏎ send now…' : `message ${chatTitle(chat, chat.active)}…`
         : 'start a chat…';
   const mod = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'ctrl+';
+  const unattached = selection.filter((id) => !chat.chips.some((c) => c.kind === 'node' && c.node === id)).length;
 
   return (
     <div className="chat-input">
@@ -162,11 +165,18 @@ function Composer({ running, readOnly, question, agent, queued }: {
         </div>
       )}
       <Chips chips={chat.chips} onRemove={removeChip} />
+      {!readOnly && unattached > 0 && (
+        <div className="sel-add">
+          <button className="link faint" title={`add the canvas selection to the chat (${mod}L)`} onMouseDown={(e) => e.preventDefault()} onClick={addSelectionToChat}>
+            [+ {unattached} selected]
+          </button>
+        </div>
+      )}
       <div className="prompt">
         {!readOnly && (
           <span className="driver" title="agent for the next message (⌘.)">
             {DRIVERS.map((d) => (
-              <button key={d} className={`link ${d === driver ? 'on' : 'faint'}`} onClick={() => setDriver(d)}>{d}</button>
+              <button key={d} className={`link ${d === driver ? 'on' : 'faint'}`} title={`${d} drives the next message (${mod}. cycles)`} onClick={() => setDriver(d)}>{d}</button>
             ))}
           </span>
         )}
@@ -193,6 +203,16 @@ function Composer({ running, readOnly, question, agent, queued }: {
           }}
           spellCheck={false}
         />
+        {!readOnly && (
+          <span className="composer-btns">
+            <button className="link faint" title="attach files (or drop / paste them here)" onMouseDown={(e) => e.preventDefault()} onClick={() => pickFiles((f) => void attachFiles(f))}>[+]</button>
+            {running && !agent && !text.trim() ? (
+              <button className="link dim" title="stop the run (esc)" onMouseDown={(e) => e.preventDefault()} onClick={() => chat.active && hostSync()?.stopChat(chat.active)}>[stop]</button>
+            ) : (
+              <button className={`link ${text.trim() ? '' : 'faint'}`} disabled={!text.trim()} title={running && !agent ? `queue after the next step (⏎) · ${mod}⏎ send now` : 'send (⏎) · ⇧⏎ new line'} onMouseDown={(e) => e.preventDefault()} onClick={send}>[send]</button>
+            )}
+          </span>
+        )}
       </div>
       {running && !agent && text.trim() && !readOnly && (
         <div className="steer-hint faint">
@@ -288,7 +308,7 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
   };
 
   const pending = chat.pending && (chat.pending.chat === chat.active || chat.pending.chat === null) ? chat.pending : null;
-  const accepts = (dt: DataTransfer) => dt.types.includes('Files') || dt.types.includes(NODE_MIME);
+  const accepts = (dt: DataTransfer) => dt.types.includes('Files') || dt.types.includes(NODE_MIME) || dt.types.includes(ASSET_MIME);
 
   return (
     <aside
@@ -308,7 +328,16 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
         e.preventDefault();
         setDropping(false);
         const node = e.dataTransfer.getData(NODE_MIME);
-        if (node) {
+        const shas = draggedShas(e.dataTransfer);
+        if (shas.length) {
+          // Library tiles: placed in empty space near the view, then attached as chips.
+          const app = getState().app;
+          if (app) {
+            const [x, y] = emptySpot();
+            const [wx, wy] = app.screenToWorld(x, y);
+            placeMany(shas, [wx, wy], { attach: true });
+          }
+        } else if (node) {
           setState((s) => ({ chat: { ...s.chat, chips: addChips(s.chat.chips, [{ kind: 'node', node }]) } }));
           window.dispatchEvent(new Event('falos:focus-chat'));
         } else void attachFiles(Array.from(e.dataTransfer.files));
@@ -367,7 +396,11 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
             )}
             {conn === 'connected' && chat.runtime === 'missing' && <div className="dim">agent runtime not connected</div>}
             {conn === 'local' && <div className="dim">no fal-os host: chat is unavailable</div>}
-            {t.running && !subView && <div className="faint">running · esc to stop</div>}
+            {t.running && !subView && (
+              <div className="faint">
+                running · <button className="link" title="stop the run (esc in the input)" onClick={() => chat.active && hostSync()?.stopChat(chat.active)}>[stop]</button>
+              </div>
+            )}
           </div>
           {!atBottom && (
             <button

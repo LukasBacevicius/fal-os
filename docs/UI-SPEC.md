@@ -25,7 +25,7 @@
 - **Top bar** (28px):
   - Left: a text breadcrumb, `fal-os / <project> / <canvas>`.
   - Right: a host connection dot (white = connected, `--faint` = offline, as a text label rather than a color) and the signed-in fal account as text.
-  - Undo/redo stay as keyboard shortcuts only.
+  - A `[≡]` text button opens the app menu (projects, panels, chats, import / export, connect agent, undo / redo, theme, reduce motion, shortcuts, palette). Every action with a key also has a click path (docs/SHORTCUTS.md, "Click paths"); tooltips show the key.
 - **Canvas** fills the rest. The bottom-left status is plain dim text: `43% · 7 nodes`. Show fps only with `?debug`.
 - **Chat panel** on the right: 360px, resizable, collapsible with ⌘\\. It implements [CHAT-PROTOCOL.md](CHAT-PROTOCOL.md):
   - Messages are plain text blocks. User lines are prefixed `>`, agent lines `director:`, `generator:` and so on.

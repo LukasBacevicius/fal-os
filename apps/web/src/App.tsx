@@ -12,6 +12,7 @@ import { Library } from './components/Library';
 import { ContextMenu } from './components/ContextMenu';
 import { ExportPanel } from './components/ExportPanel';
 import { Setup, maybeOpenSetup } from './components/Setup';
+import { DragThumb } from './components/DropLayer';
 
 function stored(key: string, fallback: number) {
   try {
@@ -64,6 +65,7 @@ export function App() {
       {overlay === 'setup' && <Setup />}
       <VideoFocus />
       <ActivitySync />
+      <DragThumb />
       {toast && (
         <div className="toast" role="status">
           {toast}

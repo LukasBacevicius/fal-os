@@ -5,9 +5,12 @@ import { openChat, setDriver, toggleHistory } from '../chatActions';
 import { setReduceMotion } from '../activity';
 import { openPrompt } from './SelectionPrompt';
 import { focusNode, addSelectionToChat } from '../controller';
-import { cycleSelection, duplicate, frameSelection, groupIntoFrame, ungroup, zoomBy } from '../actions';
+import { cycleSelection, deleteSelection, duplicate, frameSelection, groupIntoFrame, pasteFromClipboard, reorder, ungroup, zoomBy } from '../actions';
+import { openLibrary } from '../library';
+import { importPicked } from '../controller';
+import { setTheme, theme } from '../theme';
 import { createNote } from './TextLayer';
-import { focusChat, newChat, SHORTCUTS, toggleChat, toggleOutline } from '../keys';
+import { CLICKS, focusChat, newChat, SHORTCUTS, toggleChat, toggleOutline } from '../keys';
 import { byRecent, openProject } from '../projects';
 import { outActions } from '../outActions';
 
@@ -46,6 +49,14 @@ function actions(): Entry[] {
     { label: 'all chats (history)', hint: '⌘Y', run: toggleHistory },
     { label: `agent for next message: next (now ${getState().driver})`, hint: '⌘.', run: () => setDriver() },
     { label: 'toggle layers panel', hint: '⌘⇧\\', run: toggleOutline },
+    { label: 'asset library (panel)', hint: '⌘⇧A', run: () => openLibrary('panel') },
+    { label: 'asset library (full screen)', hint: '⌘⇧L', run: () => openLibrary('full') },
+    { label: 'import files…', hint: 'drop', run: () => importPicked() },
+    { label: `theme: ${theme() === 'light' ? 'dark' : 'light'}`, hint: 'setting', run: () => setTheme(theme() === 'light' ? 'dark' : 'light', getState().app) },
+    { label: 'bring forward', hint: '⌘]', run: () => reorder(1) },
+    { label: 'send backward', hint: '⌘[', run: () => reorder(-1) },
+    { label: 'delete selection', hint: '⌫', run: deleteSelection },
+    { label: 'paste', hint: '⌘V', run: () => void pasteFromClipboard(null) },
     { label: `reduce motion: ${getState().reduceMotion ? 'turn off' : 'turn on'}`, hint: 'setting', run: () => setReduceMotion(!getState().reduceMotion) },
     { label: 'frame selection', hint: '⌘⌥G', run: frameSelection },
     { label: 'focus chat input', hint: '⌘I', run: focusChat },
@@ -173,7 +184,16 @@ export function Help() {
             ))}
           </div>
         ))}
-        <div className="faint">esc to close · ⌘ = ctrl on windows/linux</div>
+        <div className="help-group">
+          <div className="dim">click</div>
+          {CLICKS.map((c) => (
+            <div key={c.where} className="help-row">
+              <span className="help-keys">{c.where}</span>
+              <span>{c.what}</span>
+            </div>
+          ))}
+        </div>
+        <div className="faint">esc to close · ⌘ = ctrl on windows/linux · hover any button for its key</div>
       </div>
     </div>
   );
