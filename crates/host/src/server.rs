@@ -287,6 +287,8 @@ pub fn router(space: Arc<Workspace>, token: &str, ct: CancellationToken) -> Rout
         )
         .route("/import/url", axum::routing::post(crate::assets::import_url))
         .route("/thumbs/{file}", get(crate::library::http::get))
+        .route("/thumbs/pdf/{id}", get(crate::library::http::pdf_info))
+        .route("/thumbs/pdf/{id}/{page}", get(crate::library::http::pdf_page))
         .merge(crate::runtime::routes())
         .merge(crate::out::routes())
         .merge(crate::ops::rest::routes())

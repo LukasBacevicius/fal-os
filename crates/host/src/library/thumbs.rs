@@ -303,6 +303,109 @@ pub fn audio_thumbs(src: &str, dir: &Path, key: &str) -> Result<Made> {
     Ok(Made { w: None, h: None, duration: Some(dur), palette: vec![], tiny: None })
 }
 
+// ---- documents, fonts, svg -------------------------------------------------------------------
+
+/// Runs `cmd`, killing it after `secs` (Quick Look can hang on some files).
+fn run_bounded(mut cmd: Command, secs: u64) -> Result<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("timed out after {secs}s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+}
+
+fn scratch_dir() -> Result<PathBuf> {
+    let d = std::env::temp_dir().join(format!("falos-render-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&d)?;
+    Ok(d)
+}
+
+/// One PDF page as an image `w` px wide (poppler's `pdftoppm`).
+pub fn pdf_page(path: &Path, page: u32, w: u32) -> Result<DynamicImage> {
+    let tmp = scratch_dir()?;
+    let prefix = tmp.join("p");
+    let mut cmd = Command::new("pdftoppm");
+    cmd.args(["-png", "-singlefile", "-f", &page.to_string(), "-l", &page.to_string(), "-scale-to-x", &w.to_string(), "-scale-to-y", "-1"])
+        .arg(path)
+        .arg(&prefix);
+    let out = run_bounded(cmd, 30);
+    let png = tmp.join("p.png");
+    let res = match out {
+        Ok(o) if o.status.success() && png.is_file() => image::open(&png).map_err(Into::into),
+        Ok(o) => Err(anyhow!("pdftoppm: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(e.context("running pdftoppm (poppler)")),
+    };
+    let _ = std::fs::remove_dir_all(&tmp);
+    res
+}
+
+/// Page count of a PDF: `pdfinfo`, else counting `/Type /Page` objects.
+pub fn pdf_pages(path: &Path) -> Result<u32> {
+    if let Ok(o) = run_bounded({ let mut c = Command::new("pdfinfo"); c.arg(path); c }, 15)
+        && o.status.success()
+        && let Some(n) = String::from_utf8_lossy(&o.stdout).lines().find_map(|l| l.strip_prefix("Pages:").and_then(|v| v.trim().parse().ok()))
+    {
+        return Ok(n);
+    }
+    let bytes = std::fs::read(path)?;
+    let mut n = 0u32;
+    let pat = b"/Type";
+    let mut i = 0;
+    while let Some(off) = bytes[i..].windows(pat.len()).position(|w| w == pat) {
+        let mut j = i + off + pat.len();
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\n' || bytes[j] == b'\r') {
+            j += 1;
+        }
+        if bytes[j..].starts_with(b"/Page") && !bytes[j..].starts_with(b"/Pages") {
+            n += 1;
+        }
+        i = j;
+    }
+    if n == 0 {
+        bail!("not a readable pdf");
+    }
+    Ok(n)
+}
+
+/// macOS Quick Look's thumbnail of a file (svg, fonts, pdf, …), bounded in time.
+pub fn quicklook(path: &Path, size: u32) -> Result<DynamicImage> {
+    let tmp = scratch_dir()?;
+    let mut cmd = Command::new("qlmanage");
+    cmd.args(["-t", "-s", &size.to_string(), "-o"]).arg(&tmp).arg(path);
+    let out = run_bounded(cmd, 20);
+    let name = format!("{}.png", path.file_name().and_then(|n| n.to_str()).unwrap_or("x"));
+    let png = tmp.join(name);
+    let res = match out {
+        Ok(_) if png.is_file() => image::open(&png).map_err(Into::into),
+        Ok(o) => Err(anyhow!("quick look made no thumbnail: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(e.context("running qlmanage")),
+    };
+    let _ = std::fs::remove_dir_all(&tmp);
+    res
+}
+
+/// Can [`doc_thumbs`] draw this file?
+pub fn doc_thumbable(path: &Path, mime: &str) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    mime == "application/pdf" || mime == "image/svg+xml" || mime.starts_with("font/") || matches!(ext.as_str(), "pdf" | "svg" | "ttf" | "otf" | "woff" | "woff2")
+}
+
+/// First page of a PDF (pdftoppm, else Quick Look); Quick Look for svg and fonts.
+pub fn doc_thumbs(path: &Path, mime: &str, dir: &Path, key: &str) -> Result<Made> {
+    let pdf = mime == "application/pdf" || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    let img = if pdf { pdf_page(path, 1, LARGE).or_else(|_| quicklook(path, LARGE))? } else { quicklook(path, LARGE)? };
+    image_thumbs(&img, dir, key)
+}
+
 // ---- color -----------------------------------------------------------------------------------
 
 pub fn srgb_to_lab([r, g, b]: [u8; 3]) -> [f32; 3] {

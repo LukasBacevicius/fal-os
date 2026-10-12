@@ -49,6 +49,25 @@ const TYPES: &[(&str, &str)] = &[
     ("txt", "text/plain"),
     ("md", "text/markdown"),
     ("csv", "text/csv"),
+    // Wider imports (docs/ASSETS-V1.md §3): served with a type the browser understands, so
+    // quick look can read, play or load them.
+    ("heic", "image/heic"),
+    ("heif", "image/heif"),
+    ("tif", "image/tiff"),
+    ("tiff", "image/tiff"),
+    ("exr", "image/x-exr"),
+    ("bmp", "image/bmp"),
+    ("mkv", "video/x-matroska"),
+    ("aiff", "audio/aiff"),
+    ("aif", "audio/aiff"),
+    ("srt", "application/x-subrip"),
+    ("vtt", "text/vtt"),
+    ("cube", "application/x-cube-lut"),
+    ("ttf", "font/ttf"),
+    ("otf", "font/otf"),
+    ("woff", "font/woff"),
+    ("woff2", "font/woff2"),
+    ("otio", "application/vnd.otio+json"),
 ];
 
 pub fn mime_of_ext(ext: &str) -> &'static str {
@@ -137,7 +156,7 @@ pub struct AssetQuery {
 }
 
 /// The stored file for `hex`: in `project`, else the default project, else any project.
-fn locate(space: &Workspace, project: Option<&str>, hex: &str) -> Option<PathBuf> {
+pub fn locate(space: &Workspace, project: Option<&str>, hex: &str) -> Option<PathBuf> {
     if project.is_some() {
         return find(&space.host_for_frame(project).ok()?.dir().join("assets"), hex);
     }

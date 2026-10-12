@@ -14,7 +14,12 @@ import {
 import { endDrag, startDrag } from '../dnd';
 import { BLANK_DRAG } from './DropLayer';
 import { PanelTabs } from './AppMenu';
+import { ResizeHandle } from './ResizeHandle';
 import { emptySpot } from '../controller';
+import { ItemActions, Viewer } from './Preview';
+import { kindLabel, previewKind, viewerKeys, type PreviewItem } from '../preview';
+import { modelPoster } from '../cardArt';
+import { bytes as fmtBytes } from '../format';
 
 const GAP = 4;
 
@@ -72,10 +77,42 @@ function rowAt(L: Layout, y: number): number {
 
 const fmtDur = (d: number) => `${Math.floor(d / 60)}:${String(Math.floor(d % 60)).padStart(2, '0')}`;
 
+/** Library thumbnails exist for PDFs, SVGs and fonts too (host: pdftoppm / Quick Look). */
+const docThumb = (it: LibItem) => /^(application\/pdf|image\/svg|font\/)/.test(it.mime ?? '') || /\.(pdf|svg|ttf|otf|woff2?)$/i.test(it.name ?? '');
+
+/** A tile without a raster thumbnail: a 3D poster rendered in the page, else a file card. */
+function TileCard({ it }: { it: LibItem }) {
+  const name = it.name || it.sha.slice(0, 12);
+  const kind = previewKind(it.mime ?? '', name, it.kind === 'model3d' ? 'model3d' : undefined);
+  const [poster, setPoster] = useState<string | null>(null);
+  useEffect(() => {
+    if (kind !== 'model3d' || !it.src) return;
+    let url: string | null = null;
+    let live = true;
+    void modelPoster(hostUrl(it.src), `sha256:${it.sha}`).then((b) => {
+      if (!live || !b) return;
+      url = URL.createObjectURL(b);
+      setPoster(url);
+    });
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [kind, it.src, it.sha]);
+  if (poster) return <img src={poster} alt="" draggable={false} className="contain" />;
+  return (
+    <div className="lib-box">
+      <div><span className="dim">[{kindLabel(kind, it.mime ?? '', name)}]</span> {name}</div>
+      {it.bytes ? <div className="faint">{fmtBytes(it.bytes)}</div> : null}
+    </div>
+  );
+}
+
 const Tile = memo(function Tile({ it, x, y, w, h, on, cursor, index }: { it: LibItem; x: number; y: number; w: number; h: number; on: boolean; cursor: boolean; index: number }) {
   const [scrub, setScrub] = useState<number | null>(null);
   // A thumbnail still being generated answers 503: retry a few times.
   const [retry, setRetry] = useState(0);
+  const [failed, setFailed] = useState(false);
   const thumb = hostUrl(it.thumb) + (retry ? `&r=${retry}` : '');
   const glyph = GLYPH[it.source] ?? '';
   return (
@@ -104,19 +141,27 @@ const Tile = memo(function Tile({ it, x, y, w, h, on, cursor, index }: { it: Lib
       } : undefined}
       onMouseLeave={it.strip ? () => setScrub(null) : undefined}
     >
-      {it.kind === 'other' || it.kind === 'model3d' || it.thumb_state === 'none' ? (
-        <div className="lib-box dim">[{it.kind === 'model3d' ? '3d' : (it.mime?.split('/')[1] ?? it.kind)}] {it.name ?? ''}</div>
+      {it.kind === 'model3d' || (it.kind === 'other' && !docThumb(it)) || it.thumb_state === 'none' || failed ? (
+        <TileCard it={it} />
       ) : scrub !== null ? (
         <div className="lib-strip" style={{ backgroundImage: `url("${hostUrl(it.strip)}")`, backgroundPosition: `${((scrub % 4) / 3) * 100}% ${(Math.floor(scrub / 4) / 2) * 100}%` }} />
       ) : (
-        <img src={thumb} alt="" loading="lazy" decoding="async" draggable={false} onError={() => retry < 6 && window.setTimeout(() => setRetry((r) => r + 1), 1500 * (retry + 1))} />
+        <img
+          src={thumb}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          className={it.kind === 'other' ? 'contain' : undefined}
+          onError={() => (retry < 6 ? window.setTimeout(() => setRetry((r) => r + 1), 1500 * (retry + 1)) : setFailed(true))}
+        />
       )}
       <span className="lib-badge">
         {glyph}
         {it.fal?.synced && it.source === 'import' ? '↑' : ''}
         {it.role === 'final' ? ' ★' : ''}
         {it.favorite ? ' ♥' : ''}
-        {it.kind === 'video' && it.duration ? ` ${fmtDur(it.duration)}` : ''}
+        {(it.kind === 'video' || it.kind === 'audio') && it.duration ? ` ${it.kind === 'audio' ? '♪ ' : ''}${fmtDur(it.duration)}` : ''}
       </span>
     </div>
   );
@@ -216,22 +261,44 @@ function Grid({ rowH }: { rowH: number }) {
   );
 }
 
+/** A library item as a preview item (originals stream from the host or the fal CDN). */
+function libItem(it: LibItem): PreviewItem {
+  const name = it.name || it.sha.slice(0, 12);
+  const local = !!it.src && it.src.startsWith('/assets/');
+  const sample = lib().items.find((x) => x.kind === 'image' && x.thumb_state === 'ok');
+  return {
+    key: `lib:${it.sha}`,
+    kind: previewKind(it.mime ?? '', name, it.kind === 'model3d' ? 'model3d' : undefined),
+    name,
+    mime: it.mime ?? '',
+    url: hostUrl(it.src),
+    poster: it.thumb_state === 'none' ? undefined : hostUrl(it.thumb_lg),
+    sha: local && it.sha.length === 64 ? it.sha : undefined,
+    bytes: it.bytes ?? null,
+    w: it.w,
+    h: it.h,
+    duration: it.duration,
+    sample: sample ? hostUrl(sample.thumb_lg) : undefined,
+  };
+}
+
 function QuickLook() {
   const it = useLib((s) => s.items[s.cursor]);
-  if (!it) return null;
-  const big = it.kind === 'video' && it.src ? (
-    <video src={hostUrl(it.src)} autoPlay loop muted playsInline poster={hostUrl(it.thumb_lg)} />
-  ) : it.kind === 'audio' && it.src ? (
-    <div className="lib-ql-audio"><img src={hostUrl(it.thumb_lg)} alt="" /><audio src={hostUrl(it.src)} controls autoPlay /></div>
-  ) : (
-    <img src={hostUrl(it.thumb_lg)} alt="" />
-  );
+  const item = useMemo(() => (it ? libItem(it) : null), [it]);
+  if (!it || !item) return null;
   const dims = it.w && it.h ? `${it.w}×${it.h}` : '';
   return (
-    <div className="lib-ql" onClick={() => setLib({ quick: false })}>
-      <div className="lib-ql-media">{big}</div>
+    <div className="lib-ql" onClick={(e) => e.target === e.currentTarget && setLib({ quick: false })}>
+      <div className="lib-ql-media" key={item.key}><Viewer item={item} /></div>
       <div className="lib-ql-info">
-        <div>{[GLYPH[it.source] + ' ' + it.source, it.kind, dims, it.duration ? fmtDur(it.duration) : '', it.model ?? '', it.role ?? ''].filter(Boolean).join(' · ')}{it.fal?.synced ? ' · ↑fal' : ''}</div>
+        <div>
+          {[GLYPH[it.source] + ' ' + it.source, it.kind, dims, it.duration ? fmtDur(it.duration) : '', it.model ?? '', it.role ?? ''].filter(Boolean).join(' · ')}
+          {it.fal?.synced ? ' · ↑fal' : ''}
+          <span className="lib-ql-actions" onMouseDown={(e) => e.preventDefault()}>
+            <ItemActions item={item} />
+            <button className="link" title="close (space / esc)" onClick={() => setLib({ quick: false })}>[×]</button>
+          </span>
+        </div>
         {(it.prompt || it.caption) && <div className="dim lib-ql-prompt">{it.prompt ?? it.caption}</div>}
         {it.lineage && <div className="dim">{it.lineage}</div>}
         <div className="faint">{[it.palette?.join(' '), it.tags.length ? '#' + it.tags.join(' #') : '', it.projects.join(', '), it.sha.slice(0, 12)].filter(Boolean).join(' · ')}</div>
@@ -305,6 +372,11 @@ export function Library() {
       const c = Math.max(0, Math.min(s.items.length - 1, s.cursor + d));
       setLib({ cursor: c, selected: e.shiftKey ? [...new Set([...s.selected, s.items[c]?.sha].filter(Boolean))] : s.items[c] ? [s.items[c].sha] : [] });
     };
+    // The quick look's viewer keys (zoom, pages, transport) first.
+    if (s.quick && !inInput && !['Escape', ' ', 'Enter', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(k) && viewerKeys.handle?.(e.nativeEvent)) {
+      e.preventDefault();
+      return;
+    }
     if (k === 'Escape') {
       e.preventDefault();
       if (s.quick) return setLib({ quick: false });
@@ -347,6 +419,7 @@ export function Library() {
   if (!mode) return null;
   return (
     <div className={`library ${mode}`} ref={root} tabIndex={-1} onKeyDown={onKey}>
+      {mode === 'panel' && <ResizeHandle panel="library" edge="right" />}
       {mode === 'panel' && <PanelTabs />}
       <div className="lib-head">
         <input

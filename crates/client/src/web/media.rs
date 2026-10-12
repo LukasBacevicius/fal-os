@@ -48,8 +48,40 @@ async function capped(src, w, h) {
   return await resize(src, w * s, h * s);
 }
 
+// SVG: drawn by the browser at up to MAX_SOURCE_PX on its long side (crisp at any zoom the
+// tile tiers reach); `createImageBitmap` can't decode SVG blobs directly.
+async function svgSource(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = url;
+    await img.decode();
+    let w = img.naturalWidth || 0, h = img.naturalHeight || 0;
+    if (!w || !h) {
+      const vb = (await blob.text()).match(/viewBox\s*=\s*["']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/);
+      w = vb ? Number(vb[1]) : 512; h = vb ? Number(vb[2]) : 512;
+    }
+    const s = MAX_SOURCE_PX / Math.max(w, h, 1);
+    const W = Math.max(1, Math.round(w * s)), H = Math.max(1, Math.round(h * s));
+    const c = canvas(W, H), g = c.getContext('2d');
+    g.drawImage(img, 0, 0, W, H);
+    return { bitmap: await createImageBitmap(c), width: Math.round(w), height: Math.round(h), duration: 0 };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function imageSource(blob) {
-  const full = await createImageBitmap(blob);
+  if (blob.type === 'image/svg+xml') return svgSource(blob);
+  let full;
+  try {
+    full = await createImageBitmap(blob);
+  } catch (e) {
+    // An SVG served without its type.
+    if (/^\s*(<\?xml[^>]*>\s*)?<svg[\s>]/i.test(await blob.slice(0, 512).text())) return svgSource(blob);
+    throw e;
+  }
   const width = full.width, height = full.height;
   const small = await capped(full, width, height);
   if (small) full.close();
@@ -255,8 +287,17 @@ function tag(spec) {
   return TAGS[spec.kind] || spec.kind;
 }
 
-// Everything else: `[3d] name` on the panel color; audio adds its waveform in dim.
+// Everything else: `[3d] name` on the panel color; audio adds its waveform in dim. The page
+// can draw richer art for a kind (a 3D poster, a font specimen, a PDF's first page, a LUT's
+// swatches, subtitle cues): `globalThis.falosCardArt(spec)` resolves to `{bitmap, width,
+// height}` or null (see apps/web/src/cardArt.ts).
 async function cardSource(spec) {
+  if (spec.url && typeof globalThis.falosCardArt === 'function') {
+    try {
+      const art = await globalThis.falosCardArt(spec);
+      if (art && art.bitmap) return { bitmap: art.bitmap, width: art.width || 0, height: art.height || 0, duration: 0 };
+    } catch (e) { /* fall back to the plain card */ }
+  }
   const th = theme(spec);
   const { c, g, W, H, k } = cardCanvas(spec, 64);
   g.fillStyle = th.panel; g.fillRect(0, 0, W, H);
@@ -582,6 +623,8 @@ pub fn content_of(n: &SceneNode) -> Content {
         // one shows as a card.
         NodeKind::Image if n.card_field(2).is_empty() => Content::Generating,
         NodeKind::Video if n.asset.is_some() => Content::Video,
+        // SVG: rasterized by the browser from the vector source (see `svgSource`).
+        NodeKind::Vector if n.asset.is_some() => Content::Image,
         NodeKind::Frame | NodeKind::Group | NodeKind::Connector => Content::None,
         NodeKind::Note | NodeKind::Text => Content::TextBox,
         NodeKind::Generation if !matches!(gen_status(n), "failed" | "canceled" | "cancelled") => Content::Generating,
@@ -633,9 +676,8 @@ pub fn source_spec(n: &SceneNode, media: &MediaStore, light: bool) -> Option<(St
             set(&o, "theme", theme);
             if let Some(a) = asset {
                 set(&o, "mime", a.mime.clone());
-                if n.kind == NodeKind::Audio {
-                    set(&o, "url", a.url.clone());
-                }
+                set(&o, "url", a.url.clone());
+                set(&o, "asset", n.asset.clone().unwrap_or_default());
             } else if n.asset.is_some() && n.kind != NodeKind::Generation {
                 set(&o, "missing", true);
             }

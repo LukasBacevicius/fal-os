@@ -33,6 +33,7 @@ export interface LibItem {
   local_only: boolean;
   src: string | null;
   thumb_state: string;
+  bytes?: number | null;
   /** Lineage summary from the doc model (op, recipe, parents, actor). */
   lineage: string | null;
 }

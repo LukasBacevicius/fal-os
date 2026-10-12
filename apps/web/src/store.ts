@@ -58,6 +58,8 @@ export interface State {
   promptOpen: boolean;
   /** Video node shown in the focus view (near-fullscreen player), if open. */
   focusVideo: string | null;
+  /** Node shown in the canvas preview (quick look of any non-video media), if open. */
+  preview: string | null;
   /** Chat panel content: the active chat, or the full history list (⌘Y). */
   chatView: 'chat' | 'history';
   /** A subagent's own transcript shown in the panel (null = the main chat). */
@@ -129,6 +131,7 @@ let state: State = {
   modHeld: false,
   promptOpen: false,
   focusVideo: null,
+  preview: null,
   chatView: 'chat',
   subView: null,
   drafts: {},

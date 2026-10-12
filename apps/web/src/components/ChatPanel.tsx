@@ -10,6 +10,7 @@ import { Chips } from './Chips';
 import { ChatHistory, ChatTabs, DeleteConfirm } from './ChatTabs';
 import { bar, Row, selectBatch, TurnView } from './Transcript';
 import { fuzzy } from './Palette';
+import { ResizeHandle } from './ResizeHandle';
 
 export { sendChatMessage } from '../chatActions';
 
@@ -260,7 +261,7 @@ function Capabilities({ caps }: { caps: Transcript['caps'] }) {
 /** The right-hand chat panel (docs/UX-V1.md §2–3): tabs, the transcript (or a subagent's
  *  own transcript, or the full history), the swarm strip, queued messages and the composer.
  *  Images, files and canvas nodes dropped anywhere on it are attached. */
-export function ChatPanel({ width, onResize }: { width: number; onResize: (w: number) => void }) {
+export function ChatPanel() {
   const chat = useStore((s) => s.chat);
   const conn = useStore((s) => s.conn);
   const nodes = useStore((s) => s.nodes);
@@ -294,26 +295,12 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
 
-  const startResize = (e: React.PointerEvent) => {
-    e.preventDefault();
-    const x0 = e.clientX;
-    const w0 = width;
-    const move = (ev: PointerEvent) => onResize(Math.max(280, Math.min(760, w0 - (ev.clientX - x0))));
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  };
-
   const pending = chat.pending && (chat.pending.chat === chat.active || chat.pending.chat === null) ? chat.pending : null;
   const accepts = (dt: DataTransfer) => dt.types.includes('Files') || dt.types.includes(NODE_MIME) || dt.types.includes(ASSET_MIME);
 
   return (
     <aside
       className={`chat ${dropping || dragToChat ? 'dropping' : ''}`}
-      style={{ width }}
       onDragOver={(e) => {
         if (!accepts(e.dataTransfer)) return;
         e.preventDefault();
@@ -343,7 +330,7 @@ export function ChatPanel({ width, onResize }: { width: number; onResize: (w: nu
         } else void attachFiles(Array.from(e.dataTransfer.files));
       }}
     >
-      <div className="chat-resize" onPointerDown={startResize} />
+      <ResizeHandle panel="chat" edge="left" />
       <ChatTabs />
       <DeleteConfirm />
       {view === 'history' ? (

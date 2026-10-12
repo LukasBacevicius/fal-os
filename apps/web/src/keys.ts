@@ -14,6 +14,7 @@ import { createNote, editNode } from './components/TextLayer';
 import { openPicker } from './components/Projects';
 import { canvasVideoKey, focusKey, openFocus, spacePressed, spaceReleased } from './video';
 import { openLibrary } from './library';
+import { openPreview, previewable, previewKey } from './preview';
 import { copyFiles, openExport } from './out';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
@@ -49,12 +50,14 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: 'V', desc: 'select tool' },
   { group: 'canvas', keys: 'H  or  hold space', desc: 'pan' },
   { group: 'canvas', keys: 'N  or  double-click', desc: 'new note at the cursor (editing)' },
-  { group: 'canvas', keys: '⏎', desc: 'edit the selected note / focus view of a video / zoom to selected media' },
-  { group: 'canvas', keys: 'space (tap)  K', desc: 'selected video: play / pause (hold space to pan)' },
-  { group: 'canvas', keys: 'J  L', desc: 'selected video: back / forward 5 s (arrows still nudge)' },
-  { group: 'canvas', keys: ',  .', desc: 'selected video: one frame back / forward' },
-  { group: 'canvas', keys: 'M', desc: 'selected video: sound on / off' },
+  { group: 'canvas', keys: '⏎', desc: 'edit the selected note / focus view of a video / preview other media' },
+  { group: 'canvas', keys: 'space (tap)  K', desc: 'selected video or audio: play / pause; other media: preview (hold space to pan)' },
+  { group: 'canvas', keys: 'J  L', desc: 'selected video / audio: back / forward 5 s (arrows still nudge)' },
+  { group: 'canvas', keys: ',  .', desc: 'selected video: one frame back / forward (audio: 1 s)' },
+  { group: 'canvas', keys: 'M', desc: 'selected video / audio: sound on / off' },
   { group: 'canvas', keys: 'double-click a video', desc: 'focus view: ← → other videos, esc closes' },
+  { group: 'canvas', keys: 'double-click media', desc: 'preview: image zoom (+ − 0 1, drag pans), pdf pages (PgUp PgDn), 3d orbit, audio waveform; ← → other media, esc / space closes' },
+  { group: 'canvas', keys: 'click the waveform', desc: 'selected audio: scrub (drag the label row to move the node)' },
   { group: 'canvas', keys: 'tab  ⇧tab', desc: 'select next / previous node (reading order)' },
   { group: 'canvas', keys: '⌘A', desc: 'select all' },
   { group: 'canvas', keys: 'esc', desc: 'deselect' },
@@ -147,6 +150,7 @@ function enter(): boolean {
   if (!n) return false;
   if (n.kind === 'note' || n.kind === 'text') editNode(n.id);
   else if (n.kind === 'video' && n.props.asset) openFocus(n.id);
+  else if (previewable(n)) openPreview(n.id);
   else app.zoomToNodes([n.id]);
   return true;
 }
@@ -174,6 +178,12 @@ export function installKeys(): () => void {
     };
 
     if (k === (isMac ? 'Meta' : 'Control') && !getState().modHeld) setState({ modHeld: true });
+    // The canvas preview owns the keyboard.
+    if (getState().preview) {
+      if (previewKey(e)) done();
+      else if (!mod) done();
+      return;
+    }
     // The video focus view owns the keyboard.
     if (getState().focusVideo) {
       if (focusKey(e)) done();
@@ -228,7 +238,7 @@ export function installKeys(): () => void {
     if (e.key === (isMac ? 'Meta' : 'Control')) blur();
     if (editable(e.target)) return;
     getState().app?.keyUp(e.key);
-    if (e.key === ' ' && !getState().focusVideo && !getState().overlay && !getState().editing) spaceReleased();
+    if (e.key === ' ' && !getState().focusVideo && !getState().preview && !getState().overlay && !getState().editing) spaceReleased();
   };
   const onCopy = (e: ClipboardEvent) => {
     if (!editable(e.target) && !getState().editing && !getState().overlay) copy(e);

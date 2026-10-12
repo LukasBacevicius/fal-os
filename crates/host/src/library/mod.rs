@@ -440,9 +440,17 @@ impl Library {
                     final_key = sha;
                 }
                 let k = final_key.clone();
+                let local = path.clone();
+                let mime = mime.clone().unwrap_or_default();
                 tokio::task::spawn_blocking(move || -> Result<thumbs::Made> {
-                    let img = thumbs::decode_image(&bytes, None)?;
-                    thumbs::image_thumbs(&img, &dir, &k)
+                    match thumbs::decode_image(&bytes, None) {
+                        Ok(img) => thumbs::image_thumbs(&img, &dir, &k),
+                        // SVG and friends: the OS renders them.
+                        Err(e) => match local.as_deref().map(Path::new).filter(|p| thumbs::doc_thumbable(p, &mime)) {
+                            Some(p) => thumbs::doc_thumbs(p, &mime, &dir, &k),
+                            None => Err(e),
+                        },
+                    }
                 })
                 .await??
             }
@@ -453,6 +461,11 @@ impl Library {
             "audio" => {
                 let k = key.to_string();
                 tokio::task::spawn_blocking(move || thumbs::audio_thumbs(&src, &dir, &k)).await??
+            }
+            _ if path.as_deref().is_some_and(|p| thumbs::doc_thumbable(Path::new(p), mime.as_deref().unwrap_or(""))) => {
+                // PDF first page, svg, fonts.
+                let (k, p, m) = (key.to_string(), PathBuf::from(src.clone()), mime.clone().unwrap_or_default());
+                tokio::task::spawn_blocking(move || thumbs::doc_thumbs(&p, &m, &dir, &k)).await??
             }
             _ => {
                 self.with_db(|c| Ok(c.execute("UPDATE assets SET thumb=3 WHERE sha=?", [key])?))?;

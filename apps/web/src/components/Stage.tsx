@@ -18,6 +18,8 @@ import { installKeys, pointer } from '../keys';
 import { theme } from '../theme';
 import { FloatingHead } from './AppMenu';
 import { VideoLayer } from './VideoLayer';
+import { AudioLayer } from './AudioLayer';
+import { openPreview, previewable } from '../preview';
 import { openFocus, pointerPressed } from '../video';
 import { openMenuAt } from './ContextMenu';
 import { dragOut, prepare } from '../out';
@@ -231,6 +233,7 @@ export function Stage() {
       const n = r.node ? getState().nodes.find((m) => m.id === r.node) : null;
       if (n && (n.kind === 'note' || n.kind === 'text')) editNode(n.id);
       else if (n && n.kind === 'video' && n.props.asset) openFocus(n.id);
+      else if (n && previewable(n)) openPreview(n.id);
       else if (!n || n.kind === 'frame') createNote([x, y]);
     };
     el.addEventListener('dblclick', dbl);
@@ -301,6 +304,7 @@ export function Stage() {
       <Guard name="text"><TextLayer /></Guard>
       <Guard name="overlays"><NodeOverlays /></Guard>
       <Guard name="video"><VideoLayer /></Guard>
+      <Guard name="audio"><AudioLayer /></Guard>
       <Guard name="presence"><PresenceLayer /></Guard>
       <Guard name="selection-prompt"><SelectionPrompt /></Guard>
       {!loading && !error && empty && (

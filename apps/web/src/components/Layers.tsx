@@ -10,6 +10,7 @@ import type { NodeView } from '../types';
 import { fuzzy } from './Palette';
 import { NodeRef } from './Transcript';
 import { PanelTabs } from './AppMenu';
+import { ResizeHandle } from './ResizeHandle';
 import { openMenuAt } from './ContextMenu';
 import { openPrompt } from './SelectionPrompt';
 import {
@@ -194,6 +195,7 @@ export function Layers() {
 
   return (
     <aside className="layers">
+      <ResizeHandle panel="layers" edge="right" />
       <PanelTabs />
       <div className="layers-head">
 

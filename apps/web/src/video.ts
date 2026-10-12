@@ -11,6 +11,8 @@
 import { getState, setState } from './store';
 import { worldRects } from './geometry';
 import type { NodeView } from './types';
+import { audioMute, audioPause, audioSeekBy, audioToggle } from './audio';
+import { openPreview, previewable } from './preview';
 
 export interface VideoState {
   time: number;
@@ -46,6 +48,15 @@ export function selectedVideo(): string | null {
   if (selection.length !== 1) return null;
   const n = nodes.find((x) => x.id === selection[0]);
   return n?.kind === 'video' ? n.id : null;
+}
+
+/** The single selected audio node with a playable asset, if any. */
+export function selectedAudio(): { id: string; url: string } | null {
+  const { selection, nodes, app } = getState();
+  if (selection.length !== 1 || !app) return null;
+  const n = nodes.find((x) => x.id === selection[0]);
+  const url = n?.kind === 'audio' && typeof n.props.asset === 'string' ? app.assetUrl(n.props.asset) : null;
+  return n && url ? { id: n.id, url } : null;
 }
 
 /** Video nodes in reading order (rows top to bottom, left to right within a row). */
@@ -93,20 +104,39 @@ export function spacePressed() {
 export function pointerPressed() {
   if (spaceDown) spaceDown.moved = true;
 }
-/** Returns true if the space press was a tap that toggled the selected video. */
+/** A space tap (not a pan): toggles the selected video or audio, or opens the preview of
+ *  any other selected media (quick look). Returns true if it did something. */
 export function spaceReleased(): boolean {
   const s = spaceDown;
   spaceDown = null;
+  if (!s || s.moved || performance.now() - s.at > 280) return false;
   const id = selectedVideo();
-  if (!s || s.moved || performance.now() - s.at > 280 || !id) return false;
-  togglePlay(id);
-  return true;
+  if (id) return togglePlay(id), true;
+  const a = selectedAudio();
+  if (a) return audioToggle(a.id, a.url), true;
+  const { selection, nodes } = getState();
+  const n = selection.length === 1 ? nodes.find((x) => x.id === selection[0]) : undefined;
+  if (n && previewable(n)) return openPreview(n.id), true;
+  return false;
 }
 
 /** Canvas keys for the selected video; true if handled. */
 export function canvasVideoKey(e: KeyboardEvent): boolean {
+  if (e.metaKey || e.ctrlKey || e.altKey) return false;
+  const a = selectedAudio();
+  if (a) {
+    switch (e.key) {
+      case 'k': case 'K': audioToggle(a.id, a.url); return true;
+      case 'j': case 'J': audioSeekBy(a.id, a.url, -5); return true;
+      case 'l': case 'L': audioSeekBy(a.id, a.url, 5); return true;
+      case ',': case '<': audioSeekBy(a.id, a.url, -1); return true;
+      case '.': case '>': audioSeekBy(a.id, a.url, 1); return true;
+      case 'm': case 'M': audioMute(a.id, a.url); return true;
+    }
+    return false;
+  }
   const id = selectedVideo();
-  if (!id || e.metaKey || e.ctrlKey || e.altKey) return false;
+  if (!id) return false;
   switch (e.key) {
     case 'k': case 'K': togglePlay(id); return true;
     case 'j': case 'J': seekBy(id, -5); return true;
@@ -124,6 +154,7 @@ export function canvasVideoKey(e: KeyboardEvent): boolean {
 export const focus: { el: HTMLVideoElement | null } = { el: null };
 
 export function openFocus(id: string) {
+  audioPause(); // one sound at a time
   setState({ focusVideo: id });
 }
 

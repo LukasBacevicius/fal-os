@@ -4,7 +4,7 @@ import { worldRects } from '../geometry';
 import { clock, closeFocus, focus, openFocus, stepFocus, toggleMute, togglePlay, videosInOrder, videoState, type VideoState } from '../video';
 
 /** What a transport shows and drives (canvas video or the focus view's element). */
-interface Playback {
+export interface Playback {
   time: number;
   duration: number;
   paused: boolean;
@@ -21,7 +21,7 @@ interface TransportProps {
 }
 
 /** `[▶] 0:07 / 0:30 ───●─── [sound]`: mono text buttons and a 1px scrub line. */
-function Transport({ pb, onToggle, onSeek, onMute, children }: TransportProps) {
+export function Transport({ pb, onToggle, onSeek, onMute, children }: TransportProps) {
   const bar = useRef<HTMLDivElement>(null);
   const [hoverT, setHoverT] = useState<{ x: number; t: number } | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
