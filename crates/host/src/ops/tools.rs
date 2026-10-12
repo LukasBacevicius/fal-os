@@ -47,10 +47,14 @@ pub struct TransformArgs {
     pub placement: Option<PlacementArgs>,
     /// Output node name.
     pub name: Option<String>,
-    /// Wait for the result (default true, up to timeoutSecs); false returns placeholder ids at once.
+    /// Wait for the result (default true — false with `then` — up to timeoutSecs); false returns placeholder ids at once.
     pub wait: Option<bool>,
     /// Max seconds to wait (default 120, max 1800).
     pub timeout_secs: Option<u64>,
+    /// Per-item pipeline: each output flows on to these steps the moment it lands, e.g.
+    /// [{"model": "fal-ai/kling-video/v2.1/standard/image-to-video", "args": {"prompt": "slow orbit", "duration": "5"}}, {"op": "upscale"}].
+    /// Every step is a new node with lineage (parent = previous step); a failure stops only that item's chain.
+    pub then: Option<Vec<crate::pipeline::Step>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -123,9 +127,11 @@ impl CanvasMcp {
         let host = self.host().clone();
         let actor = host.actor(session)?;
         let canvas = host.resolve_canvas(canvas)?;
+        // A pipeline (`then`) runs for minutes: don't block on it unless asked.
+        let wait = wait.unwrap_or(req.then.is_empty());
         let run = super::start(&host, &actor, Some(session), &canvas, req)?;
         host.touch_nodes(session, &canvas, &run.nodes);
-        let results = if wait.unwrap_or(true) { run.wait(timeout(t)).await } else { None };
+        let results = if wait { run.wait(timeout(t)).await } else { None };
         let mut v = run.summary(results.as_deref());
         if results.is_none() {
             v["hint"] = json!("placeholders convert in place when done; read with root=<node> to follow progress");
@@ -176,7 +182,9 @@ impl CanvasMcp {
             if super::spec(&a.op).is_some_and(|s| s.category != "transform") {
                 bail!("`{}` isn't a transform op (see list_ops)", a.op);
             }
-            let req = super::Request { op: a.op, inputs: a.inputs, args: a.args.unwrap_or(json!({})), placement: a.placement, name: a.name, role: None };
+            let then = a.then.unwrap_or_default();
+            crate::pipeline::validate(&then)?;
+            let req = super::Request { op: a.op, inputs: a.inputs, args: a.args.unwrap_or(json!({})), placement: a.placement, name: a.name, role: None, then };
             self.run_op(&a.session_id, &a.canvas, req, a.wait, a.timeout_secs).await
         }
         .await;
@@ -193,7 +201,7 @@ impl CanvasMcp {
                 bail!("compose ops: grid, contact_sheet");
             }
             let inputs = a.inputs.or(a.frame.map(Json::from)).unwrap_or(Json::Null);
-            let req = super::Request { op: a.op, inputs, args: a.args.unwrap_or(json!({})), placement: a.placement, name: a.name, role: None };
+            let req = super::Request { op: a.op, inputs, args: a.args.unwrap_or(json!({})), placement: a.placement, name: a.name, role: None, then: vec![] };
             self.run_op(&a.session_id, &a.canvas, req, a.wait, a.timeout_secs).await
         }
         .await;

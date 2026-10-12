@@ -39,6 +39,8 @@ export type AssetCaps = {
   mediaInputs: boolean;
   /** `import_file` lineage takes `kind`/`op`/`recipe`/parent roles; nodes have `role`/`protected`. */
   provenance: boolean;
+  /** `generate_batch` / `transform` take `then` (per-item pipelines) and per-job `mediaInputs`. */
+  pipelines?: boolean;
   /** An installed agent skill that writes OTIO timelines (e.g. Remotion's opentimeline). */
   otioSkill?: string;
 };
@@ -87,6 +89,7 @@ export function assetCapsFrom(tools: HostTool[]): AssetCaps {
     library: by.has("search_assets"),
     mediaInputs: schemaHas("generate", "mediaInputs") || schemaHas("generate_batch", "mediaInputs"),
     provenance: schemaHas("import_file", "recipe"),
+    ...(schemaHas("generate_batch", "input_from") ? { pipelines: true } : {}),
   };
 }
 

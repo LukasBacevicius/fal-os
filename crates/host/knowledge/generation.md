@@ -21,13 +21,41 @@ generate_batch(sessionId, canvas, model:"fal-ai/flux/schnell",
 ```
 
 - `count` requests with the shared `input`; `variations` cycle through `input.prompt`; a
-  numeric `input.seed` is incremented per request. Or pass explicit `jobs:[{model?, input, name?}]`.
-- `num_images` (when the model supports it) returns several outputs per request: fewer requests.
+  numeric `input.seed` is incremented per request. Or pass explicit
+  `jobs:[{model?, input, name?, mediaInputs?}]` — e.g. N distinct prompts from a variation
+  matrix (subject × angle × light × style), or one job per still to animate, each with its own
+  `mediaInputs` (`{"image_url": "<node>"}`).
+- Packing: identical requests (same model + input, seeds aside) are merged by the host into
+  fewer requests via the model's `num_images` when its fal schema has one (up to its maximum).
+  You can also set `num_images` yourself.
 - All placeholders appear at once in a grid in free space (inside a frame "<label> ×N" for 8+).
   Every job is submitted in parallel; results land progressively.
-- It returns `{batch, frame, nodes}` right away. `await_batch(batch)` waits for the outcome
-  (done/failed counts, errors) when you need the results; otherwise carry on.
+- It returns `{batch, frame, nodes}` right away. Don't block on it: carry on with other work.
+  `await_batch(batch)` waits for the outcome (done/failed counts, errors) only when you need
+  the results now.
 - For "quick"/"fast" requests use a fast model such as `fal-ai/flux/schnell`.
+
+### Per-item pipelines: `then`
+
+`then:[{model|op, args?, input_from?, name?}, …]` runs steps on **each** output the moment it
+lands — no agent round-trip between steps:
+
+```
+generate_batch(sessionId, canvas, model:"fal-ai/flux/dev", jobs:[…3 prompts…],
+  then:[{"model":"fal-ai/kling-video/v2.1/standard/image-to-video",
+         "args":{"prompt":"slow orbit, soft light","duration":"5"}, "input_from":"image_url"},
+        {"op":"upscale"}])
+```
+
+- `model` steps get the previous output as `input_from` (default by kind: `image_url` /
+  `video_url` / `audio_url`; a `*_urls` param gets a one-item list), merged into `args`.
+  `op` steps run that asset op (`list_ops`) with the previous output as input and `args`.
+- Each step is a new node next to the previous one, named "<previous> · <model/op>", with
+  lineage (parent = the previous step). A failure stops only that item's chain.
+- `transform` takes the same `then` (and then returns at once unless `wait:true`).
+- The batch finishes when every chain has; `await_batch` lists the chains
+  (`then.chains: [{source, nodes, status, error?}]`), and the `batch` progress event carries
+  `then: {running, done, failed}`.
 
 Progress: `read(root:<id>)` shows `status(queued|running|done|failed)` and `error(...)`.
 On success the **same id** becomes a media node (`image`, `video`, `audio`, `model3d`) with

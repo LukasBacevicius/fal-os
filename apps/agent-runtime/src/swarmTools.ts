@@ -40,6 +40,11 @@ export type ToolCtx = {
   projectDir?: string;
   /** Host asset surface (capabilities.ts): `deliver` exists only when the host has `export`. */
   assets?: AssetCaps;
+  /**
+   * Background work the director should hear about when it ends (concurrent fal Agent briefs):
+   * `start` keeps the run open, `finish` delivers a completion message to the director.
+   */
+  background?: { start(id: string): void; finish(id: string, text: string): void };
 };
 
 /** A chip passed as a model input: `{kind:"region"|"frame"|"range"|"spot"|"node", node, …}`. */
@@ -241,105 +246,177 @@ export function createSwarmTools(ctx: ToolCtx) {
     return { node: r.node as string, kind: r.type as string, file, url: opts.url, duration: r.media?.duration };
   }
 
-  const falAgent = tool(
-    "fal_agent",
-    "Give a media task to the fal Agent (it picks and runs the best fal models). Creates placeholder nodes on the canvas at once (one per expected output, inside `parent`), streams progress to your status line, then lands the results as media nodes with lineage. Blocks until done; call several in parallel for independent tasks. Describe exactly what to make, how many, aspect ratio and duration.",
-    {
-      sessionId: z.string().describe("your fal-os sessionId"),
-      task: z.string().describe("complete, self-contained instructions for the fal Agent"),
-      outputs: z
-        .array(z.object({ name: z.string(), kind: z.enum(["image", "video", "audio"]) }))
-        .min(1)
-        .max(12)
-        .describe("the outputs you expect, in order (placeholders are named after them)"),
-      parent: z.string().optional().describe("frame node id to place the outputs in"),
-      references: z.array(z.string()).optional().describe("canvas node ids whose media to attach (e.g. the product photo, a still to animate)"),
-    },
-    async (a) => {
-      const blocked = guard();
-      if (blocked) return fail(blocked);
-      const avail = await falAgentAvailable();
-      if (!avail.ok) return fail(`fal Agent unavailable (${avail.reason}); use fal_model with an explicit endpoint instead`);
-      tasks++;
-      const agent = ctx.agentFor(a.sessionId);
-      const toolId = `fa_${Date.now().toString(36)}`;
-      const ids: string[] = [];
+  type Brief = { brief: string; name?: string; references?: string[]; outputs?: { name: string; kind: Kind }[] };
+  type BriefResult = { handle: string; name: string; ok: boolean; nodes: any[]; models: string[]; costUsd: number; agentText: string; error?: string };
+  let falAgents = 0;
+
+  /**
+   * Start one fal Agent brief as its own collaborator (fal-os session, cursor, status line):
+   * placeholders now, then the run; artifacts land on the canvas as they arrive.
+   */
+  async function startBrief(caller: string, b: Brief, parent: string | undefined): Promise<{ handle: string; name: string; placeholders: string[]; done: Promise<BriefResult> }> {
+    const n = ++falAgents;
+    const label = `fal-agent${n === 1 ? "" : `-${n}`}`;
+    const name = (b.name ?? b.brief.split(/\s+/).slice(0, 5).join(" ")).slice(0, 60);
+    const s = await ctx.host.call("session", { agentName: `fal Agent${n === 1 ? "" : ` ${n}`}`, canvas: ctx.canvas });
+    const sid = s.sessionId as string;
+    ctx.reportSession?.(sid, label);
+    const callerAgent = ctx.agentFor(caller);
+    const outputs = b.outputs?.length ? b.outputs : [{ name, kind: "image" as Kind }];
+    const toolId = `fa_${Date.now().toString(36)}_${n}`;
+    const refs = await Promise.all((b.references ?? []).map((r) => mediaUrl(sid, r)));
+    const ids: string[] = [];
+    for (const o of outputs) ids.push(await placeholder(sid, o.name, o.kind, parent, "fal-agent", { task: b.brief.slice(0, 400) }));
+    ctx.emit({ kind: "agent", agent: label, role: "fal Agent", parent: callerAgent, state: "started", status: b.brief.slice(0, 120) });
+    ctx.emit({ kind: "tool", agent: label, id: toolId, name: "fal_agent", summary: `fal Agent: ${name}`, state: "running", nodes: ids });
+    await status(sid, `fal Agent: starting — ${name}`);
+
+    const done = (async (): Promise<BriefResult> => {
+      const nodes: any[] = [];
+      const imported = new Set<string>();
+      let chain = Promise.resolve();
+      let models: string[] = [];
+      let responseId = "";
+      // Land each artifact as soon as it shows up (in order, into the next placeholder).
+      const land = (art: { id: string; url: string; mime: string; metadata?: unknown }) => {
+        if (imported.has(art.id)) return;
+        imported.add(art.id);
+        chain = chain.then(async () => {
+          const i = nodes.length;
+          try {
+            nodes.push(
+              await importResult({
+                sessionId: sid,
+                url: art.url,
+                mime: art.mime,
+                name: outputs[i]?.name ?? `${name} ${i + 1}`,
+                replace: ids[i],
+                parent,
+                lineage: {
+                  model: `fal-agent${models.length ? `:${models.join("+")}` : ""}`,
+                  params: { task: b.brief, references: b.references ?? [], artifact: art.id, metadata: art.metadata ?? null },
+                  falRequestId: responseId || undefined,
+                  parents: refs.map((r) => r.node),
+                },
+              }),
+            );
+          } catch (e: any) {
+            console.error(`[runtime] fal Agent artifact import failed: ${e?.message ?? e}`);
+          }
+        });
+      };
+      let lastLabel = "";
+      let lastCost = 0;
       try {
-        const refs = await Promise.all((a.references ?? []).map((n) => mediaUrl(a.sessionId, n)));
-        for (const o of a.outputs) ids.push(await placeholder(a.sessionId, o.name, o.kind, a.parent, "fal-agent", { task: a.task.slice(0, 400) }));
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_agent", summary: `generating with the fal Agent: ${a.task.slice(0, 80)}`, state: "running", nodes: ids });
-        await status(a.sessionId, `fal Agent: starting — ${a.task.slice(0, 80)}`);
-        let lastLabel = "";
-        let lastCost = 0;
         const result = await runAgentTask({
-          task: `${a.task}\n\nDeliver exactly ${a.outputs.length} output(s): ${a.outputs.map((o, i) => `${i + 1}. ${o.kind} "${o.name}"`).join("; ")}.`,
+          task: `${b.brief}\n\nDeliver exactly ${outputs.length} output(s): ${outputs.map((o, i) => `${i + 1}. ${o.kind} "${o.name}"`).join("; ")}.`,
           attachments: refs.map((r) => ({ url: r.url, mime: r.mime })),
           signal: ctx.signal,
           decide: autoDecide,
-          onDecision: (d) => ctx.emit({ kind: "text", agent: "director", delta: `\n[fal Agent asked → ${d.summary}]\n` }),
-          onSnapshot: (s) => {
-            const running = s.activities.filter((x) => x.status === "running").at(-1) ?? s.activities.at(-1);
-            const label = running ? `${running.label}${running.name ? ` (${running.name})` : ""}` : s.phase ?? s.status;
-            if (label && label !== lastLabel) {
-              lastLabel = label;
-              status(a.sessionId, `fal Agent: ${label}`);
-              ctx.emit({ kind: "agent", agent, state: "working", status: `fal Agent: ${label}` });
+          onDecision: (d) => ctx.emit({ kind: "text", agent: label, delta: `\n[fal Agent asked → ${d.summary}]\n` }),
+          onSnapshot: (snap) => {
+            responseId = snap.id;
+            models = [...new Set(snap.activities.filter((x) => x.kind === "tool").map((x) => x.name ?? x.label))].slice(0, 6);
+            const running = snap.activities.filter((x) => x.status === "running").at(-1) ?? snap.activities.at(-1);
+            const l = running ? `${running.label}${running.name ? ` (${running.name})` : ""}` : snap.phase ?? snap.status;
+            if (l && l !== lastLabel) {
+              lastLabel = l;
+              status(sid, `fal Agent: ${l}`);
+              ctx.emit({ kind: "agent", agent: label, state: "working", status: `fal Agent: ${l}` });
             }
-            if (s.costUsd > lastCost) {
-              ctx.addCost(s.costUsd - lastCost);
-              lastCost = s.costUsd;
+            if (snap.costUsd > lastCost) {
+              ctx.addCost(snap.costUsd - lastCost);
+              lastCost = snap.costUsd;
             }
+            for (const art of snap.artifacts) land(art);
           },
         });
-        const models = [...new Set(result.activities.filter((x) => x.kind === "tool").map((x) => x.name ?? x.label))].slice(0, 6);
-        const per = result.artifacts.length ? result.costUsd / result.artifacts.length : 0;
-        const nodes: any[] = [];
-        for (let i = 0; i < result.artifacts.length; i++) {
-          const art = result.artifacts[i];
-          const name = a.outputs[i]?.name ?? `${a.outputs.at(-1)?.name ?? "output"} ${i + 1}`;
-          nodes.push(
-            await importResult({
-              sessionId: a.sessionId,
-              url: art.url,
-              mime: art.mime,
-              name,
-              replace: ids[i],
-              parent: a.parent,
-              lineage: {
-                model: `fal-agent${models.length ? `:${models.join("+")}` : ""}`,
-                params: { task: a.task, references: a.references ?? [], artifact: art.id, metadata: art.metadata ?? null },
-                falRequestId: result.id,
-                cost: per || undefined,
-                parents: refs.map((r) => r.node),
-              },
-            }),
-          );
-        }
-        // Placeholders the agent didn't fill.
-        const unused = ids.slice(result.artifacts.length);
-        if (unused.length) await ctx.host.call("edit", { sessionId: a.sessionId, canvas: ctx.canvas, text: `delete(${unused.join(",")})` }).catch(() => {});
-        consecutiveFailures = result.artifacts.length ? 0 : consecutiveFailures + 1;
-        await status(a.sessionId, `fal Agent: done — ${nodes.length} output(s)`);
-        ctx.emit({
-          kind: "tool",
-          agent,
-          id: toolId,
-          name: "fal_agent",
-          summary: generatedSummary(nodes.map((n) => n.kind), models.length ? models.join("+") : "fal Agent"),
-          state: "done",
-          nodes: nodes.map((n) => n.node),
-          usd: Math.round(result.costUsd * 10000) / 10000,
-        });
-        return ok({ responseId: result.id, costUsd: result.costUsd, models, agentText: result.text.slice(0, 1500), nodes });
+        for (const art of result.artifacts) land(art);
+        await chain;
+        const unused = ids.slice(nodes.length);
+        if (unused.length) await ctx.host.call("edit", { sessionId: sid, canvas: ctx.canvas, text: `delete(${unused.join(",")})` }).catch(() => {});
+        consecutiveFailures = nodes.length ? 0 : consecutiveFailures + 1;
+        const summary = generatedSummary(nodes.map((x) => x.kind), models.length ? models.join("+") : "fal Agent");
+        ctx.emit({ kind: "tool", agent: label, id: toolId, name: "fal_agent", summary, state: "done", nodes: nodes.map((x) => x.node), usd: Math.round(result.costUsd * 10000) / 10000 });
+        ctx.emit({ kind: "agent", agent: label, state: "done", status: summary });
+        return { handle: toolId, name, ok: nodes.length > 0, nodes, models, costUsd: result.costUsd, agentText: result.text.slice(0, 1200) };
       } catch (e: any) {
+        await chain;
         consecutiveFailures++;
-        if (ids.length)
+        const left = ids.slice(nodes.length);
+        if (left.length)
           await ctx.host
-            .call("edit", { sessionId: a.sessionId, canvas: ctx.canvas, text: ids.map((id) => `${id} status(failed) error(${JSON.stringify(String(e.message).slice(0, 200))})`).join("\n") })
+            .call("edit", { sessionId: sid, canvas: ctx.canvas, text: left.map((id) => `${id} status(failed) error(${JSON.stringify(String(e.message).slice(0, 200))})`).join("\n") })
             .catch(() => {});
-        ctx.emit({ kind: "tool", agent, id: toolId, name: "fal_agent", summary: `failed: ${String(e.message).slice(0, 120)}`, state: "error", nodes: ids });
-        return fail(`fal Agent task failed: ${e.message}`);
+        ctx.emit({ kind: "tool", agent: label, id: toolId, name: "fal_agent", summary: `failed: ${String(e.message).slice(0, 120)}`, state: "error", nodes: ids });
+        ctx.emit({ kind: "agent", agent: label, state: "failed", status: String(e.message).slice(0, 120) });
+        return { handle: toolId, name, ok: false, nodes, models, costUsd: lastCost, agentText: "", error: String(e.message).slice(0, 400) };
+      } finally {
+        await status(sid, "");
+        await ctx.host.call("finish_working", { sessionId: sid }).catch(() => {});
       }
+    })();
+    return { handle: toolId, name, placeholders: ids, done };
+  }
+
+  const falAgent = tool(
+    "fal_agent",
+    "Hand media briefs to the fal Agent (it plans and picks fal models itself). Pass `briefs` — one per INDEPENDENT sub-brief; they all run concurrently, each as its own collaborator on the canvas (own session, cursor, status). Placeholders appear at once and artifacts land as they arrive. Returns immediately with handles; you get a completion message per brief later (keep working meanwhile). `wait: true` blocks until all are done and returns their nodes (use only when your next step needs them). Never give one fal Agent a list of unrelated jobs — split it into briefs. For exact models with your own prompts, use generate / generate_batch / fal_model instead.",
+    {
+      sessionId: z.string().describe("your fal-os sessionId"),
+      briefs: z
+        .array(
+          z.object({
+            brief: z.string().describe("complete, self-contained instructions: what to make, how many, aspect, duration, style"),
+            name: z.string().optional().describe("short label (placeholder / collaborator name)"),
+            references: z.array(z.string()).optional().describe("canvas node ids whose media to attach (product photo, a still to animate)"),
+            outputs: z.array(z.object({ name: z.string(), kind: z.enum(["image", "video", "audio"]) })).max(12).optional().describe("expected outputs in order (placeholders); default one image"),
+          }),
+        )
+        .min(1)
+        .max(8)
+        .optional(),
+      parent: z.string().optional().describe("frame node id to place the outputs in"),
+      wait: z.boolean().optional().describe("block until every brief finishes (default false)"),
+      task: z.string().optional().describe("legacy: a single brief (blocks, like wait:true)"),
+      outputs: z.array(z.object({ name: z.string(), kind: z.enum(["image", "video", "audio"]) })).max(12).optional().describe("legacy, with `task`"),
+      references: z.array(z.string()).optional().describe("legacy, with `task`"),
+    },
+    async (a) => {
+      const briefs: Brief[] = a.briefs?.length ? a.briefs : a.task ? [{ brief: a.task, outputs: a.outputs, references: a.references }] : [];
+      if (!briefs.length) return fail("give `briefs` (one per independent sub-brief)");
+      const blocked = guard();
+      if (blocked) return fail(blocked);
+      const avail = await falAgentAvailable();
+      if (!avail.ok) return fail(`fal Agent unavailable (${avail.reason}); use generate_batch / fal_model with explicit endpoints instead`);
+      tasks += briefs.length;
+      // The director hears about finished briefs by message; subagents wait by default.
+      const wait = a.wait ?? (Boolean(a.task && !a.briefs?.length) || ctx.agentFor(a.sessionId) !== "director");
+      let started: Awaited<ReturnType<typeof startBrief>>[];
+      try {
+        started = await Promise.all(briefs.map((b) => startBrief(a.sessionId, b, a.parent)));
+      } catch (e: any) {
+        return fail(`could not start the fal Agent: ${e.message}`);
+      }
+      if (wait || !ctx.background) {
+        const results = await Promise.all(started.map((s) => s.done));
+        return results.every((r) => !r.ok) ? fail(results.map((r) => `${r.name}: ${r.error ?? "no outputs"}`).join("; ")) : ok({ results });
+      }
+      for (const s of started) {
+        ctx.background.start(s.handle);
+        s.done.then((r) =>
+          ctx.background!.finish(
+            s.handle,
+            r.ok
+              ? `[fal Agent done] "${r.name}" (${s.handle}): ${r.nodes.length} output(s) on canvas — ${r.nodes.map((x) => `${x.node} (${x.kind})`).join(", ")}; models ${r.models.join("+") || "?"}; $${r.costUsd.toFixed(3)}.${r.agentText ? ` Agent says: ${r.agentText.slice(0, 400)}` : ""}`
+              : `[fal Agent failed] "${r.name}" (${s.handle}): ${r.error ?? "no outputs"}${r.nodes.length ? ` (landed: ${r.nodes.map((x) => x.node).join(", ")})` : ""}.`,
+          ),
+        );
+      }
+      return ok({
+        started: started.map((s) => ({ handle: s.handle, name: s.name, placeholders: s.placeholders })),
+        note: "running concurrently in the background; results land on the canvas as they arrive and you get one completion message per brief. Keep working on other branches.",
+      });
     },
   );
 

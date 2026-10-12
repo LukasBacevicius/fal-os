@@ -133,7 +133,8 @@ and `thinking_done` events go to its own transcript.
 { "kind": "redone", "turn": "t_…", "count": 7, "nodes": ["…"] }
 { "kind": "thinking_done", "agent": "director", "seconds": 12 }             // "thought for 12s"
 { "kind": "batch", "agent": "generator", "id": "batch_…", "model": "fal-ai/flux/schnell", "total": 200, "done": 37,
-  "failed": 0, "running": 120, "finished": false, "frame": "b…", "nodes": null /* all ids once finished */ }   // throttled (≤4/s)
+  "failed": 0, "running": 120, "finished": false, "frame": "b…", "nodes": null /* all ids once finished */,
+  "then": { "running": 3, "done": 0, "failed": 0 } /* only with per-item pipelines */ }   // throttled (≤4/s); finished = every job and every `then` chain
 { "kind": "question", "agent": "fal", "id": "…", "prompt": "…", "approval": false,
   "questions": [{ "id": "q1", "text": "Which model?", "options": [{ "id": "o1", "label": "Kling" }] }] }   // fal driver: answer in the composer
 { "kind": "status", "state": "running", "error": "the director stopped mid-step — continuing…", "recovering": true }  // auto-resume
@@ -307,7 +308,7 @@ never the label again (not `motion · motion · …`).
 ```
 Agents are labelled by subagent type (`storyboard`, `generator`, `generator-2`, `motion`, `qa`) and `codex`. `director` is the main agent. The runtime emits these event kinds:
 - `tool` events for canvas tools, with the touched `nodes`;
-- `tool` events for the swarm tools: `fal_agent`, `fal_model`, `codex`;
+- `tool` events for the swarm tools: `fal_agent`, `fal_model`, `codex`; concurrent fal Agent briefs each appear as their own agent (`fal-agent`, `fal-agent-2`, …, `role: "fal Agent"`, `parent` = the caller) with their own fal-os session;
 - `cost` events from fal Agent `usage.cost`, or from list-price estimates for direct model calls;
 - `files` events (file cards, Assets v1): `{"kind":"files","agent","files":[{path,name,node?,preset?,w?,h?,duration?,bytes,sha256}],"dir"}` : the host appends them for agent `export`s (including the one inside swarm `deliver`); the runtime posts them for swarm `share_files` and fal-os `package` zips (and for an `export` result with `"emitted": false`).
 
@@ -346,3 +347,16 @@ Behaviour:
   - A swarm strip above the input shows each active subagent with its status. It's live, and fades when they finish.
   - The input has context chips. Selecting assets on the canvas offers "Add to chat". **Alt-click** a spot, or **Alt-drag** a region on an image or video, to add a spot, region or frame chip; for video the frame is the current playhead.
 - Removed in v0: the left layers panel, the annotations panel and tool, demo cursors, heavy branding. Cursors show only for real agent sessions that are active.
+
+## Parallel execution
+
+The director plans a job as a dependency graph and runs independent branches at once: parallel
+tool calls in one turn, background subagents, `generate_batch` for N items (one call, all
+placeholders at once, identical requests packed via the model's `num_images`) and per-item
+pipelines (`then` on `generate_batch` / `transform`: each output flows into the next step in the
+host as it lands, every step a node with lineage). Nothing blocks on a batch: the runtime watches
+the director's batches (`await_batch` in short polls) and injects a `[batch done] …` user message
+(nodes, errors, chains) into the running session; concurrent `fal_agent` briefs report the same way
+(`[fal Agent done] …`). The session stays open while any of this runs. At turn start the host
+uploads the attached media to fal storage in the background (recorded with `set_asset_uri`), so
+`mediaInputs` don't wait for an upload.

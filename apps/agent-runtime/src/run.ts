@@ -184,6 +184,11 @@ export class ChatRun {
   private agentIds = new Map<string, string>(); // SDK agent_id / task_id → label
   private running = new Set<string>(); // subagent labels currently working
   private taskTool = new Map<string, string>(); // task_id → Agent tool_use id
+  /** Runtime-side background work (concurrent fal Agent briefs, watched batches): keeps the run open. */
+  private bgJobs = new Set<string>();
+  /** Batches the director already awaited itself (no completion message for those). */
+  private awaited = new Set<string>();
+  private hostMcp: HostMcp | null = null;
   /** Capabilities probed for this run. */
   caps: Capabilities | null = null;
   readonly workDir: string;
@@ -283,6 +288,43 @@ export class ChatRun {
     this.pushUser(steerText(s, target ?? undefined), "now");
   }
 
+  /** A background job finished: tell the director (starts its next turn when it's idle). */
+  private notify(text: string) {
+    if (!this.accepting || !this.input || this.input.isClosed) return;
+    this.pushUser(text, "next");
+  }
+
+  /** Close the session when the director is idle and nothing runs in the background anymore. */
+  private maybeClose() {
+    if (!this.idle || !this.input || this.input.isClosed) return;
+    if (this.background.size || this.liveTasks.size || this.running.size || this.bgJobs.size) return;
+    this.closeQueue();
+    this.input.close();
+  }
+
+  /** Follow a director's generate_batch in the background and report when it (and its `then` chains) finish. */
+  private async watchBatch(batch: string, sessionId: string) {
+    const id = `batch:${batch}`;
+    if (this.bgJobs.has(id) || !this.hostMcp) return;
+    this.bgJobs.add(id);
+    let text = "";
+    try {
+      let s: any = null;
+      // Short waits: a long-held HTTP request would hit fetch's header timeout.
+      for (let i = 0; i < 60 && !this.abort.signal.aborted; i++) {
+        s = await this.hostMcp.call("await_batch", { sessionId, batch, timeoutSecs: 240 });
+        if (s?.finished) break;
+      }
+      if (s?.finished && !this.awaited.has(batch)) text = batchNote(s);
+    } catch (e: any) {
+      console.error(`[runtime] watching ${batch}: ${e?.message ?? e}`);
+    } finally {
+      this.bgJobs.delete(id);
+      if (text) this.notify(text);
+      else this.maybeClose();
+    }
+  }
+
   private pushUser(text: string, priority: "now" | "next") {
     if (!this.input || this.input.isClosed) return;
     this.idle = false;
@@ -319,7 +361,21 @@ export class ChatRun {
       this.labelOfAgent(input.agent_id, input.agent_type);
       return {};
     };
+    // The director never blocks on a batch: the runtime watches it and wakes the director with a
+    // `[batch done]` message (subagents may still wait when their next step needs the results).
+    const noBlock = async (input: any) =>
+      !input.agent_id && /await_batch$/.test(String(input.tool_name ?? ""))
+        ? {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "deny",
+              permissionDecisionReason:
+                "Don't wait on batches: continue other branches, or end your turn if nothing else is ready — a [batch done] message with the results wakes you as soon as the batch (and its `then` steps) finishes.",
+            },
+          }
+        : {};
     return {
+      PreToolUse: [{ hooks: [noBlock] }],
       PostToolUse: [{ hooks: [post] }],
       SubagentStop: [{ hooks: [post] }],
       SubagentStart: [{ hooks: [start] }],
@@ -458,6 +514,7 @@ export class ChatRun {
     const codex = has("codex");
 
     const host = new HostMcp(undefined, undefined, this.hostHeaders());
+    this.hostMcp = host;
     const swarm = createSwarmTools({
       host,
       canvas: f.canvas,
@@ -472,6 +529,13 @@ export class ChatRun {
       mcpHeaders: { "X-Falos-Chat": f.chat, "X-Falos-Project": f.project },
       projectDir: projectDir(f),
       assets: caps.assets,
+      background: {
+        start: (id) => this.bgJobs.add(id),
+        finish: (id, text) => {
+          this.bgJobs.delete(id);
+          this.notify(text);
+        },
+      },
     });
 
     // Resume the SDK session for follow-ups on the same driver; start fresh after a switch.
@@ -572,10 +636,7 @@ export class ChatRun {
           this.idle = true;
           // Background subagents still running: keep the session open; their completion
           // starts another Director turn (and another result).
-          if (this.background.size === 0 && this.liveTasks.size === 0 && this.running.size === 0) {
-            this.closeQueue();
-            input.close();
-          }
+          this.maybeClose();
         }
       }
       return { summary, failure };
@@ -741,6 +802,11 @@ export class ChatRun {
       if (json?.sessionId) this.reportSession(json.sessionId, agent);
     }
     if (["fal_agent", "fal_model", "codex", "TodoWrite"].includes(caller.name)) return;
+    // The director doesn't block on batches: we watch them and tell it when they're done.
+    if (caller.agent === "director" && !b.is_error && json?.batch) {
+      if (caller.name === "generate_batch" && caller.input?.sessionId) void this.watchBatch(json.batch, caller.input.sessionId);
+      if (caller.name === "await_batch" && json.finished) this.awaited.add(json.batch);
+    }
     const nodes = nodesOf(json);
     if (caller.name === "import_file" && json?.type === "video" && json.node && !this.markedFinal) this.finalNodes = [json.node];
     // Nodes an agent marked final (`<id> role(final)`) are the run's result.
@@ -767,6 +833,21 @@ export class ChatRun {
       nodes,
     });
   }
+}
+
+/** The director's completion message for a watched batch. */
+export function batchNote(s: any): string {
+  const nodes: string[] = (s.nodes ?? []).slice(0, 40);
+  let t = `[batch done] ${s.batch} (${s.model ?? "?"}): ${s.done ?? 0}/${s.total ?? nodes.length} done${s.failed ? `, ${s.failed} failed` : ""} in ${s.seconds ?? "?"} s${s.frame ? `, frame ${s.frame}` : ""}. Nodes: ${nodes.join(", ")}.`;
+  if (s.errors?.length) t += ` Errors: ${s.errors.slice(0, 5).map((e: any) => `${e.node}: ${String(e.error).slice(0, 120)}`).join("; ")}.`;
+  if (s.then) {
+    const chains: any[] = s.then.chains ?? [];
+    t += ` Pipelines: ${s.then.done ?? 0} done${s.then.failed ? `, ${s.then.failed} failed` : ""} — ${chains
+      .slice(0, 20)
+      .map((c) => `${c.source} → ${(c.nodes ?? []).join(" → ") || "none"}${c.status === "failed" ? ` (failed: ${String(c.error ?? "").slice(0, 80)})` : ""}`)
+      .join("; ")}.`;
+  }
+  return `${t} Look at them (QA) and continue the branches that depend on them.`;
 }
 
 export function parseJson(text: string): any {

@@ -421,6 +421,7 @@ async fn export_one(
                     placement: None,
                     name: Some(format!("{} {id}", input.name).trim().to_string()),
                     role: Some("final".into()),
+                    then: vec![],
                 })?;
                 let res = run.wait(Duration::from_secs(30 * 60)).await.ok_or_else(|| anyhow!("reframe timed out"))?;
                 let r = res.first().cloned().unwrap_or_default();

@@ -1090,6 +1090,31 @@ async fn deliver(
 
 /// Append the user message, start a turn and send the `run` to the runtime.
 #[allow(clippy::too_many_arguments)]
+/// Upload the turn's attached media to fal storage in the background, all at once, so a
+/// later `mediaInputs` / `media_url` finds the asset's public URL instead of uploading then.
+/// No-op without a fal backend; failures just mean the upload happens on first use.
+fn preupload_context(host: &Arc<Host>, canvas: &str, resolved: &[Json]) {
+    if crate::fal::backend(host).is_err() {
+        return;
+    }
+    let mut seen = std::collections::HashSet::new();
+    for r in resolved {
+        let (Some(asset), Some(file)) = (r["asset"].as_str(), r["file"].as_str()) else { continue };
+        let media = r["mime"].as_str().is_some_and(|m| m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/"));
+        let remote = r["uri"].as_str().is_some_and(|u| u.starts_with("https://"));
+        if !media || remote || !seen.insert(asset.to_string()) {
+            continue;
+        }
+        let (host, canvas, asset, file) = (host.clone(), canvas.to_string(), asset.to_string(), std::path::PathBuf::from(file));
+        tokio::spawn(async move {
+            let actor = crate::fal::jobs_actor();
+            if let Err(e) = crate::ops::falops::public_url(&host, &actor, &canvas, &asset, &file).await {
+                tracing::debug!("pre-upload of {asset} failed: {e:#}");
+            }
+        });
+    }
+}
+
 async fn start_run(
     host: &Arc<Host>,
     chat: &str,
@@ -1126,6 +1151,7 @@ async fn start_run(
             Err(e) => json!({"chip": c, "error": format!("{e:#}")}),
         });
     }
+    preupload_context(host, &canvas, &resolved);
     let frame = json!({
         "type": "run",
         "chat": chat,

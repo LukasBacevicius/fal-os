@@ -98,11 +98,11 @@ Anything on the canvas can be a reference or a direct model input: generated med
   3. `fal_agent(references: [...])` attaches the media to the fal Agent task (`input_image` / `input_file`).
 
 ## Swarm tools (in-process MCP `swarm`)
-- `fal_agent(sessionId, task, outputs[], parent?, references?)`: a fal Agent SDK task (`agent.stream`).
-  - Creates one `generation` placeholder per expected output, inside `parent`.
-  - Maps `fal.activities` to the caller's status line and to chat `agent` events.
+- `fal_agent(sessionId, briefs[{brief, name?, references?, outputs?}], parent?, wait?)`: fal Agent SDK tasks (`agent.stream`), one per brief, all concurrent.
+  - Each brief is its own collaborator: a fal-os session ("fal Agent 2", …), cursor, status line, `agent` events.
+  - Creates the placeholders at once and lands artifacts as they show up in the stream (`import_file(replace: placeholder)`). Lineage records the brief, the fal response id and the models used.
   - Auto-answers questions and approvals (approve; first option) and posts the decision in chat.
-  - Downloads the artifacts and lands them via `import_file(replace: placeholder)`. Lineage records the task, the fal response id, the models used and a cost share.
+  - Returns handles immediately for the director (a `[fal Agent done] …` message per brief arrives later); subagents (and `wait: true`) block until all briefs finish. Legacy `task` + `outputs` = one brief, blocking.
 - `fal_model(sessionId, model, input, mediaInputs?, name, kind, parent?)`: one exact endpoint on the fal queue, with a placeholder, lineage and a cost estimate.
 - `fal_model_schema(model)`: input fields of an endpoint, from fal's public OpenAPI.
 - `media_url(sessionId, nodes)`: public URLs for canvas media.
@@ -116,7 +116,8 @@ Anything on the canvas can be a reference or a direct model input: generated med
 - **Queued messages**: the host sends `queue` frames while a chat runs; the runtime injects them into the SDK query at the next tool call (streaming input, `priority: "next"`) and reports `injected`.
 - **Attribution**: every event has `agent` (+ `parent` for subagents); subagent text is forwarded (`forwardSubagentText`); `session.agent` frames tell the host which subagent owns a fal-os session. All MCP connections send `X-Falos-Chat`.
 - **Errors**: SDK result errors are logged, shown briefly, and the run auto-resumes once in the same session; then `status: error` with `actions: ["continue"]` (`chat.continue`).
-- **Batches**: agents use the host's `generate_batch` for many outputs (one call, parallel jobs).
+- **Batches**: agents use the host's `generate_batch` for many outputs (one call, parallel jobs; per-job `mediaInputs`; `then` per-item pipelines). The runtime watches the director's batches and injects a `[batch done]` message when one (and its chains) finishes, so the director never blocks on `await_batch`.
+- **Parallel by design**: the director (Opus) plans a dependency graph and executes it concurrently — parallel tool calls in one turn, background subagents with full-context briefs, direct model calls with its own prompts, the fal Agent only for sub-briefs that need its planning (several briefs at once). See `orchestration()` in `src/prompts.ts`.
 
 ## Multiple chats
 - Chats run concurrently, one SDK query each. A follow-up to a busy chat queues behind its current turn.
