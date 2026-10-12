@@ -156,6 +156,8 @@ pub struct OverlayInput<'a> {
     pub activity: &'a [ActivityFx],
     /// Rects highlighted from outside the canvas (layers row hover).
     pub highlight: &'a [[f32; 4]],
+    /// The frame a drag would drop into (in-canvas move, files, library tiles).
+    pub drop_target: Option<[f32; 4]>,
     /// Provenance badges.
     pub badges: &'a [BadgeView],
     /// Lineage view: nodes outside the selected node's lineage, dimmed.
@@ -214,6 +216,10 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
     }
     for r in i.highlight {
         out.push(OverlayPrim::rect(*r, 0, (p.ink & 0x00ff_ffff) | (140 << 24), d));
+    }
+    if let Some(r) = i.drop_target {
+        // A faint wash and a 2 px line: clearly "lands in here", still monochrome.
+        out.push(OverlayPrim::rect(r, (p.ink & 0x00ff_ffff) | (14 << 24), p.ink, 2.0 * d));
     }
     if let Some(h) = i.hover.and_then(|h| i.scene.get(h))
         && !i.selection.iter().any(|s| s == &h.id)

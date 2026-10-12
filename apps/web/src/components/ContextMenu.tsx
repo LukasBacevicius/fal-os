@@ -3,10 +3,16 @@ import { getState, setState, useStore } from '../store';
 import { isDesktop, type AppInfo } from '../desktop';
 import { copyFiles, copyImage, download, openExport, openWith, openWithList, outNodes, promptOf, reveal, roleOf, toggleFinal, toggleLineage } from '../out';
 import { openPrompt } from './SelectionPrompt';
+import { addSelectionToChat, importPicked } from '../controller';
+import { copySelection, deleteSelection, duplicate, frameSelection, groupIntoFrame, pasteFromClipboard, reorder, ungroup } from '../actions';
+import { createNote } from './TextLayer';
+import { MOD } from '../keys';
 
-interface Item { label: string; hint?: string; run?: () => void; sub?: boolean }
+interface Item { label: string; hint?: string; run?: () => void; sub?: boolean; sep?: boolean }
 
-/** Right-click on nodes: the few most useful "out" actions; everything else is in ⌘K. */
+/** Right-click. On nodes: chat, out (copy file, open in, reveal, export), edit, arrange and
+ *  view actions; on empty canvas: paste, note, import, zoom, undo. Every row shows its key
+ *  (everything else is in ⌘K). */
 export function ContextMenu() {
   const menu = useStore((s) => s.menu)!;
   const nodes = useStore((s) => s.nodes);
@@ -45,21 +51,49 @@ export function ContextMenu() {
     }
   };
 
-  const items: Item[] = [
-    ...(media.length
-      ? [
-          { label: desk ? (media.length > 1 ? `copy ${media.length} files` : 'copy file') : 'copy link', hint: '⌘⇧C', run: go(() => void copyFiles(ids)) },
-          ...(image ? [{ label: 'copy image', run: go(() => void copyImage(ids[0])) }] : []),
-          desk ? { label: 'open in', sub: true } : { label: 'download', run: go(() => void download(ids)) },
-          ...(desk ? [{ label: 'reveal in finder', run: go(() => void reveal(ids)) }] : []),
-        ]
-      : []),
-    { label: 'export…', hint: '⌘⇧E', run: go(openExport) },
-    { label: final ? 'unmark final' : 'mark final', run: go(() => toggleFinal(ids)) },
-    { label: 'show lineage', run: go(toggleLineage) },
-    ...(media.length === 1 && promptOf(media[0].id) ? [{ label: 'rerun with changes…', run: go(openPrompt) }] : []),
-    { label: 'more…', hint: '⌘K', run: go(() => setState({ overlay: 'palette' })) },
-  ];
+  const at = menu.at ?? null;
+  const m = MOD;
+  const containers = sel.some((n) => n.kind === 'frame' || n.kind === 'group');
+  const items: Item[] = ids.length
+    ? [
+        { label: 'ask about it…', hint: '/', run: go(openPrompt) },
+        { label: 'add to chat', hint: `${m}L`, run: go(addSelectionToChat) },
+        ...(media.length
+          ? [
+              { label: desk ? (media.length > 1 ? `copy ${media.length} files` : 'copy file') : 'copy link', hint: `${m}⇧C`, run: go(() => void copyFiles(ids)), sep: true },
+              ...(image ? [{ label: 'copy image', run: go(() => void copyImage(ids[0])) }] : []),
+              desk ? { label: 'open in', sub: true } : { label: 'download', run: go(() => void download(ids)) },
+              ...(desk ? [{ label: 'reveal in finder', run: go(() => void reveal(ids)) }] : []),
+            ]
+          : []),
+        { label: 'export…', hint: `${m}⇧E`, run: go(openExport), sep: !media.length },
+        { label: final ? 'unmark final' : 'mark final', run: go(() => toggleFinal(ids)) },
+        { label: 'copy', hint: `${m}C`, run: go(() => void copySelection()), sep: true },
+        { label: 'paste', hint: `${m}V`, run: go(() => void pasteFromClipboard(at)) },
+        { label: 'duplicate', hint: `${m}D`, run: go(duplicate) },
+        { label: 'delete', hint: '⌫', run: go(deleteSelection) },
+        { label: 'group', hint: `${m}G`, run: go(groupIntoFrame), sep: true },
+        { label: 'frame selection', hint: `${m}⌥G`, run: go(frameSelection) },
+        ...(containers ? [{ label: 'ungroup', hint: `${m}⇧G`, run: go(ungroup) }] : []),
+        { label: 'bring forward', hint: `${m}]`, run: go(() => reorder(1)) },
+        { label: 'send backward', hint: `${m}[`, run: go(() => reorder(-1)) },
+        { label: 'zoom to selection', hint: '⇧2', run: go(() => getState().app?.zoomToNodes(ids)), sep: true },
+        { label: 'show lineage', run: go(toggleLineage) },
+        ...(media.length === 1 && promptOf(media[0].id) ? [{ label: 'rerun with changes…', run: go(openPrompt) }] : []),
+        { label: 'more…', hint: `${m}K`, run: go(() => setState({ overlay: 'palette' })), sep: true },
+      ]
+    : [
+        { label: 'paste', hint: `${m}V`, run: go(() => void pasteFromClipboard(at)) },
+        { label: 'add note', hint: 'N', run: go(() => createNote(at ?? [getState().camera.width / 2, getState().camera.height / 2])) },
+        { label: 'import files…', hint: 'drop', run: go(() => importPicked(at ?? undefined)) },
+        { label: 'select all', hint: `${m}A`, run: go(() => getState().app?.setSelection(getState().nodes.filter((n) => !n.parent).map((n) => n.id))), sep: true },
+        { label: 'zoom to fit', hint: '⇧1', run: go(() => getState().app?.fitAll()) },
+        { label: 'zoom to 100%', hint: `${m}0`, run: go(() => getState().app?.zoomTo(1)) },
+        { label: 'undo', hint: `${m}Z`, run: go(() => getState().app?.undo()), sep: true },
+        { label: 'redo', hint: `${m}⇧Z`, run: go(() => getState().app?.redo()) },
+        { label: 'keyboard shortcuts', hint: '?', run: go(() => setState({ overlay: 'help' })), sep: true },
+        { label: 'more…', hint: `${m}K`, run: go(() => setState({ overlay: 'palette' })) },
+      ];
 
   return (
     <div className="modal menu-veil" onPointerDown={close} onContextMenu={(e) => (e.preventDefault(), close())}>
@@ -67,7 +101,7 @@ export function ContextMenu() {
         {items.map((it) => (
           <div
             key={it.label}
-            className={`menu-row ${it.sub && subOpen ? 'on' : ''}`}
+            className={`menu-row ${it.sub && subOpen ? 'on' : ''} ${it.sep ? 'menu-sep' : ''}`}
             onMouseEnter={() => (it.sub ? openSub() : setSubOpen(false))}
             onClick={it.sub ? openSub : it.run}
           >
@@ -104,11 +138,17 @@ export function ContextMenu() {
 }
 
 /** Right-click on the canvas: select the node under the pointer (unless it is already part
- *  of the selection) and open the menu. */
-export function openMenuAt(x: number, y: number, node: string | null) {
+ *  of the selection) and open the node menu; on empty canvas, the canvas menu. `at` is the
+ *  canvas point (paste / new note land there). */
+export function openMenuAt(x: number, y: number, node: string | null, at?: [number, number]) {
   const { app, selection } = getState();
-  if (!app || !node) return;
+  if (!app) return;
+  if (!node) {
+    if (selection.length) app.setSelection([]);
+    setState({ menu: { x, y, ids: [], at } });
+    return;
+  }
   const ids = selection.includes(node) ? selection : [node];
   if (ids !== selection) app.setSelection(ids);
-  setState({ menu: { x, y, ids } });
+  setState({ menu: { x, y, ids, at } });
 }

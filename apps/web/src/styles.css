@@ -193,8 +193,9 @@ button, textarea, select, input { font: inherit; color: inherit; }
 }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
-.zoom-level { opacity: 0; transition: opacity 120ms linear; }
-.zoom-level.on { opacity: 1; }
+.zoom-ctl { display: flex; gap: 0.8ch; pointer-events: auto; color: var(--faint); transition: color 120ms linear; }
+.zoom-ctl:hover { color: var(--dim); }
+.zoom-ctl .link:hover { color: var(--text); text-decoration: none; }
 
 /* ---- overlays: palette, help ---- */
 
@@ -443,8 +444,7 @@ button, textarea, select, input { font: inherit; color: inherit; }
 /* ---- layers + properties ---- */
 .layers { flex: none; width: 232px; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
 .layers-head { height: 28px; flex: none; display: flex; align-items: center; gap: 1ch; padding: 0 8px; border-bottom: 1px solid var(--line); }
-.layers-filter { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; text-align: right; }
-.layers-filter:focus { text-align: left; }
+.layers-filter { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; }
 .layers-filter::placeholder { color: var(--faint); }
 .layers-list { flex: 1; min-height: 60px; overflow-y: auto; outline: none; position: relative; }
 .layer-row {
@@ -503,8 +503,9 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .project-head:hover .project-name { text-decoration: underline; text-underline-offset: 2px; }
 .project-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .layers-head .project-head { max-width: none; flex: 0 1 auto; }
-.layers-head .project-head + .layers-filter { flex: 1 0 8ch; }
-.project-float { position: absolute; left: 10px; top: 6px; z-index: 3; max-width: 40%; color: var(--dim); }
+
+.project-float { position: absolute; left: 10px; top: 6px; z-index: 3; max-width: 60%; color: var(--dim); display: flex; align-items: baseline; gap: 1ch; white-space: nowrap; }
+.project-float .project-head { color: var(--dim); }
 .proj-row { display: flex; gap: 1ch; align-items: center; padding: 0 10px; white-space: nowrap; }
 .proj-row.editing, .proj-row.confirming { background: var(--panel); }
 .proj-mark { flex: none; width: 1ch; color: var(--dim); }
@@ -670,3 +671,46 @@ button, textarea, select, input { font: inherit; color: inherit; }
 .export .link.dim, .file-card .link.dim, .files .link.faint, .toast .link.dim { color: var(--dim); }
 .props-chain { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .props-stale { color: var(--text); }
+
+/* ---- click paths: app menu, panel tabs, composer buttons, library actions ---- */
+.app-menu { flex: none; }
+.app-menu .menu { min-width: 30ch; }
+.app-menu .menu-row > span:first-child { white-space: pre; }
+.panel-head { flex: none; border-bottom: 1px solid var(--line); }
+.panel-row { height: 24px; display: flex; align-items: center; gap: 1ch; padding: 0 8px; white-space: nowrap; min-width: 0; }
+.panel-row:first-child { height: 28px; }
+.panel-row .project-head { max-width: none; flex: 0 1 auto; }
+.panel-gap { flex: 1; }
+.panel-tabs .link.on { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.composer-btns { flex: none; display: inline-flex; gap: 0.8ch; font-size: 11px; line-height: 18px; }
+.composer-btns .link:disabled { cursor: default; text-decoration: none; }
+.sel-add { margin: 0 0 4px; font-size: 11px; }
+.lib-actions { flex: none; display: flex; flex-wrap: wrap; gap: 0 1ch; padding: 3px 8px 4px; border-top: 1px solid var(--line); background: var(--bg); position: relative; z-index: 3; font-size: 11px; }
+
+/* ---- drag and drop onto the canvas (DropLayer.tsx) ---- */
+.drop-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 2; }
+.drop-layer > * { position: absolute; left: 0; top: 0; }
+.drop-veil { inset: 0; right: 0; bottom: 0; width: 100%; height: 100%; background: var(--bg); opacity: 0.35; animation: veil 120ms linear; }
+@keyframes veil { from { opacity: 0; } to { opacity: 0.35; } }
+.drop-ghost { will-change: transform; border: 1px dashed var(--text); background: color-mix(in srgb, var(--panel) 70%, transparent); overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.drop-ghost img { width: 100%; height: 100%; object-fit: cover; opacity: 0.75; display: block; }
+.drop-tag { will-change: transform; padding: 1px 6px; background: var(--bg); border: 1px solid var(--line); color: var(--text); white-space: nowrap; font-size: 11px; line-height: 16px; }
+.drop-ph { will-change: transform; background: #1a1a1c; border: 1px solid var(--line); overflow: hidden; transition: opacity 200ms linear; animation: fade 120ms linear; }
+[data-theme='light'] .drop-ph { background: #ececee; }
+.drop-ph.out { opacity: 0; }
+.drop-ph img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0.55; }
+.ph-dot { position: absolute; background: var(--dim); opacity: 0.2; animation: twinkle 2.4s ease-in-out infinite; }
+@keyframes twinkle { 0%, 100% { opacity: 0.15; transform: translate(0, 0); } 50% { opacity: 0.75; transform: translate(1px, -1px); } }
+.ph-bar { position: absolute; left: 0; bottom: 0; height: 1px; width: 30%; background: var(--dim); animation: sweep 1.2s linear infinite; }
+.ph-bar.full { width: 100%; animation: none; }
+@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.drop-layer.still .ph-dot, .drop-layer.still .ph-bar { animation: none; }
+.drop-layer.still .ph-bar:not(.full) { width: 100%; opacity: 0.4; }
+.upload-bar { height: 1px; background: color-mix(in srgb, var(--dim) 30%, transparent); pointer-events: auto; }
+.upload-bar > div { height: 1px; background: var(--dim); transition: width 120ms linear; }
+.drag-thumb { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; will-change: transform; width: 72px; height: 72px; border: 1px solid var(--text); background: var(--panel); transition: opacity 80ms linear; }
+.drag-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.drag-count { position: absolute; right: -1px; top: -1px; transform: translate(50%, -50%); background: var(--text); color: var(--bg); font-size: 10px; line-height: 14px; padding: 0 4px; }
+.composer-btns .link.faint, .sel-add .link.faint, .project-float .link.faint, .panel-row .link.faint { color: var(--faint); }
+.composer-btns .link.dim, .lib-actions .link.dim, .panel-row .link.dim, .app-menu .link.dim { color: var(--dim); }
+.composer-btns .link:hover, .lib-actions .link:hover, .panel-row .link:hover, .project-float .link:hover, .app-menu .link:hover { color: var(--text); }

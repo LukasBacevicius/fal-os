@@ -65,7 +65,9 @@ pub enum Effect {
 #[derive(Clone, Debug)]
 enum Drag {
     Pan { last: [f32; 2] },
-    Move { start: [f32; 2], items: Vec<(String, [f32; 4])>, moved: bool },
+    /// `target`: the frame under the pointer the moved nodes would land in (`None` = the
+    /// canvas), highlighted while dragging and applied on release (reparenting).
+    Move { start: [f32; 2], items: Vec<(String, [f32; 4])>, moved: bool, target: Option<String> },
     Resize { id: String, handle: usize, orig: [f32; 4], start: [f32; 2], keep_aspect: bool },
     Marquee { start: [f32; 2], cur: [f32; 2], base: Vec<String> },
     Pick { node: String, start: [f32; 2], cur: [f32; 2], start_px: [f32; 2] },
@@ -123,6 +125,31 @@ pub struct Ctx<'a> {
 
 fn is_container(n: &SceneNode) -> bool {
     matches!(n.kind, NodeKind::Frame | NodeKind::Group)
+}
+
+/// Whether `id` is `ancestor` or inside it.
+fn within(scene: &Scene, id: &str, ancestor: &str) -> bool {
+    let mut cur = Some(id);
+    while let Some(n) = cur.and_then(|i| scene.get(i)) {
+        if n.id == ancestor {
+            return true;
+        }
+        cur = n.parent.as_deref();
+    }
+    false
+}
+
+/// The frame a drop at world point `w` lands in: the topmost (deepest) frame under it that
+/// is not one of `exclude` or inside them. Groups are never drop targets
+/// (docs/research/brilliant-canvas-interaction.md, drag reparenting).
+pub fn drop_frame(scene: &Scene, w: [f32; 2], exclude: &[String]) -> Option<String> {
+    scene
+        .order()
+        .iter()
+        .rev()
+        .filter_map(|id| scene.get(id))
+        .find(|n| n.kind == NodeKind::Frame && n.contains(w) && !exclude.iter().any(|e| within(scene, &n.id, e)))
+        .map(|n| n.id.clone())
 }
 
 /// Handle positions (0 TL, 1 T, 2 TR, 3 R, 4 BR, 5 B, 6 BL, 7 L) of a world rect.
@@ -256,6 +283,14 @@ impl Interaction {
         }
     }
 
+    /// The frame the nodes being dragged would drop into (highlighted).
+    pub fn drop_target(&self) -> Option<&str> {
+        match &self.drag {
+            Some(Drag::Move { moved: true, target, .. }) => target.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
     }
@@ -325,7 +360,7 @@ impl Interaction {
                             .filter(|n| n.handle.is_some() || n.kind == NodeKind::Group)
                             .map(|n| (n.id.clone(), n.rect))
                             .collect();
-                        self.drag = Some(Drag::Move { start: w, items, moved: false });
+                        self.drag = Some(Drag::Move { start: w, items, moved: false, target: None });
                     }
                     None => {
                         let base = if mods.shift { self.selection.clone() } else { Vec::new() };
@@ -352,7 +387,7 @@ impl Interaction {
                 *last = p;
                 fx.push(Effect::Camera);
             }
-            Some(Drag::Move { start, items, moved }) => {
+            Some(Drag::Move { start, items, moved, target }) => {
                 let d = [w[0] - start[0], w[1] - start[1]];
                 let slop = DRAG_SLOP_PX / ctx.camera.zoom * ctx.dpr;
                 if !*moved && d[0].abs() < slop && d[1].abs() < slop {
@@ -361,6 +396,15 @@ impl Interaction {
                 *moved = true;
                 fx.push(Effect::Preview(items.iter().map(|(id, r)| (id.clone(), [r[0] + d[0], r[1] + d[1], r[2], r[3]])).collect()));
                 fx.push(Effect::Cursor("move"));
+                // Space blocks reparenting: the target stays where it was.
+                if !self.space {
+                    let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
+                    let t = drop_frame(ctx.scene, w, &ids);
+                    if t != *target {
+                        *target = t;
+                        fx.push(Effect::Overlay);
+                    }
+                }
             }
             Some(Drag::Resize { id, handle, orig, start, keep_aspect }) => {
                 let r = resize_rect(*orig, *handle, [w[0] - start[0], w[1] - start[1]], *keep_aspect);
@@ -437,13 +481,27 @@ impl Interaction {
         let w = ctx.camera.screen_to_world(p);
         match self.drag.take() {
             Some(Drag::Pan { .. }) => fx.push(Effect::Cursor(if self.space || self.tool == Tool::Hand { "grab" } else { "default" })),
-            Some(Drag::Move { start, items, moved: true }) => {
+            // Back where it started (the UI snaps a move back for drag-out / drop on the chat):
+            // nothing to commit, and no reparenting.
+            Some(Drag::Move { start, moved: true, .. }) if w == start => fx.push(Effect::Overlay),
+            Some(Drag::Move { start, items, moved: true, target }) => {
                 let d = [w[0] - start[0], w[1] - start[1]];
-                let cmds = items
-                    .iter()
-                    .map(|(id, r)| Command::UpdateNode { id: id.clone(), props: rect_props([r[0] + d[0], r[1] + d[1], r[2], r[3]]) })
-                    .collect();
+                let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
+                let mut cmds = Vec::new();
+                for (id, r) in &items {
+                    // Reparent top-level and frame children (group children stay in their
+                    // group, which refits); nodes whose ancestor also moves go along with it.
+                    let n = ctx.scene.get(id);
+                    let parent = n.and_then(|n| n.parent.clone());
+                    let reparentable = parent.as_deref().is_none_or(|p| ctx.scene.get(p).is_some_and(|p| p.kind == NodeKind::Frame));
+                    let carried = parent.as_deref().is_some_and(|p| ids.iter().any(|o| o != id && within(ctx.scene, p, o)));
+                    if !self.space && reparentable && !carried && parent != target {
+                        cmds.push(Command::MoveNode { id: id.clone(), parent: target.clone(), index: None });
+                    }
+                    cmds.push(Command::UpdateNode { id: id.clone(), props: rect_props([r[0] + d[0], r[1] + d[1], r[2], r[3]]) });
+                }
                 fx.push(Effect::Commit(cmds));
+                fx.push(Effect::Overlay);
             }
             Some(Drag::Move { .. }) => {}
             Some(Drag::Resize { id, handle, orig, start, keep_aspect }) => {
@@ -537,7 +595,12 @@ impl Interaction {
                 fx.push(Effect::Overlay);
             }
             "Escape" => {
-                self.drag = None;
+                // Cancels a drag in progress: moved / resized nodes snap back.
+                match self.drag.take() {
+                    Some(Drag::Move { items, moved: true, .. }) => fx.push(Effect::Preview(items)),
+                    Some(Drag::Resize { id, orig, .. }) => fx.push(Effect::Preview(vec![(id, orig)])),
+                    _ => {}
+                }
                 if !self.selection.is_empty() {
                     self.selection.clear();
                     fx.push(Effect::Select(Vec::new()));
@@ -708,6 +771,28 @@ mod tests {
         // Frame children are selected directly.
         ix.pointer_down(&mut ctx, [50.0, 50.0], 0, Mods::default());
         assert_eq!(ix.selection, vec!["aaa".to_string()]);
+    }
+
+    #[test]
+    fn dragging_out_of_a_frame_reparents_and_esc_cancels() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction::default();
+        let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 0.0 };
+        // a (in frame F) dragged onto empty canvas: moves to the top level.
+        ix.pointer_down(&mut ctx, [50.0, 50.0], 0, Mods::default());
+        ix.pointer_move(&mut ctx, [50.0, 400.0], Mods::default());
+        assert_eq!(ix.drop_target(), None);
+        let fx = ix.pointer_up(&mut ctx, [50.0, 400.0], Mods::default());
+        let cmds = fx.iter().find_map(|e| match e { Effect::Commit(c) => Some(c.clone()), _ => None }).unwrap();
+        assert!(matches!(&cmds[0], Command::MoveNode { id, parent: None, .. } if id == "aaa"));
+        // Back over the frame: it is the drop target (highlighted) and nothing moves on Esc.
+        ix.pointer_down(&mut ctx, [250.0, 50.0], 0, Mods::default());
+        ix.pointer_move(&mut ctx, [300.0, 150.0], Mods::default());
+        assert_eq!(ix.drop_target(), Some("fff"));
+        let fx = ix.key_down(&mut ctx, "Escape", Mods::default()).unwrap();
+        assert!(fx.iter().any(|e| matches!(e, Effect::Preview(p) if p[0].1 == [200.0, 10.0, 100.0, 100.0])));
+        assert!(ix.pointer_up(&mut ctx, [300.0, 150.0], Mods::default()).iter().all(|e| !matches!(e, Effect::Commit(_))));
     }
 
     #[test]

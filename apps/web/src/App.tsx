@@ -13,6 +13,7 @@ import { ContextMenu } from './components/ContextMenu';
 import { ExportPanel } from './components/ExportPanel';
 import { Setup, maybeOpenSetup } from './components/Setup';
 import { BrandSync } from './components/Mark';
+import { DragThumb } from './components/DropLayer';
 
 function stored(key: string, fallback: number) {
   try {
@@ -66,6 +67,7 @@ export function App() {
       <VideoFocus />
       <ActivitySync />
       <BrandSync />
+      <DragThumb />
       {toast && (
         <div className="toast" role="status">
           {toast}

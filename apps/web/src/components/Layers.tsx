@@ -9,7 +9,8 @@ import { usd } from '../format';
 import type { NodeView } from '../types';
 import { fuzzy } from './Palette';
 import { NodeRef } from './Transcript';
-import { ProjectHeader } from './Projects';
+import { PanelTabs } from './AppMenu';
+import { openMenuAt } from './ContextMenu';
 import { openPrompt } from './SelectionPrompt';
 import {
   applyRecipe, assetOf, assetRecord, copyPrompt, copyRecipe, FILTERS, matchesFilter, parentRefs, promptOf, rerun, roleOf,
@@ -193,8 +194,9 @@ export function Layers() {
 
   return (
     <aside className="layers">
+      <PanelTabs />
       <div className="layers-head">
-        <ProjectHeader />
+
         <input
           ref={filterInput}
           className="layers-filter"
@@ -248,6 +250,10 @@ export function Layers() {
                 draggable={editing !== n.id}
                 onClick={(e) => select(n.id, e)}
                 onDoubleClick={() => setEditing(n.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  openMenuAt(e.clientX, e.clientY, n.id);
+                }}
                 onMouseEnter={() => app?.setHighlight([n.id])}
                 onDragStart={(e) => {
                   e.dataTransfer.setData('application/x-falos-node', n.id);

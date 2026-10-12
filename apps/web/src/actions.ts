@@ -285,6 +285,69 @@ export function cycleSelection(dir: 1 | -1) {
   app.focusNode(next);
 }
 
+/** ⌘] / ⌘[ (and the node menu): one step up / down in z-order among siblings. */
+export function reorder(dir: 1 | -1) {
+  const { app, nodes, selection } = getState();
+  if (!app || !selection.length) return;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const siblings = (p: string | null) => (p ? byId.get(p)?.children ?? [] : nodes.filter((n) => !n.parent).map((n) => n.id));
+  const roots = selectedRoots(nodes, selection);
+  // Front-most first when raising (so neighbours don't swap back), back-most first when lowering.
+  const order = roots
+    .map((n) => ({ n, i: siblings(n.parent).indexOf(n.id) }))
+    .sort((a, b) => (dir > 0 ? b.i - a.i : a.i - b.i));
+  const cmds: unknown[] = [];
+  for (const { n, i } of order) {
+    const sib = siblings(n.parent);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= sib.length || selection.includes(sib[j])) continue;
+    cmds.push({ op: 'move', id: n.id, parent: n.parent, index: j });
+  }
+  if (cmds.length) app.apply(cmds);
+}
+
+/** Copy from a click (the node menu): the selection as text on the system clipboard, and
+ *  for paste in this tab. */
+export async function copySelection() {
+  const clip = clipOf(getState().selection);
+  if (!clip) return;
+  lastClip = clip;
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(clip));
+  } catch {
+    /* no permission: in-app paste still works */
+  }
+  toast(`copied ${clip.nodes.filter((n) => !n.parent || !clip.nodes.some((m) => m.id === n.parent)).length} node(s)`);
+}
+
+/** Paste from a click (menus): reads the system clipboard through the async API (images,
+ *  our nodes, text), falling back to the last in-app copy. `at` = canvas CSS point. */
+export async function pasteFromClipboard(at: [number, number] | null) {
+  const { app } = getState();
+  if (!app) return;
+  const files = await asyncClipboardImages();
+  if (files.length) {
+    await importFiles(files, at ?? undefined);
+    return;
+  }
+  let text = '';
+  try {
+    text = (await navigator.clipboard.readText()) ?? '';
+  } catch {
+    /* no permission */
+  }
+  const dt = new DataTransfer();
+  if (text) dt.setData('text/plain', text);
+  else if (!lastClip) return toast(`nothing to paste (or allow clipboard access; ${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl+'}V works too)`);
+  const e = new ClipboardEvent('paste', { clipboardData: dt });
+  await paste(e, at);
+}
+
+export function deleteSelection() {
+  const { app, selection } = getState();
+  if (app && selection.length) app.apply(selection.map((id) => ({ op: 'delete', id })));
+}
+
 export function zoomBy(f: number) {
   const { app, camera } = getState();
   app?.zoomTo(Math.max(0.02, Math.min(64, camera.zoom * f)));

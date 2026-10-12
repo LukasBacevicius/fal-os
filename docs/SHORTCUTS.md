@@ -7,6 +7,22 @@ Windows and Linux. The source of truth is `SHORTCUTS` in `apps/web/src/keys.ts`.
 Canvas shortcuts never fire while you type: in the chat input, a note being edited or the
 palette. The shortcuts marked "everywhere" work in those places too.
 
+## Click paths
+
+Everything below also has a click path; every button's tooltip shows its key, and `?`
+lists these too.
+
+| Where | What |
+|---|---|
+| `[≡]` top-left (left panel header, or floating over the canvas) | Projects, layers, library (panel / full screen), chat panel, new chat, all chats, import files…, export…, connect agent…, setup… (desktop), undo / redo, theme, reduce motion, keyboard shortcuts, command palette |
+| `layers · library` | Left panel tabs; `[⤢]` full-screen library, `[×]` closes the panel. With the panel closed they sit next to the project name |
+| Right-click a node (canvas or layers row) | Ask about it…, add to chat, copy file / image, open in… / download, reveal, export…, mark final, copy, paste, duplicate, delete, group, frame selection, ungroup, bring forward, send backward, zoom to selection, show lineage, rerun with changes…, more… |
+| Right-click empty canvas | Paste, add note, import files…, select all, zoom to fit, zoom to 100%, undo, redo, keyboard shortcuts, more… |
+| `− 43% +` bottom-left | Zoom out / in; click the level to fit all |
+| `[✦]` `[⇲]` by the selection | Ask about it / drag out (web: click downloads) |
+| Chat | `+` new chat, `≡` history, `opus fal codex` agent picker, `[+]` attach files, `[+ N selected]` add the canvas selection, `[send]`, `[stop]` (also on the "running" line) |
+| Library | Filter words; drag tiles (the thumbnail follows the pointer, true size on the canvas, a multi-selection lands as a grid, into the frame under the pointer, onto the chat to attach); double-click places; with a selection: `[place] [+ chat] [look] [♥] [tag] [collect] [upload] [local] [similar]` |
+
 ## App
 | Keys | Action |
 |---|---|
@@ -59,6 +75,7 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | Esc | Deselect |
 | ⌘D | Duplicate |
 | ⌘G | Group the selection. A group always hugs its children |
+| ⌘] / ⌘[ | Bring forward / send backward (z-order among siblings) |
 | ⌘⌥G | Frame the selection (a titled frame with padding) |
 | ⌘⇧G | Ungroup (children keep their place) |
 | Click / double-click / Esc | A click on something inside a group selects the group. Double-click enters the group, and Esc goes back up a level |
@@ -69,7 +86,8 @@ palette. The shortcuts marked "everywhere" work in those places too.
 | ⌘Z / ⌘⇧Z | Undo / redo your own changes (agents' changes are theirs; revert an agent turn with `[revert]` in the chat) |
 | ⇧1 / ⇧2 | Fit all / zoom to the selection |
 | ⌘0 / ⌘+ / ⌘− | Zoom to 100% / zoom in / zoom out |
-| Drop files | Import |
+| Drop files | Import at the pointer as a tidy grid. Sized ghosts preview where they land; over a frame it highlights and the files go into it (scaled to fit). Placeholder tiles (pixel dots, a progress line) hold the spot until the media is in; a 1px line under a node shows its upload to the host |
+| Drag a node into / out of a frame | Reparents it on release (the target frame highlights while dragging); hold Space to keep the current parent. Esc cancels a move or resize |
 
 ## Video
 Videos play muted while hovered or selected (tiles big enough on screen show `▶ 0:30`). The selected video gets a transport under it: `[▶] 0:07 / 0:30 ───── [mute] [⤢]` (click or drag the line to scrub; hover shows the time). Arrows keep nudging, so seeking uses J / L and , / .

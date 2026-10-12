@@ -4,6 +4,9 @@
 import { useSyncExternalStore } from 'react';
 import { getState, setState, toast } from './store';
 import { setLibraryHandler, workspaceHost, workspaceSend } from './projects';
+import { addPlaceholder, finishPlaceholder, frameRect, gridLayout, type GhostItem } from './dnd';
+import { worldRects } from './geometry';
+import { addContext } from './controller';
 
 export interface LibItem {
   sha: string;
@@ -181,7 +184,7 @@ setLibraryHandler((m: any) => {
       setLib({ fal: m.fal === 'connected' ? 'connected' : 'off', writes: m.writes === 'unavailable' ? 'unavailable' : 'ok' });
       break;
     case 'library.placed':
-      toast('placed on the canvas');
+      placed(m);
       break;
     case 'library.uploading': {
       const n = (m.queued ?? []).length;
@@ -190,6 +193,10 @@ setLibraryHandler((m: any) => {
       break;
     }
     case 'error':
+      if (m.id && pendingPlace.has(m.id)) {
+        pendingPlace.get(m.id)!.done?.();
+        pendingPlace.delete(m.id);
+      }
       setLib({ loading: false });
       toast(`library: ${m.message ?? 'error'}`);
       break;
@@ -277,32 +284,117 @@ export function uploadSelected() {
   workspaceSend({ type: 'library.upload', id: `u${++seq}`, shas, project });
 }
 
-/** New placement of an asset on the open canvas (world coords; centered when omitted). */
-export function place(sha: string, at?: [number, number]) {
+/** World size a placed asset gets (the host's `place` rule: natural aspect, ≤ 960 wide). */
+export function placedSize(item: Pick<LibItem, 'kind' | 'w' | 'h'> | undefined): [number, number] {
+  if (item?.kind === 'audio') return [480, 96];
+  if (item?.w && item?.h) {
+    const w = Math.min(960, item.w);
+    return [w, (w * item.h) / item.w];
+  }
+  return [512, 512];
+}
+
+interface PlaceOpts {
+  /** Width to place at (the host keeps the aspect). */
+  w?: number;
+  /** Move into this frame once the node exists (drop into a frame). */
+  frame?: string | null;
+  /** Attach the placed node to the chat as a chip. */
+  attach?: boolean;
+  /** Called when the placement is on the canvas (or failed): finishes drop placeholders. */
+  done?: () => void;
+}
+const pendingPlace = new Map<string, PlaceOpts>();
+
+/** New placement of an asset on the open canvas (world top-left; centered when omitted). */
+export function place(sha: string, at?: [number, number], opts: PlaceOpts = {}) {
   const { app, project, camera } = getState();
-  if (!project) return toast('open a project first');
+  if (!project) {
+    opts.done?.();
+    return toast('open a project first');
+  }
   const item = st.items.find((i) => i.sha === sha);
   let x: number | undefined;
   let y: number | undefined;
-  const w = item?.w && item?.h ? Math.min(960, item.w) : 512;
-  const h = item?.w && item?.h ? (w * item.h) / item.w : 512;
+  const [w, h] = placedSize(item);
   const p = at ?? (app ? (Array.from(app.screenToWorld(camera.width / 2, camera.height / 2)) as [number, number]) : null);
   if (p) {
     x = Math.round(p[0] - (at ? 0 : w / 2));
     y = Math.round(p[1] - (at ? 0 : h / 2));
   }
-  workspaceSend({ type: 'library.place', id: `p${++seq}`, sha, project, x, y });
+  const id = `p${++seq}`;
+  if (opts.frame || opts.attach || opts.done) pendingPlace.set(id, opts);
+  workspaceSend({ type: 'library.place', id, sha, project, x, y, w: opts.w });
+}
+
+/** Places several assets as a grid (the same layout as a drop) centered on `at` (world;
+ *  the view center when omitted). ⏎ / double-click / `[place]` in the library. */
+export function placeMany(shas: string[], at?: [number, number], opts: Omit<PlaceOpts, 'w'> = {}) {
+  const { app, camera } = getState();
+  if (!shas.length) return;
+  const c = at ?? (app ? (Array.from(app.screenToWorld(camera.width / 2, camera.height / 2)) as [number, number]) : [0, 0]);
+  const items = shas.map((sha) => st.items.find((i) => i.sha === sha));
+  const sizes = items.map(placedSize);
+  const rects = gridLayout(sizes, c, frameRect(opts.frame));
+  let left = shas.length;
+  const one = () => {
+    if (--left === 0) opts.done?.();
+  };
+  shas.forEach((sha, i) => place(sha, [rects[i][0], rects[i][1]], { ...opts, w: items[i]?.kind !== 'audio' ? Math.round(rects[i][2]) : undefined, done: one }));
+}
+
+/** Runs `f(true)` once node `id` is in the local doc (placements arrive over the sync
+ *  socket after the workspace answer), `f(false)` after ~3 s without it. */
+function whenNode(id: string, f: (ok: boolean) => void, tries = 30) {
+  if (getState().nodes.some((n) => n.id === id)) return f(true);
+  if (tries <= 0) return f(false);
+  window.setTimeout(() => whenNode(id, f, tries - 1), 100);
+}
+
+function placed(m: { id: string; node?: string }) {
+  const opts = pendingPlace.get(m.id);
+  if (!opts) return toast('placed on the canvas');
+  pendingPlace.delete(m.id);
+  if (!m.node) return opts.done?.();
+  const node = m.node;
+  whenNode(node, (ok) => {
+    const { app, nodes } = getState();
+    if (ok && app && opts.frame) {
+      const rects = worldRects(nodes);
+      const f = rects.get(opts.frame);
+      const r = rects.get(node);
+      if (f && r) app.apply([{ op: 'move', id: node, parent: opts.frame }, { op: 'update', id: node, props: { x: Math.round(r[0] - f[0]), y: Math.round(r[1] - f[1]) } }]);
+    }
+    if (ok && opts.attach) addContext([{ kind: 'node', node }]);
+    opts.done?.();
+  });
 }
 
 export const ASSET_MIME = 'application/x-falos-asset';
 
-/** Stage drop: a library tile dragged onto the canvas. True when handled. */
-export function libraryDrop(e: React.DragEvent, rect: DOMRect): boolean {
-  const sha = e.dataTransfer.getData(ASSET_MIME);
-  if (!sha) return false;
+/** Ghost for a library tile being dragged: true placed size and its thumbnail. */
+export function libGhost(sha: string): GhostItem {
+  const it = st.items.find((i) => i.sha === sha);
+  const [w, h] = placedSize(it);
+  return { w, h, kind: it?.kind ?? 'image', thumb: it ? hostUrl(it.thumb) : undefined, name: it?.name ?? undefined };
+}
+
+/** Assets in a drag (newline-separated shas). */
+export function draggedShas(dt: DataTransfer): string[] {
+  return dt.getData(ASSET_MIME).split('\n').filter(Boolean);
+}
+
+/** Stage drop: library tiles dragged onto the canvas, laid out as a grid at the pointer (in
+ *  `frame` when over one), with placeholders until the nodes arrive. True when handled. */
+export function libraryDrop(e: React.DragEvent, rect: DOMRect, frame: string | null): boolean {
+  const shas = draggedShas(e.dataTransfer);
+  if (!shas.length) return false;
   const app = getState().app;
-  const p = app ? (Array.from(app.screenToWorld(e.clientX - rect.left, e.clientY - rect.top)) as [number, number]) : undefined;
-  place(sha, p);
+  if (!app) return true;
+  const [wx, wy] = app.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+  const ghosts = shas.map(libGhost);
+  const ph = addPlaceholder(gridLayout(ghosts.map((g) => [g.w, g.h]), [wx, wy], frameRect(frame)), ghosts.map((g) => g.thumb));
+  placeMany(shas, [wx, wy], { frame, done: () => finishPlaceholder(ph, 200) });
   return true;
 }
 

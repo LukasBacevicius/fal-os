@@ -16,3 +16,19 @@ export function theme(): Theme {
 export function applyTheme() {
   document.documentElement.dataset.theme = theme();
 }
+
+/** Switches the theme at runtime (remembered); the canvas follows. */
+export function setTheme(t: Theme, app?: { setTheme(t: string): void } | null) {
+  try {
+    localStorage.setItem('falos.theme', t);
+  } catch {
+    /* private mode */
+  }
+  const u = new URL(location.href);
+  if (u.searchParams.has('theme')) {
+    u.searchParams.delete('theme');
+    history.replaceState(null, '', u);
+  }
+  document.documentElement.dataset.theme = t;
+  app?.setTheme(t);
+}
