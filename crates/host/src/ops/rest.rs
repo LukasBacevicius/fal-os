@@ -126,6 +126,7 @@ fn start_op(c: &Ctx, b: &Json, category: &str) -> Result<Json, Response> {
         placement: placement(b),
         name: b["name"].as_str().map(String::from),
         role: None,
+        then: vec![],
     })
     .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     Ok(run.summary(None))

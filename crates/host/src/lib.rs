@@ -17,6 +17,7 @@ pub mod library;
 pub mod mcp;
 pub mod ops;
 pub mod out;
+pub mod pipeline;
 pub mod presence;
 pub mod register;
 pub mod relay;

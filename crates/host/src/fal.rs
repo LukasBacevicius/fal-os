@@ -73,6 +73,59 @@ pub fn start(
     place: Placement,
     parents: Vec<Parent>,
 ) -> Result<String> {
+    let job = create(host, actor, canvas, model, input, None, place, parents)?;
+    let node = job.node.clone();
+    tokio::spawn(async move {
+        if let Err(e) = job.run().await {
+            job.fail(&format!("{e:#}"));
+        }
+    });
+    Ok(node)
+}
+
+/// Like [`start`], but runs the job to the end (pipeline steps). Returns the node id once it
+/// is the media node; errors (the node shows `failed`) when the job fails or was canceled.
+/// `created` sees the placeholder id as soon as it exists.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_to_end(
+    host: &Arc<Host>,
+    actor: &Actor,
+    canvas: &str,
+    model: &str,
+    input: Json,
+    name: Option<&str>,
+    place: Placement,
+    parents: Vec<Parent>,
+    created: impl FnOnce(&str),
+) -> Result<String> {
+    let job = create(host, actor, canvas, model, input, name, place, parents)?;
+    created(&job.node);
+    if let Err(e) = job.run().await {
+        let msg = format!("{e:#}");
+        job.fail(&msg);
+        bail!("{msg}");
+    }
+    let converted = host
+        .read(&job.canvas, |c| c.node(&job.node).is_some_and(|n| n.kind != NodeKind::Generation))
+        .unwrap_or(false);
+    if !converted {
+        bail!("`{}` was removed before it finished", job.node);
+    }
+    Ok(job.node)
+}
+
+/// Create the generation node (placeholder) for a job without starting it.
+#[allow(clippy::too_many_arguments)]
+fn create(
+    host: &Arc<Host>,
+    actor: &Actor,
+    canvas: &str,
+    model: &str,
+    input: Json,
+    name: Option<&str>,
+    place: Placement,
+    parents: Vec<Parent>,
+) -> Result<Job> {
     let backend = backend(host)?;
     check_model(model)?;
     let canvas = host.resolve_canvas(canvas)?;
@@ -90,12 +143,11 @@ pub fn start(
             (if right.is_finite() { right + 40.0 } else { 0.0 }, 0.0)
         })?,
     };
-    let name: String = input
-        .get("prompt")
-        .and_then(Json::as_str)
+    let name: String = name
+        .or(input.get("prompt").and_then(Json::as_str))
         .unwrap_or(model)
         .chars()
-        .take(48)
+        .take(if name.is_some() { 80 } else { 48 })
         .collect();
     let props: Props = serde_json::from_value(json!({
         "x": x, "y": y, "w": w, "h": h,
@@ -116,23 +168,16 @@ pub fn start(
             }],
         )
     })?;
-    let node = res.created[0].clone();
-    let job = Job {
+    Ok(Job {
         host: host.clone(),
         canvas,
-        node: node.clone(),
+        node: res.created[0].clone(),
         model: model.into(),
         input,
         backend,
         requester: actor.id.clone(),
         parents,
-    };
-    tokio::spawn(async move {
-        if let Err(e) = job.run().await {
-            job.fail(&format!("{e:#}"));
-        }
-    });
-    Ok(node)
+    })
 }
 
 pub(crate) struct Job {

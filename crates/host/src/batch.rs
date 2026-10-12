@@ -12,6 +12,10 @@
 //! - Progress: `{"kind":"batch","id","model","total","done","failed","running"}` chat events
 //!   (throttled) in the calling session's chat, plus a canvas-scoped `batch` host event.
 //!   The tool returns at once; `await_batch` waits for results when an agent needs them.
+//! - Packing: identical requests (same model + input, seeds aside) are merged into fewer
+//!   requests via the model's `num_images` when its schema has one (up to its maximum).
+//! - Per-item pipelines (`then`): each output flows into the next step (`pipeline.rs`) the
+//!   moment it lands; the batch finishes when every chain has.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,6 +28,7 @@ use serde_json::{Value as Json, json};
 use tokio::sync::{Semaphore, watch};
 
 use crate::fal::{self, Backend, Job};
+use crate::pipeline::Step;
 use crate::host::{Event, Host, now_ms};
 
 pub const SUBMIT_CONCURRENCY: usize = 64;
@@ -58,6 +63,10 @@ pub struct Progress {
     pub failed: usize,
     pub running: usize,
     pub finished: bool,
+    /// Per-item pipelines (`then`): chains running / done / failed.
+    pub chains_running: usize,
+    pub chains_done: usize,
+    pub chains_failed: usize,
 }
 
 pub struct Batch {
@@ -69,6 +78,9 @@ pub struct Batch {
     pub started: i64,
     progress: watch::Sender<Progress>,
     errors: Mutex<Vec<(String, String)>>,
+    /// `then` steps per output, and each chain's outcome (`pipeline::run_chain`).
+    pub then: Vec<Step>,
+    chains: Mutex<Vec<Json>>,
 }
 
 impl Batch {
@@ -82,6 +94,10 @@ impl Batch {
             "batch": self.id, "model": self.model, "frame": self.frame,
             "total": p.total, "done": p.done, "failed": p.failed, "running": p.running,
             "finished": p.finished, "nodes": self.nodes,
+            "then": (!self.then.is_empty()).then(|| json!({
+                "running": p.chains_running, "done": p.chains_done, "failed": p.chains_failed,
+                "chains": *self.chains.lock().unwrap(),
+            })),
             "errors": self.errors.lock().unwrap().iter().take(10)
                 .map(|(n, e)| json!({"node": n, "error": e})).collect::<Vec<_>>(),
             "seconds": ((now_ms() - self.started) as f64 / 1000.0 * 10.0).round() / 10.0,
@@ -117,6 +133,10 @@ pub struct Request {
     pub cell: Option<(f64, f64)>,
     /// Media inputs shared by every job (lineage parents).
     pub parents: Vec<Parent>,
+    /// Per-job media inputs (lineage parents), by job index (may be shorter than `jobs`).
+    pub job_parents: Vec<Vec<Parent>>,
+    /// Per-item pipeline run on every output as soon as it lands.
+    pub then: Vec<Step>,
 }
 
 /// Cell size from a fal input's aspect hints (long side 320).
@@ -209,7 +229,7 @@ pub fn start(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canvas: &st
     };
     let mut items = vec![];
     let mut k = 0;
-    for ((m, input, name), n) in req.jobs.iter().zip(&per) {
+    for (ji, ((m, input, name), n)) in req.jobs.iter().zip(&per).enumerate() {
         let mut ids = vec![];
         for j in 0..*n {
             let id = random_id("g");
@@ -233,7 +253,9 @@ pub fn start(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canvas: &st
             });
             ids.push(id);
         }
-        items.push(Item { model: m.clone(), input: input.clone(), name: name.clone().unwrap_or_default(), nodes: ids, parents: req.parents.clone() });
+        let mut parents = req.parents.clone();
+        parents.extend(req.job_parents.get(ji).cloned().unwrap_or_default());
+        items.push(Item { model: m.clone(), input: input.clone(), name: name.clone().unwrap_or_default(), nodes: ids, parents });
     }
     host.mutate(&canvas, &actor.id, None, |c| c.apply(actor, None, &cmds))?;
     let nodes: Vec<String> = items.iter().flat_map(|i| i.nodes.clone()).collect();
@@ -247,6 +269,8 @@ pub fn start(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canvas: &st
         started: now_ms(),
         progress: tx,
         errors: Mutex::default(),
+        then: req.then,
+        chains: Mutex::default(),
     });
     host.batches.0.lock().unwrap().insert(batch.id.clone(), batch.clone());
     if let Some(s) = session {
@@ -260,6 +284,8 @@ pub fn start(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canvas: &st
         batch: batch.clone(),
         backend,
         requester: actor.id.clone(),
+        actor: actor.clone(),
+        session: session.map(String::from),
         chat: chat.clone().and_then(|(c, _)| c),
         agent: chat.map(|(_, a)| a).unwrap_or_else(|| actor.id.clone()),
         state: Mutex::default(),
@@ -288,6 +314,9 @@ struct RunState {
     running: usize,
     submitted_all: bool,
     downloads: usize,
+    chains_running: usize,
+    chains_done: usize,
+    chains_failed: usize,
 }
 
 struct Runner {
@@ -295,6 +324,8 @@ struct Runner {
     batch: Arc<Batch>,
     backend: Backend,
     requester: String,
+    actor: Actor,
+    session: Option<String>,
     chat: Option<String>,
     agent: String,
     state: Mutex<RunState>,
@@ -328,6 +359,7 @@ impl Runner {
 
     async fn run(self: Arc<Self>, items: Vec<Item>) {
         let started = tokio::time::Instant::now();
+        let items = pack_items(&self.host.http, items).await;
         // Submit everything now; fal parallelizes server-side.
         let submitter = {
             let me = self.clone();
@@ -454,7 +486,28 @@ impl Runner {
         }
     }
 
-    async fn complete(&self, req: &str, submit: &Json, item: &Item) {
+    /// Start `then` on a landed output (after its conversion is flushed).
+    fn start_chain(self: &Arc<Self>, node: String) {
+        if self.batch.then.is_empty() {
+            return;
+        }
+        self.state.lock().unwrap().chains_running += 1;
+        let me = self.clone();
+        tokio::spawn(async move {
+            let canvas = me.batch.canvas.clone();
+            let r = match crate::pipeline::wait_media(&me.host, &canvas, &node, Duration::from_secs(60)).await {
+                Ok(()) => crate::pipeline::run_chain(&me.host, &me.actor, me.session.as_deref(), &canvas, &node, &me.batch.then).await,
+                Err(e) => json!({"source": node, "nodes": [], "status": "failed", "error": format!("{e:#}")}),
+            };
+            let ok = r["status"] == "done";
+            me.batch.chains.lock().unwrap().push(r);
+            let mut st = me.state.lock().unwrap();
+            st.chains_running -= 1;
+            if ok { st.chains_done += 1 } else { st.chains_failed += 1 }
+        });
+    }
+
+    async fn complete(self: &Arc<Self>, req: &str, submit: &Json, item: &Item) {
         let r: Result<()> = async {
             let result = self.job(item).result(req, submit).await?;
             let media = fal::find_all_media(&result);
@@ -488,6 +541,8 @@ impl Runner {
                     st.pending.extend(conv.into_iter().skip(1));
                 }
                 st.done += 1;
+                drop(st);
+                self.start_chain(node.clone());
             }
             Ok(())
         }
@@ -501,25 +556,40 @@ impl Runner {
     /// throttled progress; finish when everything is resolved.
     async fn flush_loop(&self) {
         let mut last_progress = tokio::time::Instant::now() - PROGRESS_EVERY;
-        let mut last_sent = (usize::MAX, 0, 0);
+        let mut last_sent = (usize::MAX, 0, 0, 0, 0, 0);
         loop {
             tokio::time::sleep(FLUSH_EVERY).await;
-            let (cmds, done, failed, running, finished) = {
+            let (cmds, mut p) = {
                 let mut st = self.state.lock().unwrap();
                 let finished = st.submitted_all
                     && st.inflight.is_empty()
                     && st.downloads == 0
+                    && st.chains_running == 0
+                    && st.pending.is_empty()
                     && st.done + st.failed >= self.batch.progress().total;
-                (std::mem::take(&mut st.pending), st.done, st.failed, st.running, finished)
+                let p = Progress {
+                    total: self.batch.progress().total,
+                    done: st.done,
+                    failed: st.failed,
+                    running: st.running,
+                    finished,
+                    chains_running: st.chains_running,
+                    chains_done: st.chains_done,
+                    chains_failed: st.chains_failed,
+                };
+                (std::mem::take(&mut st.pending), p)
             };
             if !cmds.is_empty() {
                 self.apply(cmds);
+                // Report "finished" only after the last conversions are applied.
+                p.finished = false;
             }
-            let p = Progress { total: self.batch.progress().total, done, failed, running, finished };
-            let changed = last_sent != (done, failed, running);
+            let key = (p.done, p.failed, p.running, p.chains_running, p.chains_done, p.chains_failed);
+            let changed = last_sent != key;
+            let finished = p.finished;
             if finished || (changed && last_progress.elapsed() >= PROGRESS_EVERY) {
                 last_progress = tokio::time::Instant::now();
-                last_sent = (done, failed, running);
+                last_sent = key;
                 self.report(&p);
             }
             self.batch.progress.send_replace(p);
@@ -572,6 +642,7 @@ impl Runner {
             "kind": "batch", "agent": self.agent, "id": self.batch.id, "model": self.batch.model,
             "total": p.total, "done": p.done, "failed": p.failed, "running": p.running,
             "finished": p.finished, "frame": self.batch.frame,
+            "then": (!self.batch.then.is_empty()).then(|| json!({"running": p.chains_running, "done": p.chains_done, "failed": p.chains_failed})),
             "nodes": if p.finished { json!(self.batch.nodes) } else { Json::Null },
         });
         self.host.emit(Event::Batch {
@@ -582,6 +653,96 @@ impl Runner {
             let _ = self.host.chat.append(&self.host, chat, None, ev);
         }
     }
+}
+
+/// The model's `num_images` maximum from its fal input schema (None: no such param, or the
+/// schema couldn't be read). Cached per process.
+async fn num_images_max(http: &reqwest::Client, model: &str) -> Option<usize> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Option<usize>>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Mutex::default);
+    if let Some(v) = cache.lock().unwrap().get(model) {
+        return *v;
+    }
+    let base = std::env::var("FALOS_FAL_SCHEMA_URL").unwrap_or_else(|_| "https://fal.ai/api/openapi/queue/openapi.json".into());
+    let fetched: Option<Json> = async {
+        let url = format!("{base}?endpoint_id={}", model.replace('&', "%26").replace('?', "%3F"));
+        let r = http.get(url).timeout(Duration::from_secs(4)).send().await.ok()?;
+        r.error_for_status().ok()?.json().await.ok()
+    }
+    .await;
+    let doc = fetched?; // not cached: retry next batch
+    let max = doc["components"]["schemas"]
+        .as_object()
+        .and_then(|s| s.iter().find(|(k, _)| k.ends_with("Input")).map(|(_, v)| v.clone()))
+        .and_then(|input| input["properties"].get("num_images").cloned())
+        .map(|p| p["maximum"].as_u64().unwrap_or(4).clamp(1, 16) as usize);
+    cache.lock().unwrap().insert(model.to_string(), max);
+    max
+}
+
+/// Fill `num_images` slots: merge identical single-output requests (same model, input and
+/// parents; seeds aside) into requests of up to `max_of(model)` outputs each.
+pub(crate) fn pack(items: Vec<Item>, max_of: &dyn Fn(&str) -> Option<usize>) -> Vec<Item> {
+    let key = |it: &Item| {
+        let mut i = it.input.clone();
+        if let Some(o) = i.as_object_mut() {
+            o.remove("seed");
+            o.remove("num_images");
+        }
+        (it.model.clone(), i.to_string())
+    };
+    let mut out: Vec<Item> = vec![];
+    // Open packed request per key: index into `out`.
+    let mut open: HashMap<(String, String), usize> = HashMap::new();
+    for it in items {
+        let max = max_of(&it.model).unwrap_or(1);
+        if max < 2 || it.nodes.len() != 1 {
+            out.push(it);
+            continue;
+        }
+        let k = key(&it);
+        match open.get(&k).copied() {
+            Some(i) if out[i].nodes.len() < max && out[i].parents == it.parents => {
+                out[i].nodes.extend(it.nodes);
+                let n = out[i].nodes.len();
+                out[i].input["num_images"] = json!(n);
+            }
+            _ => {
+                open.insert(k, out.len());
+                out.push(it);
+            }
+        }
+    }
+    out
+}
+
+async fn pack_items(http: &reqwest::Client, items: Vec<Item>) -> Vec<Item> {
+    // Only worth a schema lookup when some model has identical requests to merge.
+    let mut seen = std::collections::HashSet::new();
+    let mut models = std::collections::HashSet::new();
+    for it in &items {
+        let mut i = it.input.clone();
+        if let Some(o) = i.as_object_mut() {
+            o.remove("seed");
+        }
+        if it.nodes.len() == 1 && !seen.insert((it.model.clone(), i.to_string())) {
+            models.insert(it.model.clone());
+        }
+    }
+    if models.is_empty() {
+        return items;
+    }
+    let mut max = HashMap::new();
+    for m in models {
+        let v = num_images_max(http, &m).await;
+        max.insert(m, v);
+    }
+    let before = items.len();
+    let packed = pack(items, &|m| max.get(m).copied().flatten());
+    if packed.len() < before {
+        tracing::info!("batch: packed {before} requests into {} via num_images", packed.len());
+    }
+    packed
 }
 
 /// Parse `generate_batch` arguments into jobs: explicit `jobs`, or `model` + `input` ×
@@ -648,5 +809,24 @@ mod tests {
         let j = jobs_from(Some(vec![json!({"input": {"prompt": "x"}})]), Some("m".into()), None, None, None).unwrap();
         assert_eq!((j[0].0.as_str(), j[0].1["prompt"].as_str()), ("m", Some("x")));
         assert!(jobs_from(None, None, None, None, None).is_err());
+    }
+
+    #[test]
+    fn packs_identical_requests_into_num_images() {
+        let item = |prompt: &str, seed: i64, node: &str| Item {
+            model: "m".into(),
+            input: json!({"prompt": prompt, "seed": seed}),
+            name: String::new(),
+            nodes: vec![node.into()],
+            parents: vec![],
+        };
+        let items: Vec<Item> = (0..10).map(|i| item("p", i, &format!("n{i}"))).chain([item("other", 0, "x")]).collect();
+        let packed = pack(items.clone(), &|_| Some(4));
+        // 10 identical → 4 + 4 + 2; the distinct prompt stays alone.
+        assert_eq!(packed.iter().map(|i| i.nodes.len()).collect::<Vec<_>>(), vec![4, 4, 2, 1]);
+        assert_eq!(packed[0].input["num_images"], 4);
+        assert_eq!(packed[2].nodes, vec!["n8".to_string(), "n9".to_string()]);
+        // No num_images on the model: untouched.
+        assert_eq!(pack(items, &|_| None).len(), 11);
     }
 }

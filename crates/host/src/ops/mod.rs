@@ -889,6 +889,8 @@ pub struct Request {
     pub name: Option<String>,
     /// Role of the output node(s) (e.g. `final` for an export reframe).
     pub role: Option<String>,
+    /// Per-item pipeline run on each output as soon as it lands (`pipeline.rs`).
+    pub then: Vec<crate::pipeline::Step>,
 }
 
 /// A started op: placeholder ids at once; `wait` for the outcome.
@@ -1020,14 +1022,24 @@ pub fn start(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canvas: &st
     let host2 = host.clone();
     let actor2 = actor.clone();
     let role = req.role.clone();
+    let then = Arc::new(req.then);
+    let session2 = session.map(String::from);
     tokio::spawn(async move {
         let sem = Arc::new(Semaphore::new(3));
         let mut handles = vec![];
         for (job, node) in jobs.into_iter().zip(nodes) {
             let (host, actor, canvas, spec, args, role, sem) = (host2.clone(), actor2.clone(), canvas.clone(), spec.clone(), args.clone(), role.clone(), sem.clone());
+            let (then, session) = (then.clone(), session2.clone());
             handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await;
-                run_job(&host, &actor, &canvas, &spec, &args, job, &node, role).await
+                let mut r = {
+                    let _permit = sem.acquire().await;
+                    run_job(&host, &actor, &canvas, &spec, &args, job, &node, role).await
+                };
+                // The output flows on right away (its op slot is already free again).
+                if !then.is_empty() && r["status"] == "done" {
+                    r["then"] = crate::pipeline::run_chain(&host, &actor, session.as_deref(), &canvas, &node, &then).await;
+                }
+                r
             }));
         }
         let mut results = vec![];
@@ -1326,6 +1338,7 @@ pub async fn rerun(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canva
                 placement: Some(PlacementArgs { near: Some(vec![node.to_string()]), ..Default::default() }),
                 name: None,
                 role: None,
+                then: vec![],
             })?;
             Ok(run.summary(None))
         }
