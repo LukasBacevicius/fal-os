@@ -739,7 +739,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   flex-direction: column;
   gap: 8px;
   padding: 12px 16px 16px;
-  background: rgba(0, 0, 0, 0.94);
+  background: rgba(0, 0, 0, 0.97);
   color: #e6e6e6;
   animation: fade 120ms linear;
 }

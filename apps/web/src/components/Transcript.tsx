@@ -68,7 +68,7 @@ export function Md({ text, ids }: { text: string; ids: Set<string> }) {
         out.push(
           <div key={k} className="md-li" style={{ paddingLeft: `${Math.min(6, Math.floor(li_[1].length / 2)) * 2 + 2}ch` }}>
             <span className="md-bullet">{bullet}</span>
-            <Inline text={li_[3]} ids={ids} />
+            <span><Inline text={li_[3]} ids={ids} /></span>
           </div>,
         );
       } else if (h) {

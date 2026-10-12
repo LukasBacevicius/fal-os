@@ -92,7 +92,9 @@ const NOT_MEDIA = new Set(['frame', 'group', 'connector', 'generation', 'stream'
 /** Nodes the canvas preview can show (videos have their own focus view). */
 export function previewable(n: NodeView): boolean {
   if (NOT_MEDIA.has(n.kind) || n.kind === 'video') return false;
-  if (n.kind === 'note' || n.kind === 'text') return !!(n.props.asset || n.text);
+  if (n.kind === 'note') return false; // notes are edited in place
+  // Imported documents (.md / .txt carry a role), not canvas text such as Figma layers.
+  if (n.kind === 'text') return !!(n.props.asset || (n.props.role && n.text));
   return typeof n.props.asset === 'string';
 }
 
@@ -105,9 +107,12 @@ export function nodeItem(n: NodeView): PreviewItem {
   const mime = String(rec?.mime ?? info?.mime ?? '');
   const name = String(rec?.origin?.filename ?? info?.name ?? n.name ?? '') || n.name;
   const media = rec?.media ?? {};
+  let kind = previewKind(mime, name, n.kind);
+  // Imported .md / .txt become text nodes holding the text: markdown if it reads like it.
+  if (kind === 'text' && n.text && /^(#{1,6} |[-*+] |\d+[.)] |```|> )/m.test(n.text)) kind = 'markdown';
   return {
     key: n.id,
-    kind: previewKind(mime, name, n.kind),
+    kind,
     name: n.name || name,
     mime,
     url: asset ? app?.assetUrl(asset) ?? '' : '',
@@ -116,7 +121,7 @@ export function nodeItem(n: NodeView): PreviewItem {
     w: media.w ?? null,
     h: media.h ?? null,
     duration: media.duration ?? null,
-    text: n.kind === 'note' || (n.kind === 'text' && !asset) ? n.text : null,
+    text: (n.kind === 'note' || n.kind === 'text') && (!asset || n.text) ? n.text : null,
     node: n.id,
     sample: sampleImage(),
   };
