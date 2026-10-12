@@ -32,7 +32,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')
 # LED look.
 GAP = 0.09        # inset of each lit pixel, fraction of a cell (per side)
 RADIUS = 0.24     # pixel corner radius, fraction of a cell
-DIM = 0.28        # idle brightness
+DIM = 0.28        # idle brightness (app icon)
+FAVICON_DIM = 0.62  # idle favicon / UI mark opacity: softer than lit, still prominent
 BG_TOP, BG_BOTTOM = (34, 34, 37), (11, 11, 12)
 
 
@@ -169,21 +170,40 @@ def pixel_svg(grid, color='currentColor', gap=GAP, radius=RADIUS):
 
 
 def favicon_svg(grid, lit):
+    """Tab icon: just the LED mark on a transparent background (like fal.ai's own favicon).
+    White on dark tab bars, near-black on light ones. Lit = full + glow, idle = clearly visible
+    but softer (FAVICON_DIM), never washed out."""
     n = len(grid)
-    pad = 1.6
+    pad = 0.4
     v = n + 2 * pad
     g = 0.07
     s = 1 - 2 * g
     rects = ''.join(f'<rect x="{x + pad + g:.3g}" y="{y + pad + g:.3g}" width="{s:.3g}" height="{s:.3g}" rx=".2"/>'
                     for x, y in cells(grid))
-    glow = ('<filter id="g" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation=".45"/></filter>'
-            f'<g fill="#fff" opacity=".75" filter="url(#g)">{rects}</g>') if lit else ''
-    fill = '#fff' if lit else '#4a4a4c'
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {v:.3g} {v:.3g}">'
-            f'<defs><linearGradient id="b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#222225"/>'
-            f'<stop offset="1" stop-color="#0b0b0c"/></linearGradient></defs>'
-            f'<rect width="{v:.3g}" height="{v:.3g}" rx="{v * 0.22:.3g}" fill="url(#b)"/>'
-            f'{glow}<g fill="{fill}">{rects}</g></svg>\n')
+    style = ('<style>.m{fill:#fff}.g{fill:#fff}'
+             '@media (prefers-color-scheme: light){.m{fill:#111}.g{display:none}}</style>')
+    glow = ('<filter id="b" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation=".5"/></filter>'
+            f'<g class="g" opacity=".7" filter="url(#b)">{rects}</g>') if lit else ''
+    op = '' if lit else f' opacity="{FAVICON_DIM}"'
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {v:.3g} {v:.3g}">{style}'
+            f'{glow}<g class="m"{op}>{rects}</g></svg>\n')
+
+
+def favicon_png(grid, size, lit):
+    """PNG fallback of favicon_svg (transparent, white mark; idle at FAVICON_DIM alpha)."""
+    n = len(grid)
+    scale = 8
+    big = size * scale
+    pad = 0.4
+    cell = big / (n + 2 * pad)
+    im = Image.new('RGBA', (big, big), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    a = 255 if lit else int(255 * FAVICON_DIM)
+    for x, y in cells(grid):
+        x0 = (x + pad + 0.07) * cell
+        y0 = (y + pad + 0.07) * cell
+        d.rounded_rectangle([x0, y0, x0 + cell * 0.86, y0 + cell * 0.86], radius=cell * 0.2, fill=(255, 255, 255, a))
+    return im.resize((size, size), Image.LANCZOS)
 
 
 def build_font(grid, subpaths, ttf_path, woff2_path):
@@ -307,7 +327,7 @@ def main():
         tag = 'lit' if lit else 'dim'
         tile_icon(grid, 1024, lit).save(os.path.join(a.brand, f'icon-{tag}-1024.png'), optimize=True)
         open(os.path.join(a.web_public, f'favicon-{tag}.svg'), 'w').write(favicon_svg(grid, lit))
-        tile_icon(grid, 32, lit, favicon=True).save(os.path.join(a.web_public, f'favicon-{tag}-32.png'), optimize=True)
+        favicon_png(grid, 32, lit).save(os.path.join(a.web_public, f'favicon-{tag}-32.png'), optimize=True)
     # Dock icons (runtime swap) + bundle icon. 512 keeps the binary small; the Dock tile tops out near it.
     tile_icon(grid, 1024, True).save(os.path.join(a.icons, 'icon.png'), optimize=True)
     tile_icon(grid, 512, True).save(os.path.join(a.icons, 'dock-lit.png'), optimize=True)

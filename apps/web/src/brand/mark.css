@@ -13,7 +13,8 @@
   font: 400 14px/1 'falos-mark';
   width: 14px;
   margin-right: 7px;
-  color: var(--faint);
+  color: var(--text);
+  opacity: 0.62;
   text-shadow: 0 0 0 transparent;
   transition: color 600ms ease, text-shadow 600ms ease, opacity 600ms ease;
   user-select: none;
@@ -21,6 +22,7 @@
 
 .falos-mark.lit {
   color: var(--text);
+  opacity: 1;
   text-shadow: 0 0 3px rgba(255, 255, 255, 0.55), 0 0 9px rgba(255, 255, 255, 0.28);
   animation: falos-mark-breathe 2.8s ease-in-out 600ms infinite;
 }
