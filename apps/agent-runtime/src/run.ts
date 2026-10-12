@@ -325,6 +325,21 @@ export class ChatRun {
     }
   }
 
+  /** Subagents killed by the CLI's stream watchdog (a hung model stream, not a bad step) are
+   *  resumed once automatically instead of waiting for the user to type "continue". */
+  private stallRetries = new Map<string, number>();
+  private recoverStall(agent: string, status: unknown, summary: string) {
+    if (status === "completed" || !/stall|watchdog|no progress/i.test(summary)) return;
+    const n = this.stallRetries.get(agent) ?? 0;
+    if (n >= 1) return;
+    this.stallRetries.set(agent, n + 1);
+    this.emit({ kind: "status", state: "running", recovering: true, error: `${agent} stalled — resuming it` } as any);
+    this.pushUser(
+      `[auto-recover] The ${agent} subagent was stopped by a stream watchdog (the model stream hung — not a mistake in its work). Resume ${agent} now with SendMessage so it continues from its last completed step (don't restart from scratch), and keep going.`,
+      "next",
+    );
+  }
+
   private pushUser(text: string, priority: "now" | "next") {
     if (!this.input || this.input.isClosed) return;
     this.idle = false;
@@ -737,6 +752,7 @@ export class ChatRun {
           if (agent) {
             this.running.delete(agent);
             this.emit({ kind: "agent", agent, state: s.status === "completed" ? "done" : "failed", status: stripAgent(String(s.summary ?? s.status).replace(/\s+/g, " "), agent).slice(0, 160) });
+            this.recoverStall(agent, s.status, String(s.summary ?? ""));
           }
         }
         break;
