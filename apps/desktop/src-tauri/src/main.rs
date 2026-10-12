@@ -11,6 +11,7 @@
 //! "Out" commands (docs/ASSETS-V1.md §7): `drag_out`, `copy_files`, `copy_image`,
 //! `open_with_list`, `open_with`, `reveal`, `materialize` (see `out.rs`).
 
+mod brand;
 mod out;
 
 use std::path::PathBuf;
@@ -181,6 +182,12 @@ fn reveal(path: String) -> Result<(), String> {
     tauri_plugin_opener::reveal_item_in_dir(&p[0]).map_err(|e| e.to_string())
 }
 
+/// Dock icon follows the web app's working state: lit while agents work, dimmed when idle.
+#[tauri::command]
+fn set_working(app: tauri::AppHandle, working: bool) -> Result<(), String> {
+    app.run_on_main_thread(move || brand::set_dock_icon(working)).map_err(|e| e.to_string())
+}
+
 fn main() {
     let side = Arc::new(Sidecar::new());
     tauri::Builder::default()
@@ -201,7 +208,8 @@ fn main() {
             forget_fal_key,
             check_fal_key,
             install_extras,
-            restart_host
+            restart_host,
+            set_working
         ])
         .setup(|app| {
             // Packaged app: start the host (and through it the agent runtime) off the main thread.

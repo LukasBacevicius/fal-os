@@ -1,0 +1,37 @@
+/* The fal LED mark (components/Mark.tsx). The one deliberate glow in the UI: it means
+   "agents are working". */
+@font-face {
+  font-family: 'falos-mark';
+  src: url('./falos-mark.woff2') format('woff2');
+  font-display: block;
+  unicode-range: U+E000-E001;
+}
+
+.falos-mark {
+  display: inline-block;
+  flex: none;
+  font: 400 14px/1 'falos-mark';
+  width: 14px;
+  margin-right: 7px;
+  color: var(--faint);
+  text-shadow: 0 0 0 transparent;
+  transition: color 600ms ease, text-shadow 600ms ease, opacity 600ms ease;
+  user-select: none;
+}
+
+.falos-mark.lit {
+  color: var(--text);
+  text-shadow: 0 0 3px rgba(255, 255, 255, 0.55), 0 0 9px rgba(255, 255, 255, 0.28);
+  animation: falos-mark-breathe 2.8s ease-in-out 600ms infinite;
+}
+
+[data-theme='light'] .falos-mark.lit { text-shadow: none; }
+
+@keyframes falos-mark-breathe {
+  50% { opacity: 0.78; text-shadow: 0 0 2px rgba(255, 255, 255, 0.4), 0 0 6px rgba(255, 255, 255, 0.16); }
+}
+
+.falos-mark.still { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .falos-mark.lit { animation: none; }
+}

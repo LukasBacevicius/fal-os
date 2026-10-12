@@ -7,6 +7,7 @@ import {
 import { ago } from './ChatTabs';
 import { fuzzy } from './Palette';
 import { MOD } from '../keys';
+import { WorkingMark } from './Mark';
 
 export const openPicker = () => setState((s) => ({ overlay: s.overlay === 'projects' ? null : 'projects' }));
 
@@ -29,10 +30,11 @@ export function ProjectHeader({ floating = false }: { floating?: boolean }) {
   const p = projects.find((x) => x.id === id);
   // Older host (no /workspace) or local-only: nothing to switch, keep the chrome quiet.
   if (!p && (workspace !== 'connected' || conn === 'local')) {
-    return floating ? null : <span className="dim">layers</span>;
+    return floating ? null : <span className="dim project-head"><WorkingMark />layers</span>;
   }
   return (
     <button className={`link project-head ${floating ? 'project-float' : ''}`} onClick={openPicker} title={`switch project (${MOD}O)`}>
+      <WorkingMark />
       <span className="project-name">{p?.name ?? '…'}</span>
       {p?.fal_project && <span className="faint" title={`linked to fal project ${p.fal_project}`}>{'\u00a0· fal'}</span>}
       <span className="faint">{'\u00a0▾'}</span>

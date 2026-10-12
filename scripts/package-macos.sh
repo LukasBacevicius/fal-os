@@ -120,15 +120,8 @@ cp -R apps/agent-runtime/motion-template/src apps/agent-runtime/motion-template/
   apps/agent-runtime/motion-template/tsconfig.json apps/agent-runtime/motion-template/remotion.config.ts "$R/motion-template/"
 cp apps/agent-runtime/hyperframes-template/index.html apps/agent-runtime/hyperframes-template/package.json "$R/hyperframes-template/"
 
-# Icon.
-ICONSET=$(mktemp -d)/icon.iconset
-mkdir -p "$ICONSET"
-for s in 16 32 128 256 512; do
-  sips -z $s $s apps/desktop/src-tauri/icons/icon.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-  d=$((s * 2)); [ $d -le 512 ] && sips -z $d $d apps/desktop/src-tauri/icons/icon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$C/Resources/icon.icns"
-rm -rf "$(dirname "$ICONSET")"
+# Icon: the LED fal mark, all sizes 16-1024 (assets/brand/tools/generate.py renders it).
+cp apps/desktop/src-tauri/icons/icon.icns "$C/Resources/icon.icns"
 
 cat > "$C/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
