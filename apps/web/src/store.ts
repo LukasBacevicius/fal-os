@@ -84,10 +84,37 @@ export interface State {
     connected: Record<string, { agentName: string; session: string }>;
     firstWrite: Record<string, string[]>;
   };
+  /** "Use fal-os from your own Claude / Codex" (host `director.status`): per-target state. */
+  director: DirectorStatus | null;
   /** Asset library: the left-panel tab (⌘⇧A) or the full-screen view (⌘⇧L). */
   library: 'panel' | 'full' | null;
   toast: string | null;
   saved: 'idle' | 'saving' | 'saved';
+}
+
+export interface DirectorFile {
+  path: string;
+  what: 'mcp' | 'skill';
+  state: 'connected' | 'outdated' | 'not-installed';
+  connect: 'create' | 'update' | 'none';
+  disconnect: 'remove' | 'none';
+  problem?: string;
+}
+export interface DirectorTarget {
+  id: 'claude-code' | 'claude-desktop' | 'codex';
+  label: string;
+  detected: boolean;
+  transport: 'stdio' | 'http';
+  state: DirectorFile['state'];
+  files: DirectorFile[];
+}
+export interface DirectorStatus {
+  targets: DirectorTarget[];
+  home?: string;
+  changed?: string[];
+  error?: string;
+  /** A connect/disconnect is in flight. */
+  busy?: boolean;
 }
 
 let state: State = {
@@ -155,6 +182,7 @@ let state: State = {
     }
   })(),
   connect: { registered: {}, connected: {}, firstWrite: {} },
+  director: null,
   outlineOpen: (() => {
     try {
       const v = localStorage.getItem('falos.outline');

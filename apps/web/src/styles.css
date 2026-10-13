@@ -535,6 +535,10 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .err { color: var(--text); }
 .setup { min-height: 0; }
 .setup-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.director { display: flex; flex-direction: column; gap: 2px; }
+.director-row { display: flex; gap: 2ch; align-items: baseline; }
+.director-row > .link { width: 24ch; text-align: left; color: var(--text); }
+.director-files { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
 .setup-input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); padding: 2px 6px; outline: none; }
 .setup-input:focus { border-color: var(--dim); }
 .setup-log { margin: 4px 0 0; font: inherit; color: var(--faint); white-space: pre-wrap; word-break: break-all; }

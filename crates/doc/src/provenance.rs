@@ -93,6 +93,9 @@ pub struct Origin {
     /// The app it came from (`figma`, `finder`, `premiere`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    /// Free-form provenance note ("color pass in Resolve on the hero cut").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Actor id.
     #[serde(default)]
     pub imported_by: String,

@@ -69,6 +69,21 @@ pub fn agent_register(host: &Host, msg: &serde_json::Value) -> serde_json::Value
     }
 }
 
+fn director_frame(t: &str) -> Option<serde_json::Value> {
+    let m: serde_json::Value = serde_json::from_str(t).ok()?;
+    matches!(m["type"].as_str(), Some("director.status" | "director.connect" | "director.disconnect")).then_some(m)
+}
+
+/// `director.status` / `director.connect` / `director.disconnect` (see `connect.rs`): use
+/// fal-os from the user's own Claude Code, Claude desktop app and Codex.
+pub fn director(host: &Host, msg: &serde_json::Value) -> serde_json::Value {
+    let Some(home) = host.opts.home.clone() else {
+        return json!({"type": "director.status", "targets": [], "error": "HOME is not set"});
+    };
+    let ctx = crate::connect::Ctx::for_host(home, host.endpoint.lock().unwrap().clone());
+    crate::connect::handle(&ctx, msg)
+}
+
 /// `/sync/<project>` (workspace) or `/sync/<canvas>` (single-project mode and older clients:
 /// a canvas of the default project).
 pub async fn handler(
@@ -172,6 +187,10 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                 Some(Ok(Message::Text(t))) if t.contains("agent.register") && serde_json::from_str::<serde_json::Value>(&t).is_ok_and(|m| m["type"] == "agent.register") => {
                     let m: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
                     let reply = agent_register(&host, &m);
+                    let _ = send_json(&mut socket, reply).await;
+                }
+                Some(Ok(Message::Text(t))) if t.contains("director.") && let Some(m) = director_frame(&t) => {
+                    let reply = tokio::task::block_in_place(|| director(&host, &m));
                     let _ = send_json(&mut socket, reply).await;
                 }
                 Some(Ok(Message::Text(t))) if let Some(m) = crate::chat::chat_frame(&t) => {

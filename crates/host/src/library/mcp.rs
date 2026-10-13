@@ -123,6 +123,36 @@ impl CanvasMcp {
     fn check_session(&self, sid: &str) -> Result<falos_doc::Actor> {
         self.host().actor(sid)
     }
+
+    /// `get_asset` from this project's canvases (a node id or `sha256:…`): the asset record,
+    /// the node(s) showing it and the original's absolute `file`.
+    fn asset_from_doc(&self, key: &str) -> Option<Json> {
+        let host = self.host();
+        let canvases: Vec<String> = host.project().canvases.iter().map(|c| c.id.clone()).collect();
+        for canvas in canvases {
+            let found = host
+                .read(&canvas, |c| {
+                    let (node, id) = match c.node(key) {
+                        Some(n) => (Some(n.id.clone()), n.asset_id()?.to_string()),
+                        None => (None, c.asset(key).map(|a| a.id)?),
+                    };
+                    Some((node, c.asset(&id).unwrap_or_else(|| falos_doc::Asset { id: id.clone(), ..Default::default() })))
+                })
+                .ok()
+                .flatten();
+            if let Some((node, asset)) = found {
+                let file = crate::chat::asset_file(host, &asset.id).and_then(|p| std::path::absolute(p).ok());
+                return Some(json!({
+                    "sha": asset.id, "mime": asset.mime, "source": asset.source, "uri": asset.uri,
+                    "origin": asset.origin, "lineage": asset.lineage, "media": asset.media,
+                    "nodes": node.map(|n| vec![json!({"project": host.id, "canvas": canvas, "node": n})]).unwrap_or_default(),
+                    "file": file.map(|f| f.display().to_string()),
+                    "indexed": false,
+                }));
+            }
+        }
+        None
+    }
 }
 
 #[tool_router(router = library_tools, vis = "pub(crate)")]
@@ -167,15 +197,23 @@ impl CanvasMcp {
     }
 
     #[tool(
-        description = "Everything about one asset: kind, size, source, prompt, model, lineage, palette, tags, collections, placements (which canvases/nodes show it) and fal status. Accepts a sha (or prefix) or a node id.",
+        description = "Everything about one asset: kind, size, source, prompt, model, lineage, palette, tags, collections, placements (which canvases/nodes show it), fal status and `file`: the absolute path of the original on disk (copy or `export` it before editing it in another app). Accepts a sha (or prefix) or a node id.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn get_asset(&self, Parameters(a): Parameters<GetAssetArgs>) -> CallToolResult {
         let r = (|| {
             self.check_session(&a.session_id)?;
-            let lib = self.library()?;
-            let d = lib.detail(&a.asset, Some(&self.host().id))?;
-            Ok(serde_json::to_string_pretty(&d)?)
+            let lib = self.library();
+            let d = lib.as_ref().map_err(|e| anyhow::anyhow!("{e:#}")).and_then(|lib| lib.detail(&a.asset, Some(&self.host().id)));
+            match d {
+                Ok(d) => Ok(serde_json::to_string_pretty(&d)?),
+                // Not indexed yet (the library catches up in the background) or no library:
+                // answer from the project's canvases.
+                Err(e) => match self.asset_from_doc(&a.asset) {
+                    Some(d) => Ok(serde_json::to_string_pretty(&d)?),
+                    None => Err(e),
+                },
+            }
         })();
         self.finish(Some(&a.session_id), r)
     }

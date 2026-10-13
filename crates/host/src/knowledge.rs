@@ -13,9 +13,14 @@ const DOCS: &[(&str, &str)] = &[
     ("assets", include_str!("../knowledge/assets.md")),
     ("export", include_str!("../knowledge/export.md")),
     ("apps", include_str!("../knowledge/apps.md")),
+    ("director", include_str!("../knowledge/director.md")),
 ];
 
-pub const KEYS: &[&str] = &["format", "annotations", "generation", "collaboration", "assets", "export", "apps"];
+pub const KEYS: &[&str] = &["format", "annotations", "generation", "collaboration", "assets", "export", "apps", "director"];
+
+/// The director workflow (external Claude Code / Codex driving fal-os and other apps); also
+/// the body of the installed `fal-os` skill (`connect`).
+pub const DIRECTOR: &str = include_str!("../knowledge/director.md");
 
 pub fn get(keys: &[String]) -> Result<String> {
     let mut out = vec![];

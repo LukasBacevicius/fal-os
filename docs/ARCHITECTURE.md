@@ -127,7 +127,7 @@ Annotation {
 ## How agents connect (v1)
 1. **Localhost MCP server** in the app.
    - Streamable HTTP, with a per-install token and Origin/Host checks; plus a stdio shim.
-   - The app auto-registers itself in Claude Code, Codex, Cursor and Gemini configs, treating each config file as the source of truth.
+   - The app registers itself in Claude Code, the Claude app, Codex, Cursor, Gemini and OpenCode configs on a click, treating each config file as the source of truth (see [Director agents](#director-agents-the-users-own-claude--codex)).
    - Tools:
      - `session(agentName)` → session id plus cursor
      - `read` / `edit` (symmetric text projection)
@@ -151,6 +151,41 @@ Annotation {
 4. **Later:** ACP client and Codex app-server so external agents run inside our UI; remote MCP with OAuth for claude.ai and ChatGPT; MCP Apps views.
 
 **Easy for computer-use agents to drive:** an accessibility mirror of canvas nodes with semantic labels, a command palette for everything, a status bar showing coordinates, zoom and selection, `falos://` deep links, and an MCP endpoint they can discover.
+
+## Director agents (the user's own Claude / Codex)
+The user's own Claude Code, Claude desktop app or Codex is often the *director*: it decides what to
+do, uses fal-os for generation, assets and the canvas, and drives other apps (video editors, DAWs,
+Figma) itself, moving files between them. fal-os builds no editor integrations; it makes that agent
+capable.
+
+- **One click** (Connect → "Claude + Codex", or Setup step 5; CLI `falos-host connect [--target …]
+  [--status|--disconnect]`; host `connect.rs`, sync frames `director.*`). Per target, after a click
+  that lists the exact files:
+  - Claude Code: `mcpServers.fal-os` in `~/.claude.json` (user scope) + `~/.claude/skills/fal-os/SKILL.md`.
+  - Claude desktop app: `mcpServers.fal-os` in `~/Library/Application Support/Claude/claude_desktop_config.json` (stdio only; no skill folder: it gets the server instructions and `get_knowledge("director")`).
+  - Codex: `[mcp_servers.fal-os]` in `~/.codex/config.toml` (toml_edit, comments kept) with
+    `default_tools_approval_mode = "approve"` + `~/.codex/skills/fal-os/SKILL.md` (Codex 0.160/0.162
+    load user skills from both `~/.codex/skills` and `~/.agents/skills`; verified with `skills/list`).
+  - Entry: packaged → stdio `…/fal-os.app/Contents/MacOS/falos-host mcp` (reads host.json, so it
+    survives port/token changes and re-initializes after a host restart); dev → HTTP URL + token
+    (`--stdio` or `FALOS_CONNECT_STDIO=1` forces stdio). Status per target: connected / outdated /
+    not installed; `disconnect` removes the `fal-os` entry and the skill only if it still carries
+    fal-os's marker line.
+  - The skill body is `crates/host/knowledge/director.md` (also `get_knowledge("director")`), so it
+    doesn't drift from the host.
+- **Round-trip tools:** `export` → absolute `files[].path`; `get_asset(node)` → `file` (original's
+  absolute path; works before the library has indexed it); `import_file(path, sourceApp, note,
+  lineage.parents, role)` → origin `{app, note}` on the asset, placed next to its parents.
+- **Computer use (facts as of Codex CLI 0.160.1/0.162.1, Claude Code 2.1.289, 2026-10):**
+  - *Claude Code:* built in on macOS. Interactive session → `/mcp` → `computer-use` → Enable
+    (per project), then grant Accessibility + Screen Recording. Pro/Max plan with a claude.ai login;
+    not in `-p` mode. (`--chrome` is the separate, browser-only Claude in Chrome.)
+  - *Claude desktop app:* Settings → This computer (toggle).
+  - *Codex:* "always has computer use" is not right for the CLI. `codex features list` shows
+    `computer_use stable true`, but the tool ships as a plugin (`computer-use@openai-bundled`) that
+    needs the Codex / ChatGPT desktop app's helper: in the app, Plugins → Computer Use → Install,
+    then grant Screen Recording + Accessibility. From a plain npm/Homebrew `codex` it doesn't work
+    (openai/codex#19544, #20851). The Codex desktop app is not installed on the dev Mac.
 
 ## Data & performance
 - **Loro, one doc per canvas.**

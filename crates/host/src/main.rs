@@ -46,6 +46,24 @@ enum Cmd {
     /// Stdio MCP server: relays stdin/stdout to the running host's /mcp (for clients that
     /// prefer stdio). Reads ~/.fal-os/host.json.
     Mcp,
+    /// Use fal-os from your own Claude Code / Claude desktop app / Codex: register the MCP
+    /// server (stdio relay when packaged) and install the `fal-os` skill. `--status` only
+    /// reports; `--disconnect` removes exactly what connect added.
+    Connect {
+        /// Targets (default: all).
+        #[arg(long = "target", value_enum)]
+        targets: Vec<falos_host::connect::Target>,
+        #[arg(long, conflicts_with = "disconnect")]
+        status: bool,
+        #[arg(long)]
+        disconnect: bool,
+        /// Home folder whose configs are edited (default $HOME; for tests).
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// Register the stdio relay even from a dev build (`<this binary> mcp`).
+        #[arg(long)]
+        stdio: bool,
+    },
     /// Add/update the fal-os MCP server in an agent client's config.
     Register {
         #[arg(long, value_enum)]
@@ -167,6 +185,30 @@ async fn main() -> Result<()> {
                 .await?;
             let status = res.status();
             println!("fal queue API with bearer token: {status} {}", res.text().await.unwrap_or_default());
+        }
+        Cmd::Connect { targets, status, disconnect, home, stdio } => {
+            use falos_host::connect::{self, Target};
+            let home = match home {
+                Some(h) => h,
+                None => std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?,
+            };
+            let http = HostFile::load().map(|h| (h.url, h.token));
+            let mut ctx = connect::Ctx::for_host(home, http);
+            ctx.prefer_stdio |= stdio;
+            let targets = if targets.is_empty() { Target::ALL.to_vec() } else { targets };
+            for t in targets {
+                if !status {
+                    let changed = if disconnect { connect::disconnect(t, &ctx)? } else { connect::connect(t, &ctx)? };
+                    for p in changed {
+                        println!("{}: wrote {}", t.id(), p);
+                    }
+                }
+                let s = connect::status(t, &ctx);
+                println!("{} ({}): {}", s.label, s.transport, serde_json::to_value(s.state)?.as_str().unwrap_or_default());
+                for f in &s.files {
+                    println!("  {} {}{}", f.what, f.path, f.problem.as_ref().map(|p| format!(" ({p})")).unwrap_or_default());
+                }
+            }
         }
         Cmd::Register { client, dry_run } => {
             let token = server::load_or_create_token()?;

@@ -8,6 +8,7 @@ pub mod assets;
 pub mod auth;
 pub mod batch;
 pub mod chat;
+pub mod connect;
 pub mod context;
 pub mod fal;
 pub mod fal_relay;
