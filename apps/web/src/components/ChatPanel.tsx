@@ -165,7 +165,7 @@ function Composer({ running, readOnly, question, agent, queued }: {
           ))}
         </div>
       )}
-      <Chips chips={chat.chips} onRemove={removeChip} />
+      <Chips chips={chat.chips} onRemove={removeChip} onClear={() => setState((s) => ({ chat: { ...s.chat, chips: [] } }))} />
       {!readOnly && unattached > 0 && (
         <div className="sel-add">
           <button className="link faint" title={`add the canvas selection to the chat (${mod}L)`} onMouseDown={(e) => e.preventDefault()} onClick={addSelectionToChat}>

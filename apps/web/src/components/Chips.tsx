@@ -21,13 +21,29 @@ function Preview({ url, at }: { url: string; at: DOMRect }) {
   return <img className="chip-preview" src={url} alt="" style={{ top, left, width: size, height: size }} />;
 }
 
-function ChipView({ c, nodes, onRemove }: { c: Chip; nodes: Map<string, NodeView>; onRemove?: () => void }) {
+function ChipView({ c, nodes, onRemove, compact }: { c: Chip; nodes: Map<string, NodeView>; onRemove?: () => void; compact?: boolean }) {
   const chat = useStore((s) => s.chat);
   const [hover, setHover] = useState<DOMRect | null>(null);
   const n = c.kind === 'chat' ? null : nodes.get(c.node);
   const url = c.kind === 'node' ? thumbUrl(n) : null;
   const go = () => (c.kind === 'chat' ? openChat(c.chat) : n && focusNode(n.id));
   const label = chipLabel(c, n, c.kind === 'chat' ? chatTitle(chat, c.chat) : undefined);
+  if (url && compact) {
+    // Many chips: thumbnail only (name on hover), × on hover.
+    return (
+      <span
+        className="chip chip-img chip-thumb"
+        onMouseEnter={(e) => setHover(e.currentTarget.getBoundingClientRect())}
+        onMouseLeave={() => setHover(null)}
+      >
+        <button className="link chip-img-btn" onClick={go} title={n ? `${n.name || n.id} · pan to it` : ''}>
+          <img src={url} alt="" width={24} height={24} />
+        </button>
+        {onRemove && <button className="link chip-x" onClick={onRemove} title="remove">×</button>}
+        {hover && <Preview url={url} at={hover} />}
+      </span>
+    );
+  }
   if (url) {
     return (
       <span
@@ -56,13 +72,22 @@ function ChipView({ c, nodes, onRemove }: { c: Chip; nodes: Map<string, NodeView
 
 /** Context chips: image chips show a 24 px thumbnail (hover: preview), others are bracketed
  *  text. Click pans to the node (or opens the chat). */
-export function Chips({ chips, onRemove }: { chips: Chip[]; onRemove?: (i: number) => void }) {
+export function Chips({ chips, onRemove, onClear }: { chips: Chip[]; onRemove?: (i: number) => void; onClear?: () => void }) {
   const list = useStore((s) => s.nodes);
   if (!chips.length) return null;
   const nodes = new Map(list.map((n) => [n.id, n]));
+  // Past a handful, image chips collapse to thumbnails in a capped, scrolling strip.
+  const compact = chips.length > 6;
   return (
-    <div className="chips">
-      {chips.map((c, i) => <ChipView key={`${i}-${JSON.stringify(c)}`} c={c} nodes={nodes} onRemove={onRemove ? () => onRemove(i) : undefined} />)}
-    </div>
+    <>
+      {compact && onClear && (
+        <div className="chips-head faint">
+          {chips.length} attached · <button className="link faint" onClick={onClear} title="remove all">[clear]</button>
+        </div>
+      )}
+      <div className={`chips${compact ? ' chips-compact' : ''}`}>
+        {chips.map((c, i) => <ChipView key={`${i}-${JSON.stringify(c)}`} c={c} nodes={nodes} compact={compact} onRemove={onRemove ? () => onRemove(i) : undefined} />)}
+      </div>
+    </>
   );
 }

@@ -472,6 +472,13 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .chip-img-btn:hover { border-color: var(--dim); text-decoration: none; }
 .chip-img img { display: block; width: 24px; height: 24px; object-fit: cover; }
 .chip-img-name { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; }
+.chat-input .chips { max-height: 92px; overflow-y: auto; }
+.chips-compact { gap: 4px; }
+.chips-head { font-size: 11px; margin-bottom: 2px; }
+.chip-thumb .chip-img-btn { padding: 1px; }
+.chip-thumb .chip-x { display: none; position: absolute; top: -4px; right: -4px; background: var(--panel); line-height: 1; padding: 0 2px; margin: 0; }
+.chip-thumb:hover .chip-x { display: block; }
+.chat-input { max-height: 55%; display: flex; flex-direction: column; }
 .chip-preview { position: fixed; z-index: 40; object-fit: contain; background: var(--panel); border: 1px solid var(--line); pointer-events: none; }
 .complete > div { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
