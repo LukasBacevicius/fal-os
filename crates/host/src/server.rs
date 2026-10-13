@@ -292,6 +292,7 @@ pub fn router(space: Arc<Workspace>, token: &str, ct: CancellationToken) -> Rout
         .merge(crate::runtime::routes())
         .merge(crate::out::routes())
         .merge(crate::ops::rest::routes())
+        .merge(crate::tray::routes())
         .with_state(space)
         .nest_service("/mcp", mcp)
         .layer(middleware::from_fn_with_state(

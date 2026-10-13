@@ -10,7 +10,8 @@ Outputs (paths overridable):
                        falos-mark.ttf / .woff2 (U+E000 pixel mark, U+E001 smooth mark)
   apps/web/public/     favicon-{lit,dim}.svg, favicon-{lit,dim}-32.png
   apps/web/src/brand/  falos-mark.woff2 (copy the UI loads via @font-face)
-  apps/desktop/src-tauri/icons/  icon.png (1024 lit), icon-dim.png, icon.icns (16-1024 @1x/@2x)
+  apps/desktop/src-tauri/icons/  icon.png (1024 lit), icon.icns (16-1024 @1x/@2x),
+                       tray.png / tray-working.png (menu bar template images, see tray_png)
 
 Needs Pillow + numpy; the font needs fontTools (+ brotli for woff2).
 """
@@ -217,6 +218,25 @@ def favicon_png(grid, size, lit):
     return im.resize((size, size), Image.LANCZOS)
 
 
+def tray_png(grid, size=36, working=False):
+    """Menu bar item: the mark alone as a black-on-transparent template image (macOS tints it for
+    light / dark menu bars). tray-icon draws it 18 pt tall, so 36 px is pixel-exact at 2x: each
+    LED is a solid 2 px cell (a gap would vanish at this size), the mark 26 px, centred.
+    `working`: one more LED block lights in the hole: the shell swaps to it while agents work."""
+    n = len(grid)
+    c = max(1, round(size * 26 / 36 / n))
+    off = (size - n * c) // 2
+    im = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    for x, y in cells(grid):
+        d.rectangle([off + x * c, off + y * c, off + (x + 1) * c - 1, off + (y + 1) * c - 1], fill=(0, 0, 0, 255))
+    if working:
+        k = n // 2 - 1  # 3x3 cells in the middle of the hole
+        d.rounded_rectangle([off + k * c, off + k * c, off + (k + 3) * c - 1, off + (k + 3) * c - 1],
+                            radius=c * 0.75, fill=(0, 0, 0, 255))
+    return im
+
+
 def build_font(grid, subpaths, ttf_path, woff2_path):
     from fontTools.fontBuilder import FontBuilder
     from fontTools.pens.ttGlyphPen import TTGlyphPen
@@ -342,6 +362,8 @@ def main():
     # Dock icons (runtime swap) + bundle icon. 512 keeps the binary small; the Dock tile tops out near it.
     tile_icon(grid, 1024, True).save(os.path.join(a.icons, 'icon.png'), optimize=True)
     write_icns(grid, os.path.join(a.icons, 'icon.icns'))
+    tray_png(grid).save(os.path.join(a.icons, 'tray.png'), optimize=True)
+    tray_png(grid, working=True).save(os.path.join(a.icons, 'tray-working.png'), optimize=True)
     ttf, woff2 = os.path.join(a.brand, 'falos-mark.ttf'), os.path.join(a.brand, 'falos-mark.woff2')
     build_font(grid, subpaths, ttf, woff2)
     shutil.copyfile(woff2, os.path.join(a.web_src, 'falos-mark.woff2'))

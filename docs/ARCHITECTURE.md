@@ -214,6 +214,13 @@ capable.
 
 Either way, the engine, doc and host crates are identical. Only the chrome differs, and the canvas-level UI is drawn by the engine in both, so the chrome stays thin.
 
+**Background layer (desktop).** The app is an always-there layer, not just a window: closing
+the window only hides it, so the host, the agent runtime, chat runs and generation batches keep
+going. A menu bar item (the LED mark as a template image; one more LED lights while agents
+work) lists the active runs, in-flight generations and recently finished runs from the host's
+`GET /api/status`, and quiet native notifications say when a run finishes or needs the user.
+No global hotkey. Details: [PACKAGING.md §4](PACKAGING.md#4-proof-of-concept-this-repo).
+
 ## v1 milestones
 1. **Spike (week 1):** engine renders 10k image quads plus video in both native Metal and wasm/WebGPU (inside WKWebView and Chrome). Measure fps and RAM to settle Decision 1 with data.
 2. **Canvas core:** projects and canvases, drag and drop import of all modalities, select/move/resize, frames, connectors, Loro doc, undo, local project folder.

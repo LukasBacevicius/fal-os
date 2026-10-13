@@ -352,6 +352,9 @@ pub struct Host {
     pub endpoint: Mutex<Option<(String, String)>>,
     /// Running and finished batch generations (`generate_batch`).
     pub batches: crate::batch::Batches,
+    /// Single generation / op jobs in flight: node → `queued` | `running` (from `Event::Job`;
+    /// the tray's "12 generating · 3 queued").
+    pub jobs: Mutex<HashMap<String, String>>,
     /// Running and finished op runs (`transform` / `compose`).
     pub ops_runs: crate::ops::Runs,
     /// App nodes: versions, logs, checks (see `apps`).
@@ -428,6 +431,7 @@ impl Host {
             chat: crate::chat::ChatHub::new(link),
             endpoint: Mutex::default(),
             batches: Default::default(),
+            jobs: Mutex::default(),
             ops_runs: Default::default(),
             apps: Default::default(),
             sweeper: std::sync::Once::new(),
@@ -501,6 +505,17 @@ impl Host {
     }
 
     pub fn emit(&self, e: Event) {
+        if let Event::Job { node, status, .. } = &e {
+            let mut jobs = self.jobs.lock().unwrap();
+            match status.as_str() {
+                "queued" | "running" => {
+                    jobs.insert(node.clone(), status.clone());
+                }
+                _ => {
+                    jobs.remove(node);
+                }
+            }
+        }
         let _ = self.events.send(e);
     }
 

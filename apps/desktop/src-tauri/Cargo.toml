@@ -12,9 +12,11 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# "open at login" (Setup, tray): a LaunchAgent that starts the app hidden (`--hidden`).
+tauri-plugin-autostart = "2"
 # drag-rs: native drag of file URLs out of the window (docs/ASSETS-V1.md §4).
 drag = "2.1"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +29,9 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 libc = "0.2"
+# Run-done / needs-you notifications with click-through (UNUserNotificationCenter).
+objc2-user-notifications = "0.3"
+block2 = "0.6"
 
 [features]
 # `cargo build --features custom-protocol` (what `cargo tauri build` does) serves

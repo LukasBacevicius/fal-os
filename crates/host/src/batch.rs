@@ -119,6 +119,14 @@ impl Batches {
     pub fn get(&self, id: &str) -> Option<Arc<Batch>> {
         self.0.lock().unwrap().get(id).cloned()
     }
+
+    /// Unfinished batches' `(generating, queued)` requests (chains count as generating).
+    pub fn in_flight(&self) -> (usize, usize) {
+        self.0.lock().unwrap().values().map(|b| b.progress()).filter(|p| !p.finished).fold((0, 0), |(g, q), p| {
+            let queued = p.total.saturating_sub(p.done + p.failed + p.running);
+            (g + p.running + p.chains_running, q + queued)
+        })
+    }
 }
 
 /// Requested batch, before placement.

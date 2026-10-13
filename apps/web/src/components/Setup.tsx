@@ -76,6 +76,27 @@ function TaskLog({ t, n = 4 }: { t: Task; n?: number }) {
   return <pre className="setup-log">{t.lines.slice(-n).join('\n')}</pre>;
 }
 
+/** "open at login" (tauri-plugin-autostart): a LaunchAgent that starts fal-os hidden, with
+ *  just the menu bar item and the host running. Off by default. */
+function OpenAtLogin() {
+  const [on, setOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    invoke('plugin:autostart|is_enabled')?.then((v) => setOn(!!v), () => setOn(null));
+  }, []);
+  if (on === null) return null;
+  const toggle = () =>
+    invoke(on ? 'plugin:autostart|disable' : 'plugin:autostart|enable')?.then(
+      () => setOn(!on),
+      (e) => toast(`open at login: ${e}`),
+    );
+  return (
+    <div className="setup-row">
+      <button className="link dim" onClick={toggle}>{box(on)} open at login</button>
+      <span className="faint">starts hidden in the menu bar; agents keep running when the window is closed</span>
+    </div>
+  );
+}
+
 /** A sign-in that failed (not cancelled): the Terminal command as a last resort. */
 function Fallback({ t, cmd }: { t: Task; cmd: string }) {
   if (!t || t.running || !t.code || t.code < 0) return null;
@@ -423,6 +444,8 @@ export function Setup() {
               <DirectorConnect />
             </div>
           </div>
+
+          <OpenAtLogin />
 
           {ready ? (
             <div className="setup-row">

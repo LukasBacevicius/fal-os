@@ -840,3 +840,36 @@ async fn multi_chat_and_cross_chat() {
     );
     assert!(env.host.dir().join(format!("chats/{a}.jsonl")).exists());
 }
+
+/// `GET /api/status` (the desktop tray): a running chat with its step, then its question, then
+/// the ended run under `recent`.
+#[tokio::test]
+async fn tray_status() {
+    let env = start().await;
+    let url = format!("http://127.0.0.1:{}/api/status", env.port);
+    let get = || async {
+        reqwest::Client::new().get(&url).bearer_auth(TOKEN).send().await.unwrap().json::<Json>().await.unwrap()
+    };
+    let h = &env.host;
+    let chat = "c_tray";
+    h.chat.append(h, chat, Some("main"), json!({"kind": "user", "text": "make a logo"})).unwrap();
+    h.chat.append(h, chat, None, json!({"kind": "status", "state": "running"})).unwrap();
+    h.chat
+        .append(h, chat, None, json!({"kind": "agent", "agent": "generator", "state": "working", "status": "generating 4 logos"}))
+        .unwrap();
+    let s = get().await;
+    assert_eq!(s["runs"][0]["title"], "make a logo", "{s}");
+    assert_eq!(s["runs"][0]["step"], "generating 4 logos");
+    assert!(s["runs"][0]["question"].is_null());
+    assert_eq!(s["generating"], 0);
+    h.chat.append(h, chat, None, json!({"kind": "question", "id": "q1", "prompt": "Which style?"})).unwrap();
+    assert_eq!(get().await["runs"][0]["question"]["prompt"], "Which style?");
+    h.chat.append(h, chat, None, json!({"kind": "status", "state": "idle"})).unwrap();
+    let s = get().await;
+    assert_eq!(s["runs"].as_array().unwrap().len(), 0, "{s}");
+    assert_eq!(s["recent"][0]["chat"], chat);
+    assert_eq!(s["recent"][0]["state"], "idle");
+    assert!(s["recent"][0]["ended"].as_i64().unwrap() > 0);
+    // Without the token: refused.
+    assert_eq!(reqwest::get(&url).await.unwrap().status(), 401);
+}

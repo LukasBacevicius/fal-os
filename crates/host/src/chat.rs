@@ -118,6 +118,12 @@ struct ChatState {
     queue: Vec<Queued>,
     /// Last tool call of an external pseudo-chat (ms).
     ext_last: i64,
+    /// What the run does right now (latest agent status / running tool), for the tray.
+    step: String,
+    /// An unanswered `question` event (id, prompt): the run needs the user.
+    question: Option<(String, String)>,
+    /// When the last run ended (ms; 0 = not since the host started), for the tray.
+    ended: i64,
 }
 
 /// One run of a chat: what its agent sessions changed, for `chat.revert` / `chat.redo`.
@@ -772,7 +778,25 @@ impl ChatHub {
             let s = chats.get_mut(chat).expect("ensured");
             let mut save = false;
             match event["kind"].as_str() {
+                Some("question") => {
+                    s.question = Some((
+                        event["id"].as_str().unwrap_or_default().to_string(),
+                        event["prompt"].as_str().unwrap_or_default().chars().take(140).collect(),
+                    ));
+                }
+                Some("tool") => {
+                    s.question = None;
+                    if event["state"] == "running"
+                        && let Some(t) = event["summary"].as_str().filter(|t| !t.is_empty())
+                    {
+                        s.step = t.chars().take(140).collect();
+                    }
+                }
+                _ => {}
+            }
+            match event["kind"].as_str() {
                 Some("user") => {
+                    s.question = None;
                     if s.meta.title_auto {
                         s.meta.title = title_from(event["text"].as_str().unwrap_or_default());
                         s.meta.title_auto = false;
@@ -801,6 +825,11 @@ impl ChatHub {
                     let st = event["state"].as_str().unwrap_or("idle").to_string();
                     if st != "running" {
                         s.agents.clear();
+                        s.step.clear();
+                        s.question = None;
+                        if s.meta.state == "running" {
+                            s.ended = now_ms();
+                        }
                     }
                     s.meta.state = st;
                     save = true;
@@ -812,6 +841,9 @@ impl ChatHub {
                             s.agents.remove(&a);
                         }
                         _ => {
+                            if let Some(t) = event["status"].as_str().filter(|t| !t.is_empty()) {
+                                s.step = t.chars().take(140).collect();
+                            }
                             s.agents.insert(
                                 a,
                                 event["status"]
@@ -927,6 +959,30 @@ impl ChatHub {
                 .values()
                 .filter(|s| s.meta.state == "running" && !s.meta.external && !s.meta.archived)
                 .count()
+        })
+    }
+
+    /// The tray's view of this project's chats: running runs (`chat`, `title`, `step`,
+    /// `question`) and runs that ended since the host started (`chat`, `title`, `state`, `ended`).
+    pub fn tray(&self, host: &Host) -> (Vec<Json>, Vec<Json>) {
+        self.with_chats(host, |chats| {
+            let live = chats.values().filter(|s| !s.meta.external && !s.meta.archived);
+            let title = |s: &ChatState| if s.meta.title.is_empty() { "new chat".to_string() } else { s.meta.title.clone() };
+            let running = live
+                .clone()
+                .filter(|s| s.meta.state == "running")
+                .map(|s| {
+                    json!({
+                        "chat": s.meta.chat, "title": title(s), "step": s.step,
+                        "question": s.question.as_ref().map(|(id, p)| json!({"id": id, "prompt": p})),
+                    })
+                })
+                .collect();
+            let recent = live
+                .filter(|s| s.ended > 0 && s.meta.state != "running")
+                .map(|s| json!({"chat": s.meta.chat, "title": title(s), "state": s.meta.state, "ended": s.ended}))
+                .collect();
+            (running, recent)
         })
     }
 
