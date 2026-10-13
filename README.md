@@ -3,6 +3,7 @@
 The fal creative hub: a desktop app (and website) built around a high-performance infinite canvas, where you and many agents (fal agents, Claude Code, Codex, Gemini, computer-use agents that drive Premiere/Resolve/Blender) work on the same creative projects.
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Performance: why it's fast](docs/PERFORMANCE.md)
 - [Agents, context, feedback & memory](docs/AGENTS-CONTEXT-MEMORY.md)
 - [Packaging & sharing the desktop app](docs/PACKAGING.md) (`scripts/package-macos.sh` → DMG)
 - Research:
