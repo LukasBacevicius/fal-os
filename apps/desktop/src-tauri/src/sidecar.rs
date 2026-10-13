@@ -179,6 +179,11 @@ impl Sidecar {
         if let Some(w) = std::env::var_os("FALOS_PROJECTS") {
             cmd.arg("--workspace").arg(w);
         }
+        // A preferred port other than 7317 (a test build next to the installed app, whose agents'
+        // MCP configs point at 7317).
+        if let Some(p) = std::env::var("FALOS_PORT").ok().filter(|p| p.parse::<u16>().is_ok()) {
+            cmd.arg("--port").arg(p);
+        }
         self.env(&mut cmd);
         cmd.env("FALOS_EXIT_WITH_PARENT", "1")
             .current_dir(&self.home)
