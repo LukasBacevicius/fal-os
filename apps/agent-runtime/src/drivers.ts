@@ -252,7 +252,9 @@ export async function runCodexDriver(run: ChatRun) {
     ...(config.codexPath ? { codexPathOverride: config.codexPath } : {}),
     config: {
       // X-Falos-Chat: Codex's fal-os session joins this chat (color, activity, revert).
-      mcp_servers: { "fal-os": { url: `${config.hostUrl}/mcp`, http_headers: { Authorization: `Bearer ${config.token}`, "X-Falos-Chat": f.chat, "X-Falos-Project": f.project } } },
+      // `approve`: fal-os tools that write (edit, create_app, write_app_files) run without a
+      // prompt; with approvalPolicy "never" they were otherwise refused.
+      mcp_servers: { "fal-os": { url: `${config.hostUrl}/mcp`, default_tools_approval_mode: "approve", http_headers: { Authorization: `Bearer ${config.token}`, "X-Falos-Chat": f.chat, "X-Falos-Project": f.project } } },
     },
   });
   const statePath = join(run.workDir, "codex-thread.json");

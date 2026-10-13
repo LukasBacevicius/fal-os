@@ -452,7 +452,7 @@ function Properties() {
       )}
       {one && one.kind === 'app' && (
         <div className="props-sec">
-          <div><span className="faint">app </span>{String(one.props.app)} <span className="faint">· v{String(one.props.version ?? 0)} · by @{one.updatedBy}</span></div>
+          <div><span className="faint">app </span>{String(one.props.app)} <span className="faint">· v{String(one.props.version ?? 0)} · by @{one.createdBy}</span></div>
           <div className="props-actions">
             <button className="link dim" title="keyboard and mouse to the app (esc returns)" onClick={() => focusApp(one.id)}>[play]</button>
             <button className="link dim" title="read-only sources" onClick={() => setState({ appSrc: one.id })}>[src]</button>
