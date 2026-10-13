@@ -30,8 +30,8 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'app', keys: '⌘\\', desc: 'show / hide the chat panel' },
   { group: 'app', keys: '⌘⇧\\', desc: 'show / hide layers and properties' },
   { group: 'app', keys: '⌘⇧A  ⌘⇧L', desc: 'asset library: panel / full screen (space look, ⏎ or drag places, f t c u l s)' },
-  { group: 'chat', keys: '/  or  click [✦]', desc: 'with a selection: ask about it (inline prompt)' },
-  { group: 'chat', keys: '⏎  ⌘⏎  ⇥', desc: 'in the ✦ prompt: new chat / current chat / open in chat' },
+  { group: 'chat', keys: '/  or  click [>]', desc: 'with a selection: ask about it (inline prompt)' },
+  { group: 'chat', keys: '⏎  ⌘⏎  ⇥', desc: 'in the ask prompt: new chat / current chat / open in chat' },
   { group: 'chat', keys: '⌘L', desc: 'add the selection to the chat' },
   { group: 'chat', keys: '⌘I  or  /', desc: 'focus the chat input (no selection)' },
   { group: 'chat', keys: '⏎', desc: 'send (⇧⏎ new line); while running it queues (after the next step)' },
@@ -91,14 +91,15 @@ export const CLICKS: { where: string; what: string }[] = [
   { where: 'right-click a node', what: 'ask, add to chat, copy file, open in, export, final, copy / paste, duplicate, delete, group, frame, order, zoom, lineage' },
   { where: 'right-click canvas', what: 'paste, add note, import files, select all, zoom to fit / 100%, undo / redo' },
   { where: '−  43%  +', what: 'bottom-left zoom; click the level to fit all' },
-  { where: '[✦]  [⇲]', what: 'by the selection: ask about it / drag out (click downloads on the web)' },
+  { where: '[>]  [⇲]', what: 'by the selection: ask about it / drag out (click downloads on the web)' },
   { where: 'chat', what: '+ new · ≡ history · opus fal codex · [+] attach files · [+ N selected] · [send] · [stop]' },
   { where: 'library tiles', what: 'drag onto the canvas / a frame / the chat; double-click places; [place] [+ chat] [look] [♥] [tag] [collect] [upload] [local] [similar]' },
 ];
 
 export function editable(t: EventTarget | null) {
   const el = t as HTMLElement | null;
-  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+  // `data-own-keys`: widgets that handle their own keys (e.g. the driver dropdown).
+  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable || !!el.closest?.('[data-own-keys]'));
 }
 
 // ---- actions shared by keys and the palette ----------------------------------------------

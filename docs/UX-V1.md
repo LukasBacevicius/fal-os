@@ -2,11 +2,11 @@
 
 Builds on [UI-SPEC.md](UI-SPEC.md) (mono terminal look, minimal chrome) and [CHAT-PROTOCOL.md](CHAT-PROTOCOL.md). Research: [Brilliant chat UX](research/brilliant-chat-ux.md), [Paper](research/paper-ux.md).
 
-**The principle:** chats are the work units, and the canvas shows what they are doing. Each chat has **one color**, used for its tab, its agents' cursors, its activity sweeps and the highlight on the nodes it touches. That color is the only exception to the monochrome UI. Use a muted palette of 8 desaturated hues, assigned per chat.
+**The principle:** chats are the work units, and the canvas shows what they are doing. Each chat has **one color**, used for its tab, its agents' cursors, its activity outlines and the highlight on the nodes it touches. That color is the only exception to the monochrome UI. Use a muted palette of 8 desaturated hues, assigned per chat.
 
 ## 1. Start a chat from what you're looking at
-- **Selection prompt (✦):**
-  - Selecting one or more nodes shows a small `[✦]` at the selection's top-right corner. Click it, or press `/` with a selection, to open an **inline prompt** that follows the selection.
+- **Selection prompt (`[>]`):**
+  - Selecting one or more nodes shows a small `[>]` at the selection's top-right corner. Click it, or press `/` with a selection, to open an **inline prompt** that follows the selection.
   - The prompt is pre-filled with the selection as chips: image thumbnails, `[note …]`, `[frame …]`.
   - **Enter** starts a **new chat**: the panel opens on it and the director runs. **⌘Enter** sends to the current chat instead. **Tab** ("open in chat") moves the draft into the panel.
   - A draft is kept per selection.
@@ -50,14 +50,14 @@ Builds on [UI-SPEC.md](UI-SPEC.md) (mono terminal look, minimal chrome) and [CHA
 
 ## 4. Agent activity on the canvas (from Paper)
 - The host emits activity per agent session: **read**, **write**, **edit** and **delete**, with node ids and a timestamp. Entries expire after 30 s, or when the agent calls `finish_working(ids?)`.
-- **Engine overlay,** in the chat's color, at low opacity:
-  - a slow pulsing 1px outline on the frame or group currently being worked on, plus a few drifting dots on its title line ("rain");
-  - **read:** a quick upward sweep over the node (≤1 s);
-  - **write:** new nodes fade in with a downward sweep, then child outlines appear in sequence (capped);
-  - **edit:** a brief outline flash;
-  - **delete:** a ghost fade.
+- **Engine overlay,** in the chat's color. Plain 1px outlines only: no sweeps, glows, fills or easing. One-shot outlines hold, then step down in three discrete levels (≤1 s):
+  - a steady outline on the frame or group currently being worked on;
+  - **read:** a dashed outline;
+  - **write:** a solid outline, then child outlines appear in sequence (capped);
+  - **edit:** a short solid outline;
+  - **delete:** a dashed outline where the node was.
 - **Cursors:** a small arrow in the chat color with the agent's task label (`generator-2 · hero shot`). Dimmed while thinking, solid while writing. Fades out after 10 s idle.
-- A "reduce motion" setting turns the sweeps into static outlines.
+- A "reduce motion" setting turns the stepped outlines into static ones.
 - **Agents never move the user's camera.** Only an explicit click pans.
 
 ## 5. Layers and properties (left panel, ⌘⇧\)
@@ -77,7 +77,7 @@ Builds on [UI-SPEC.md](UI-SPEC.md) (mono terminal look, minimal chrome) and [CHA
 
 ## 6. Generation placeholders
 - Placed in **empty space next to the selection** or next to the referenced nodes; never on top of existing content.
-- Label: `generating · <model>`, shown on hover with the pixel-dot tile.
+- Label: `<model> · <elapsed> · <progress>`, shown on hover over the LED-mark tile (UI-SPEC, generating state).
 - On completion the result keeps its lineage, so `[rerun]` and `[variations]` work from the properties panel.
 
 ## 7. Connect your agent

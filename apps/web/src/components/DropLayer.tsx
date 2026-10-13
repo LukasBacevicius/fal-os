@@ -2,13 +2,14 @@
 // it, the canvas dims and sized ghosts (true size at the current zoom, laid out as the grid
 // the drop will create) follow the pointer with a mono "drop to add N files" label; the
 // frame under the pointer is highlighted by the engine. After a drop, placeholder tiles
-// (sparse pixel dots, a 1px progress line) hold the spot until the media is in, then fade.
+// (the dim fal LED mark, a 1px line) hold the spot until the media is in, then fade.
 // Pointer moves only write transforms to existing elements (no React render per move).
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { getState, useStore } from '../store';
 import { dnd, endDrag, ghostRects, useDnd, type DragSession } from '../dnd';
 import { worldRects, type Rect } from '../geometry';
+import '../brand/mark.css';
 
 type Point = [number, number];
 
@@ -40,32 +41,11 @@ function label(s: DragSession, frame: string | null): string {
   return `drop to add ${what}${f ? ` into ${f.name || 'frame'}` : ''}`;
 }
 
-// ---- pixel dots -------------------------------------------------------------------------
-
-/** Deterministic sparse dots for a tile (UI-SPEC generating state: 2–3 px gray squares). */
-function dots(seed: number, n = 12): { x: number; y: number; s: number; d: number }[] {
-  let h = seed * 2654435761 + 1013904223;
-  const rnd = () => ((h = (h * 1664525 + 1013904223) >>> 0) / 4294967296);
-  return Array.from({ length: n }, () => ({ x: rnd() * 100, y: rnd() * 100, s: rnd() < 0.5 ? 2 : 3, d: rnd() * 2.4 }));
-}
-
-const Dots = memo(function Dots({ seed }: { seed: number }) {
-  const ds = useMemo(() => dots(seed), [seed]);
-  return (
-    <>
-      {ds.map((d, i) => (
-        <i key={i} className="ph-dot" style={{ left: `${d.x}%`, top: `${d.y}%`, width: d.s, height: d.s, animationDelay: `${d.d}s` }} />
-      ))}
-    </>
-  );
-});
-
 // ---- the layer --------------------------------------------------------------------------
 
 export function DropLayer() {
   const session = useDnd((s) => s.session);
   const placeholders = useDnd((s) => s.placeholders);
-  const reduce = useStore((s) => s.reduceMotion);
   useStore((s) => s.camera); // placeholders follow the camera
   const [over, setOver] = useState(false);
   const ghosts = useRef<(HTMLDivElement | null)[]>([]);
@@ -120,7 +100,7 @@ export function DropLayer() {
 
   const app = getState().app;
   return (
-    <div className={`drop-layer ${reduce ? 'still' : ''}`}>
+    <div className="drop-layer">
       {session && over && <div className="drop-veil" />}
       {session && over && session.items.map((g, i) => (
         <div key={i} ref={(el) => (ghosts.current[i] = el)} className="drop-ghost">
@@ -133,7 +113,7 @@ export function DropLayer() {
         const done = i < ph.done;
         return (
           <div key={`${ph.id}-${i}`} className={`drop-ph ${ph.leaving ? 'out' : ''}`} style={{ transform: `translate(${x}px, ${y}px)`, width: w, height: h }}>
-            {ph.thumbs[i] ? <img src={ph.thumbs[i]} alt="" draggable={false} /> : <Dots seed={ph.id * 31 + i} />}
+            {ph.thumbs[i] ? <img src={ph.thumbs[i]} alt="" draggable={false} /> : <span className="ph-mark" aria-hidden>{'\uE000'}</span>}
             <div className={`ph-bar ${done ? 'full' : ''}`} />
           </div>
         );

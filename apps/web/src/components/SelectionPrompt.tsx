@@ -32,7 +32,7 @@ export function useSelectionBox() {
   return { left: l, top: t, right: r, bottom: b };
 }
 
-/** The ✦ inline prompt (UX-V1 §1): follows the selection, pre-filled with it as chips.
+/** The inline prompt (UX-V1 §1): follows the selection, pre-filled with it as chips.
  *  ⏎ starts a new chat, ⌘⏎ sends to the current chat, ⇥ moves the draft into the panel,
  *  esc closes (the draft is kept for this selection). */
 export function SelectionPrompt() {
@@ -132,7 +132,7 @@ export function SelectionPrompt() {
     <div className="sel-prompt" ref={el} style={{ transform: `translate(${left}px, ${top}px)`, width }} onPointerDown={(e) => e.stopPropagation()}>
       <Chips chips={chips} onRemove={(i) => setRemoved((r) => [...r, (chips[i] as { node: string }).node])} />
       <div className="prompt">
-        <span className="dim">✦</span>
+        <span className="dim">&gt;</span>
         <textarea
           ref={input}
           rows={1}

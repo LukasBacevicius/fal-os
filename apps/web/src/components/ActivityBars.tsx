@@ -4,7 +4,7 @@ import { chatColor, chatTitle, isRunning } from '../chat';
 import { openChat } from '../chatActions';
 import { workingSet } from '../activity';
 
-/** Pushes the frames agents are working in to the engine (pulsing outline + title dots) and
+/** Pushes the frames agents are working in to the engine (a steady outline in the chat color) and
  *  keeps the reduce-motion setting in sync. Renders nothing. */
 export function ActivitySync() {
   const app = useStore((s) => s.app);

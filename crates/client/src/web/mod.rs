@@ -29,8 +29,9 @@ use crate::sync::{Incoming, LocalOnly, Outgoing, Presence, SyncTransport};
 use media::{Content, MediaStore, classify, content_of, source_spec};
 
 const MAX_INFLIGHT: usize = 6;
-/// Generating tiles redraw at this interval (ms) while visible; their dots move slowly.
-const ANIM_MS: f64 = 33.0;
+/// Generating tiles and activity outlines redraw at this interval (ms) while visible; both
+/// change in discrete steps (~2 per second), so 10 Hz is plenty.
+const ANIM_MS: f64 = 100.0;
 
 type RafSlot = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
 
@@ -62,7 +63,7 @@ struct App {
     claims: Vec<String>,
     /// Transient agent-activity effects; `node` (when set) makes the effect follow the node.
     fx: Vec<(Option<String>, ActivityFx)>,
-    /// Frames/groups agents are working on: persistent pulse + title-line dots.
+    /// Frames/groups agents are working on: a steady outline in the chat color.
     working: Vec<(String, u32)>,
     reduce_motion: bool,
     /// Nodes highlighted from outside the canvas (layers row hover).
@@ -407,17 +408,11 @@ impl App {
             .filter_map(|p| Some(CursorView { world: p.cursor?, color: overlay::parse_color(&p.color) }))
             .collect();
         let t = self.anim_time as f32;
-        let mut activity: Vec<ActivityFx> = Vec::with_capacity(self.fx.len() + self.working.len() * 2);
-        for (i, (id, color)) in self.working.iter().enumerate() {
+        // Frames/groups agents work in: a steady outline in the chat color.
+        let mut activity: Vec<ActivityFx> = Vec::with_capacity(self.fx.len() + self.working.len());
+        for (id, color) in &self.working {
             let Some(n) = self.scene.get(id) else { continue };
-            if self.reduce_motion {
-                activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RECT, color: *color, t0: 0.0, dur: 0.0, seed: 0.0, label_px: 0.0 });
-                continue;
-            }
-            activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::PULSE, color: *color, t0: 0.0, dur: 0.0, seed: 0.0, label_px: 0.0 });
-            if matches!(n.kind, NodeKind::Frame | NodeKind::Group) {
-                activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RAIN, color: *color, t0: 0.0, dur: 0.0, seed: i as f32 + 1.0, label_px: 6.7 * n.name.chars().count() as f32 + 12.0 });
-            }
+            activity.push(ActivityFx { rect: n.rect, shape: OverlayPrim::RECT, color: *color, t0: 0.0, dur: 0.0, seed: 0.0 });
         }
         for (node, f) in &self.fx {
             if t < f.t0 && f.shape == OverlayPrim::RECT {
@@ -831,7 +826,7 @@ impl App {
         if self.fx.len() != before {
             self.dirty = true;
         }
-        let animate = self.gpu.renderer.animating_fast() || (self.gpu.renderer.animating() && now - self.last_anim_frame >= ANIM_MS);
+        let animate = self.gpu.renderer.animating() && now - self.last_anim_frame >= ANIM_MS;
         if self.dirty || self.gpu.renderer.needs_redraw() || animate {
             self.render(now);
         }
@@ -1913,25 +1908,25 @@ impl CanvasApp {
             let node = a.scene.get(id);
             let Some(rect) = node.map(|n| n.rect).or(given) else { continue };
             let seed = i as f32;
-            let fx = |shape, t0, dur| ActivityFx { rect, shape, color, t0, dur, seed, label_px: 0.0 };
+            let fx = |shape, t0, dur| ActivityFx { rect, shape, color, t0, dur, seed };
             let follow = node.is_some().then(|| id.clone());
             if reduce {
                 add.push((follow, fx(OverlayPrim::RECT, t, 1.2)));
                 continue;
             }
             match op {
-                "read" => add.push((follow, fx(OverlayPrim::SWEEP_UP, t, 0.9))),
+                "read" => add.push((follow, fx(OverlayPrim::STEP_DASHED, t, 0.9))),
                 "write" => {
-                    add.push((follow.clone(), fx(OverlayPrim::SWEEP_DOWN, t, 1.0)));
+                    add.push((follow.clone(), fx(OverlayPrim::STEP, t, 1.0)));
                     // Then the container's children outline one after another (capped).
                     let kids: Vec<(String, [f32; 4])> =
                         a.scene.iter().filter(|c| c.parent.as_deref() == Some(id.as_str())).take(6).map(|c| (c.id.clone(), c.rect)).collect();
                     for (j, (kid, r)) in kids.into_iter().enumerate() {
-                        add.push((Some(kid), ActivityFx { rect: r, shape: OverlayPrim::BLINK, color, t0: t + 0.45 + j as f32 * 0.12, dur: 1.2, seed, label_px: 0.0 }));
+                        add.push((Some(kid), ActivityFx { rect: r, shape: OverlayPrim::STEP, color, t0: t + 0.3 + j as f32 * 0.15, dur: 1.0, seed }));
                     }
                 }
-                "edit" => add.push((follow, fx(OverlayPrim::FLASH, t, 0.7))),
-                "delete" => add.push((None, fx(OverlayPrim::GHOST, t, 0.8))),
+                "edit" => add.push((follow, fx(OverlayPrim::STEP, t, 0.7))),
+                "delete" => add.push((None, fx(OverlayPrim::STEP_DASHED, t, 0.8))),
                 _ => {}
             }
         }
@@ -1959,7 +1954,7 @@ impl CanvasApp {
         }
     }
 
-    /// "Reduce motion": activity draws as static outlines instead of sweeps and pulses.
+    /// "Reduce motion": activity draws as static outlines instead of stepped ones.
     #[wasm_bindgen(js_name = setReduceMotion)]
     pub fn set_reduce_motion(&self, on: bool) {
         let mut a = self.app.borrow_mut();

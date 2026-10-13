@@ -322,16 +322,11 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 
 /* ---- activity bars (bottom-left of the canvas) ---- */
 .activity-bars { position: absolute; left: 10px; bottom: 28px; display: flex; gap: 4px; align-items: center; z-index: 2; }
-.activity-bar {
-  width: 22px; height: 3px; padding: 0; border: 0; background: var(--c); cursor: pointer;
-  animation: bar-breathe 1.8s ease-in-out infinite;
-}
-.activity-bar:hover { height: 5px; animation: none; }
+.activity-bar { width: 22px; height: 3px; padding: 0; border: 0; background: var(--c); cursor: pointer; }
+.activity-bar:hover { height: 5px; }
 .activity-label { margin-left: 6px; font-size: 11px; line-height: 14px; color: var(--text); white-space: nowrap; }
-@keyframes bar-breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .activity-bar { animation: none; } }
 
-/* ---- ✦ selection prompt ---- */
+/* ---- selection prompt ---- */
 .sel-prompt {
   position: absolute; left: 0; top: 0; width: 340px; z-index: 3; pointer-events: auto;
   background: var(--bg); border: 1px solid var(--line); padding: 6px 8px; animation: fade 120ms linear;
@@ -438,9 +433,19 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 /* ---- composer / chips ---- */
 .chat.dropping { outline: 1px dashed var(--dim); outline-offset: -1px; }
 .chat-drop { position: absolute; left: 0; right: 0; bottom: 64px; text-align: center; pointer-events: none; }
-.driver { display: inline-flex; gap: 0.6ch; flex: none; font-size: 11px; line-height: 18px; }
-.driver .link { color: var(--faint); }
-.driver .link.on { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.driver { display: inline-flex; flex: none; font-size: 11px; line-height: 18px; }
+.driver-btn { color: var(--dim); white-space: pre; outline: none; }
+.driver-btn:hover, .driver-btn:focus-visible, .driver-btn[aria-expanded='true'] { color: var(--text); text-decoration: none; }
+.driver-btn:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+.driver-btn.faint { color: var(--faint); }
+/* Above the composer (.chat-input is its containing block), as wide as its content allows. */
+.chat-input { position: relative; }
+.driver-menu { position: absolute; left: 6px; bottom: calc(100% + 2px); z-index: 5; width: max-content; min-width: 30ch; max-width: calc(100% - 12px); line-height: 18px; }
+.driver-name { white-space: pre; }
+.driver-why { overflow: hidden; text-overflow: ellipsis; }
+.driver-menu .menu-row:hover:not(.on) { background: none; color: inherit; }
+.driver-menu .menu-row.off:not(.on) { color: var(--faint); }
+.driver-menu .menu-row.off:not(.on) .dim { color: var(--faint); }
 .prompt textarea:disabled { color: var(--faint); }
 .chip.gone { color: var(--faint); }
 .chip .swatch { margin-right: 0.5ch; }
@@ -708,13 +713,11 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 [data-theme='light'] .drop-ph { background: #ececee; }
 .drop-ph.out { opacity: 0; }
 .drop-ph img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0.55; }
-.ph-dot { position: absolute; background: var(--dim); opacity: 0.2; animation: twinkle 2.4s ease-in-out infinite; }
-@keyframes twinkle { 0%, 100% { opacity: 0.15; transform: translate(0, 0); } 50% { opacity: 0.75; transform: translate(1px, -1px); } }
-.ph-bar { position: absolute; left: 0; bottom: 0; height: 1px; width: 30%; background: var(--dim); animation: sweep 1.2s linear infinite; }
-.ph-bar.full { width: 100%; animation: none; }
-@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
-.drop-layer.still .ph-dot, .drop-layer.still .ph-bar { animation: none; }
-.drop-layer.still .ph-bar:not(.full) { width: 100%; opacity: 0.4; }
+/* A placeholder is static: the dim fal LED mark (brand/mark.css font) and a 1px line, faint
+   until the file is in. */
+.ph-mark { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font: 400 26px/1 'falos-mark'; color: var(--dim); opacity: 0.35; user-select: none; }
+.ph-bar { position: absolute; left: 0; bottom: 0; height: 1px; width: 100%; background: var(--dim); opacity: 0.3; }
+.ph-bar.full { opacity: 1; }
 .upload-bar { height: 1px; background: color-mix(in srgb, var(--dim) 30%, transparent); pointer-events: auto; }
 .upload-bar > div { height: 1px; background: var(--dim); transition: width 120ms linear; }
 .drag-thumb { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; will-change: transform; width: 72px; height: 72px; border: 1px solid var(--text); background: var(--panel); transition: opacity 80ms linear; }

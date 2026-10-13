@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
 import type { NodeView } from '../types';
 import { sendChatMessage } from '../chatActions';
@@ -20,6 +20,22 @@ function worldRects(nodes: NodeView[]): Map<string, Rect> {
 }
 
 const GENERATING = new Set(['queued', 'running', '']);
+
+/** When this client first saw each generating node (elapsed time on the hover label). */
+const firstSeen = new Map<string, number>();
+
+/** `<model> · <status> · 0:07 · 42%` on a hovered generating tile; ticks once a second. */
+function GenLine({ id, model, status, progress }: { id: string; model: string; status: string; progress: number | null }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => tick((n) => n + 1), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const s = Math.max(0, Math.floor((Date.now() - (firstSeen.get(id) ?? Date.now())) / 1000));
+  const parts = [model, status, `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`];
+  if (progress != null) parts.push(`${Math.round(progress * 100)}%`);
+  return <div>{parts.filter(Boolean).join(' · ')}</div>;
+}
 
 /** `[⇲]` by the selection: drag the selection's files out to Finder or any app (desktop:
  *  native drag on press; web: Chrome `DownloadURL` drag, click downloads). */
@@ -141,6 +157,7 @@ export function NodeOverlays() {
         if (n.kind === 'generation') {
           const status = String(n.props.status ?? '');
           const failed = !GENERATING.has(status);
+          if (!failed && !firstSeen.has(n.id)) firstSeen.set(n.id, Date.now());
           if (!failed && hover !== n.id) return null;
           const b = screen(r);
           if (!visible(b) || b.width < 60) return null;
@@ -152,7 +169,9 @@ export function NodeOverlays() {
             <div key={`g-${n.id}`} className={`gen-info ${failed ? 'failed' : ''}`} style={{ transform: `translate(${b.left}px, ${b.top}px)`, width: b.width, height: b.height }}>
               {hover === n.id && (
                 <div className="gen-text">
-                  <div>{model}{failed ? '' : ` · ${status || 'queued'}${queue}`}</div>
+                  {failed ? <div>{model}</div> : (
+                    <GenLine id={n.id} model={model} status={`${status || 'queued'}${queue}`} progress={typeof n.props.progress === 'number' ? n.props.progress : null} />
+                  )}
                   {failed && n.props.error ? <div>{String(n.props.error).slice(0, 200)}</div> : <div className="gen-prompt">{prompt}</div>}
                 </div>
               )}
@@ -189,7 +208,7 @@ export function NodeOverlays() {
           onClick={openPrompt}
           onPointerDown={(e) => e.stopPropagation()}
         >
-          [✦]
+          [&gt;]
         </button>
       )}
       {selBox && visible(selBox) && !promptOpen && !editing && <Grip left={Math.min(selBox.left + selBox.width + 4, camera.width - 22)} top={Math.max(2, selBox.top - 18) + 16} />}
