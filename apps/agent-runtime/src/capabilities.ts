@@ -137,14 +137,14 @@ export async function probeCapabilities(opts: { refreshNet?: boolean } = {}): Pr
     "codex",
     codexAuth && mcp,
     !codexBin
-      ? "install the Codex CLI (`npm i -g @openai/codex`), run `codex login`, restart fal-os"
+      ? "install Codex and sign in from fal-os → Setup"
       : codexAuth
         ? "the host's MCP endpoint isn't reachable for Codex (restart falos-host)"
         : "run `npx codex login`",
   );
 
   const ffmpeg = Boolean(which("ffmpeg") && which("ffprobe"));
-  has("ffmpeg", ffmpeg, "install ffmpeg (`brew install ffmpeg`)");
+  has("ffmpeg", ffmpeg, config.packaged ? "install ffmpeg in fal-os → Setup" : "install ffmpeg (`brew install ffmpeg`)");
 
   const remotionDeps = existsSync(join(config.motionTemplate, "node_modules", "remotion"));
   const chrome = remotionChrome();

@@ -88,6 +88,23 @@ fn restart_host(side: Side) -> Result<(), String> {
     side.restart()
 }
 
+/// Setup screen tasks with streamed output: `claude-install`, `claude-login`, `ffmpeg`,
+/// `codex-install`, `codex-login` (a fixed list; see `Sidecar::run_task`).
+#[tauri::command(async)]
+fn setup_run(side: Side, task: String) -> Result<(), String> {
+    side.inner().run_task(&task)
+}
+
+#[tauri::command(async)]
+fn setup_task(side: Side, task: String) -> serde_json::Value {
+    side.task(&task)
+}
+
+#[tauri::command(async)]
+fn setup_cancel(side: Side, task: String) {
+    side.cancel_task(&task)
+}
+
 /// `materialize(sha|node, name?)` → absolute path of a human-named APFS clone in
 /// `<project>/.out/`. With only a node id the host resolves it (`POST /api/materialize`).
 #[tauri::command]
@@ -209,6 +226,9 @@ fn main() {
             check_fal_key,
             install_extras,
             restart_host,
+            setup_run,
+            setup_task,
+            setup_cancel,
             set_working
         ])
         .setup(|app| {
