@@ -20,9 +20,9 @@ use crate::workspace::Workspace;
 
 /// Injected as the first script of every HTML page an app serves.
 pub const GUARD: &str = r#"<script>(()=>{if(window.__falos)return;
-var F=window.__falos={muted:true,ctx:new Set(),media:new Set()};
 var check=/[?&]__falos=check/.test(location.search);
 var embedded=false;try{embedded=window.parent!==window}catch(e){embedded=true}
+var F=window.__falos={muted:embedded||check,ctx:new Set(),media:new Set()};
 function post(m){if(!embedded)return;try{m.falos=1;parent.postMessage(m,'*')}catch(e){}}
 var base=location.pathname.split('/').slice(0,3).join('/')+'/__falos/log',q=[],t=0;
 function str(a){try{if(a instanceof Error)return a.stack||String(a);if(typeof a==='object')return JSON.stringify(a);return String(a)}catch(e){return String(a)}}

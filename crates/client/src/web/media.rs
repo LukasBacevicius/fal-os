@@ -280,7 +280,7 @@ async function audioPeaks(spec, n) {
   }
 }
 
-const TAGS = { model3d: '3d', document: 'pdf', vector: 'svg', audio: 'audio', embed: 'embed', timeline: 'timeline', stream: 'stream', image: 'img', video: 'video' };
+const TAGS = { model3d: '3d', document: 'pdf', vector: 'svg', audio: 'audio', embed: 'embed', app: 'app', timeline: 'timeline', stream: 'stream', image: 'img', video: 'video' };
 function tag(spec) {
   if (spec.kind === 'document' && spec.mime && spec.mime !== 'application/pdf') return 'doc';
   if (String(spec.kind).startsWith('style:')) return 'style';
@@ -625,6 +625,8 @@ pub fn content_of(n: &SceneNode) -> Content {
         NodeKind::Video if n.asset.is_some() => Content::Video,
         // SVG: rasterized by the browser from the vector source (see `svgSource`).
         NodeKind::Vector if n.asset.is_some() => Content::Image,
+        // App: its snapshot still (the live iframe is a DOM overlay; see AppLayer.tsx).
+        NodeKind::App if n.asset.is_some() => Content::Image,
         NodeKind::Frame | NodeKind::Group | NodeKind::Connector => Content::None,
         NodeKind::Note | NodeKind::Text => Content::TextBox,
         NodeKind::Generation if !matches!(gen_status(n), "failed" | "canceled" | "cancelled") => Content::Generating,

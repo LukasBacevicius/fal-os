@@ -94,6 +94,7 @@ export const ROLES: Record<string, string> = {
   editor: "cuts & reframes",
   finisher: "export & delivery",
   codex: "code",
+  coder: "code & apps",
 };
 
 /** A status line without the agent's own name in front ("motion: Build film" → "Build film"). */
@@ -154,6 +155,14 @@ export function runningSummary(name: string, input: any): string {
       return `searching the library${input.query?.text ? ` for "${clean(input.query.text).slice(0, 40)}"` : ""}`;
     case "place_asset":
       return "placing a library asset";
+    case "create_app":
+      return `building ${clean(input.name) || "an app"}`;
+    case "write_app_files":
+      return `writing ${plural((input.files ?? []).length, "file")} of ${clean(input.app)}`;
+    case "read_app":
+      return `reading ${clean(input.app)}`;
+    case "app_logs":
+      return `checking ${clean(input.app)}`;
     default:
       return name.replace(/_/g, " ");
   }
@@ -256,6 +265,16 @@ export function doneSummary(name: string, input: any, json: any, nodes: string[]
     }
     case "place_asset":
       return "placed a library asset";
+    case "create_app":
+    case "write_app_files": {
+      const errs = Array.isArray(json?.check?.errors) ? json.check.errors.length : null;
+      const tail = errs === null ? "" : errs ? ` · ${plural(errs, "error")}` : " · runs clean";
+      return `${name === "create_app" ? "built" : "updated"} ${clean(json?.app ?? input.app ?? input.name)} v${json?.version ?? "?"}${tail}`;
+    }
+    case "read_app":
+      return `read ${clean(json?.app ?? input.app)}`;
+    case "app_logs":
+      return `checked ${clean(json?.app ?? input.app)}${typeof json?.errors === "number" ? (json.errors ? ` · ${plural(json.errors, "error")}` : " · runs clean") : ""}`;
     case "list_ops":
       return "listed the asset ops";
     default:

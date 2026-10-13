@@ -262,7 +262,9 @@ export type Item =
   | { type: 'question'; key: string; agent: string; prompt: string; options: string[]; answered: boolean }
   | { type: 'done'; key: string; summary: string; nodes: string[]; turn: string | null; reverted: boolean }
   /** Exported / produced files (`files` event, docs/ASSETS-V1.md §7): shown as file cards. */
-  | { type: 'files'; key: string; files: OutFile[]; dir: string };
+  | { type: 'files'; key: string; files: OutFile[]; dir: string }
+  /** An app the agents built or changed (`app` event): one card per app per turn, updated in place. */
+  | { type: 'app'; key: string; app: string; node: string; name: string; version: number; files: string[] };
 
 /** One file of a `files` chat event. */
 export interface OutFile { path: string; name: string; node?: string; preset?: string; w?: number; h?: number; bytes?: number; sha256?: string }
@@ -555,6 +557,18 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
         if (files.length) items.push({ type: 'files', key, files, dir: String(e.dir ?? '') });
         break;
       }
+      case 'app': {
+        if (view !== null && !mine(e.agent)) break;
+        const app = String(e.app ?? '');
+        if (!app) break;
+        const card = { type: 'app' as const, key, app, node: String(e.node ?? ''), name: String(e.name ?? app), version: Number(e.version) || 0, files: Array.isArray(e.files) ? e.files.map(String) : [] };
+        // Same app again in this turn (a fix after a check): update the card.
+        let i = items.length - 1;
+        while (i >= 0 && items[i].type !== 'user' && !(items[i].type === 'app' && (items[i] as typeof card).app === app)) i--;
+        if (i >= 0 && items[i].type === 'app') items[i] = { ...card, key: items[i].key };
+        else items.push(card);
+        break;
+      }
       case 'queued':
         queued.set(String(e.id), String(e.text ?? ''));
         break;
@@ -617,7 +631,7 @@ export function groupTurns(items: Item[]): Turn[] {
       continue;
     }
     const t: Turn = cur ?? start(`t${it.key}`, null);
-    if (it.type === 'text' || it.type === 'question' || it.type === 'files') t.final.push(it);
+    if (it.type === 'text' || it.type === 'question' || it.type === 'files' || it.type === 'app') t.final.push(it);
     else if (it.type === 'error') t.errors.push(it);
     else if (it.type === 'done') t.done = it;
     else {
