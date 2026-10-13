@@ -341,8 +341,6 @@ def main():
         favicon_png(grid, 32, lit).save(os.path.join(a.web_public, f'favicon-{tag}-32.png'), optimize=True)
     # Dock icons (runtime swap) + bundle icon. 512 keeps the binary small; the Dock tile tops out near it.
     tile_icon(grid, 1024, True).save(os.path.join(a.icons, 'icon.png'), optimize=True)
-    tile_icon(grid, 512, True).save(os.path.join(a.icons, 'dock-lit.png'), optimize=True)
-    tile_icon(grid, 512, False).save(os.path.join(a.icons, 'dock-dim.png'), optimize=True)
     write_icns(grid, os.path.join(a.icons, 'icon.icns'))
     ttf, woff2 = os.path.join(a.brand, 'falos-mark.ttf'), os.path.join(a.brand, 'falos-mark.woff2')
     build_font(grid, subpaths, ttf, woff2)
