@@ -67,6 +67,8 @@ export type FrameOut = (msg: Record<string, unknown>) => void;
 /** Remotion working copy for the chat: template sources + linked node_modules + public/. */
 export function prepareMotion(workDir: string) {
   const dir = join(workDir, "motion");
+  // Fresh install: the template arrives with Setup's motion tools. Until then, skip (not fatal).
+  if (!existsSync(join(dir, "package.json")) && !existsSync(join(config.motionTemplate, "package.json"))) return null;
   if (!existsSync(join(dir, "package.json"))) {
     mkdirSync(dir, { recursive: true });
     for (const f of ["src", "package.json", "tsconfig.json", "remotion.config.ts"]) cpSync(join(config.motionTemplate, f), join(dir, f), { recursive: true });
