@@ -9,7 +9,7 @@ import { assetRecord } from './out';
 
 export type PreviewKind =
   | 'image' | 'svg' | 'video' | 'audio' | 'pdf' | 'model3d' | 'usdz' | 'font' | 'lut' | 'subs'
-  | 'markdown' | 'text' | 'html' | 'json' | 'timeline' | 'other';
+  | 'markdown' | 'text' | 'html' | 'json' | 'timeline' | 'app' | 'other';
 
 /** Everything a viewer needs; built from a canvas node or a library item. */
 export interface PreviewItem {
@@ -57,6 +57,7 @@ const ext = (name: string) => (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLower
 export function previewKind(mime: string, name: string, nodeKind?: string): PreviewKind {
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   const e = ext(name);
+  if (nodeKind === 'app') return 'app';
   if (m === 'image/svg+xml' || e === 'svg' || nodeKind === 'vector') return 'svg';
   if (e === 'usdz' || m === 'model/vnd.usdz+zip') return 'usdz';
   if (nodeKind === 'model3d' || m.startsWith('model/') || ['glb', 'gltf'].includes(e)) return 'model3d';
@@ -91,6 +92,7 @@ const NOT_MEDIA = new Set(['frame', 'group', 'connector', 'generation', 'stream'
 
 /** Nodes the canvas preview can show (videos have their own focus view). */
 export function previewable(n: NodeView): boolean {
+  if (n.kind === 'app') return typeof n.props.app === 'string'; // the live app, full screen
   if (NOT_MEDIA.has(n.kind) || n.kind === 'video') return false;
   if (n.kind === 'note') return false; // notes are edited in place
   // Imported documents (.md / .txt carry a role), not canvas text such as Figma layers.

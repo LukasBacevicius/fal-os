@@ -60,6 +60,12 @@ export interface State {
   focusVideo: string | null;
   /** Node shown in the canvas preview (quick look of any non-video media), if open. */
   preview: string | null;
+  /** App nodes: app server, live versions, errors, sound (apps.ts). */
+  apps: import('./apps').AppsInfo;
+  /** App node with keyboard and mouse (click / ⏎ focuses, Esc returns to the canvas). */
+  appFocus: string | null;
+  /** App node whose sources are shown read-only (`[src]`). */
+  appSrc: string | null;
   /** Chat panel content: the active chat, or the full history list (⌘Y). */
   chatView: 'chat' | 'history';
   /** A subagent's own transcript shown in the panel (null = the main chat). */
@@ -132,6 +138,9 @@ let state: State = {
   promptOpen: false,
   focusVideo: null,
   preview: null,
+  apps: { base: null, project: null, versions: {}, errors: {}, sound: {} },
+  appFocus: null,
+  appSrc: null,
   chatView: 'chat',
   subView: null,
   drafts: {},

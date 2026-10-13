@@ -9,6 +9,7 @@ import { ActivitySync } from './components/ActivityBars';
 import { ProjectPicker } from './components/Projects';
 import { VideoFocus } from './components/VideoLayer';
 import { NodePreview } from './components/Preview';
+import { AppSource } from './components/AppSource';
 import { Library } from './components/Library';
 import { ContextMenu } from './components/ContextMenu';
 import { ExportPanel } from './components/ExportPanel';
@@ -56,6 +57,7 @@ export function App() {
       {overlay === 'setup' && <Setup />}
       <VideoFocus />
       <NodePreview />
+      <AppSource />
       <ActivitySync />
       <BrandSync />
       <DragThumb />

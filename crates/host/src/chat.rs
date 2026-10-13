@@ -1695,7 +1695,7 @@ pub fn history(host: &Host, canvas: &str) -> Json {
 
 /// Local file of a content-addressed asset (`sha256:<hex>` → `<project>/assets/<hex>.*`).
 pub fn asset_file(host: &Host, asset: &str) -> Option<PathBuf> {
-    crate::assets::find(&host.dir().join("assets"), &crate::assets::parse_id(asset)?)
+    crate::assets::find_in_project(host.dir(), &crate::assets::parse_id(asset)?)
 }
 
 fn lineage_lines(c: &Canvas, asset: Option<String>) -> Vec<String> {
@@ -1785,6 +1785,10 @@ pub async fn resolve_chip(host: &Host, canvas: &str, chip: &Json) -> Result<Json
     });
     if node.kind.has_text() || node.text.is_some() {
         out["text"] = Json::from(untrusted(node.text.as_deref().unwrap_or_default()));
+    }
+    if node.kind == falos_doc::NodeKind::App {
+        // The app's folder, url and files (edit with write_app_files); `asset` is its still.
+        out["app"] = crate::apps::chip_info(host, &node);
     }
     let Some(asset) = asset else { return Ok(out) };
     out["asset"] = json!(asset.id);

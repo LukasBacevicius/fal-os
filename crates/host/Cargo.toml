@@ -31,9 +31,12 @@ fast_image_resize = { version = "5", features = ["image"] }
 webp = { version = "0.3", default-features = false }
 zip = { version = "2", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# App checks: drive headless Chrome over the DevTools protocol.
+tokio-tungstenite = "0.29"
+# Atomic folder swaps for app writes (renamex_np / renameat2).
+libc = "0.2"
 
 [dev-dependencies]
 rmcp = { version = "3.5", features = ["client", "transport-streamable-http-client-reqwest"] }
 tempfile = "3"
-tokio-tungstenite = "0.29"
 futures = "0.3"

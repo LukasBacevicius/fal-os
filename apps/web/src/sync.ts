@@ -13,6 +13,7 @@ import type { NodeView, Presence } from './types';
 import { applyEvent, applyHistory, applyList, emptyChat, removeChat, selectChat, type ChatState, type Chip } from './chat';
 import { bootProject, loadScene, rememberProject, saveCamera, touchProject } from './projects';
 import { onActivity, onActivityClear } from './activity';
+import { onAppEvent, setAppsBase } from './apps';
 
 /** A send that gets no chat event back within this time means no agent runtime is attached. */
 const RUNTIME_TIMEOUT_MS = 8_000;
@@ -187,8 +188,12 @@ export class HostSync {
         this.sessions = new Map((m.sessions as SessionInfo[]).map((s) => [s.id, s]));
         this.onClaims(m.claims ?? []);
         this.publishPresence();
+        setAppsBase(m.apps, m.project ?? this.project);
         break;
       }
+      case 'app':
+        onAppEvent(m);
+        break;
       case 'chat.history':
         setState((s) => ({ chat: applyHistory(s.chat, m.chats ?? []) }));
         break;
@@ -536,7 +541,7 @@ export class HostSync {
 
   private async fetchAsset(id: string, n: NodeView) {
     try {
-      if (n.kind === 'image' || n.kind === 'vector') {
+      if (n.kind === 'image' || n.kind === 'vector' || n.kind === 'app') {
         const r = await fetch(this.assetUrl(id), { headers: this.auth() });
         if (!r.ok) throw new Error(String(r.status));
         const blob = await r.blob();

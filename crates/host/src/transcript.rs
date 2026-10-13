@@ -126,8 +126,19 @@ fn running_summary(name: &str, args: &Json) -> String {
         "generate" => format!("generating with {}", s("model")),
         "import_file" => format!("importing {}", s("path").rsplit('/').next().unwrap_or_default()),
         "set_status" => s("text"),
+        "create_app" => format!("building {}", s("name")),
+        "write_app_files" => format!("writing {}", s("app")),
+        "app_logs" => format!("checking {}", s("app")),
         _ => name.replace('_', " "),
     }
+}
+
+/// `built ping-pong v3 · 2 errors` for app tools.
+fn app_summary(verb: &str, j: &Json) -> String {
+    let check = &j["check"];
+    let errs = check["errors"].as_array().map_or(0, Vec::len);
+    let tail = if check.is_null() { String::new() } else if errs == 0 { " · runs clean".into() } else { format!(" · {}", plural(errs, "error")) };
+    format!("{verb} {} v{}{tail}", j["app"].as_str().unwrap_or("app"), j["version"].as_u64().unwrap_or(0))
 }
 
 /// Past-tense, human-friendly line for a finished call.
@@ -164,6 +175,14 @@ pub fn done_summary(name: &str, args: &Json, j: &Json, nodes: &[String]) -> Stri
         "finish_working" => "finished".into(),
         "get_selection" => "looked at your selection".into(),
         "get_knowledge" => "read docs".into(),
+        "create_app" => app_summary("built", j),
+        "write_app_files" => app_summary("updated", j),
+        "read_app" => format!("read {}", j["app"].as_str().unwrap_or("the app")),
+        "app_logs" => match j["errors"].as_u64() {
+            Some(0) => format!("checked {} · runs clean", j["app"].as_str().unwrap_or("the app")),
+            Some(n) => format!("checked {} · {}", j["app"].as_str().unwrap_or("the app"), plural(n as usize, "error")),
+            None => "checked the app".into(),
+        },
         _ => name.replace('_', " "),
     }
 }

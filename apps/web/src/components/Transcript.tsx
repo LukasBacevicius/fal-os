@@ -8,6 +8,7 @@ import { openChat, sendChatMessage } from '../chatActions';
 import { usd } from '../format';
 import { Chips } from './Chips';
 import { FileCards } from './FileCards';
+import { focusApp } from '../apps';
 
 export function NodeRef({ id }: { id: string }) {
   const exists = useStore((s) => s.nodes.some((n) => n.id === id));
@@ -15,6 +16,26 @@ export function NodeRef({ id }: { id: string }) {
     <button className={`link node-ref ${exists ? '' : 'gone'}`} onClick={() => exists && focusNode(id)} title={exists ? 'pan to node' : 'node not on the canvas'}>
       {id}
     </button>
+  );
+}
+
+/** `[app] Ping Pong · v3 · 2 files  [play] [src]`: an app the agents built (pans to it). */
+function AppCard({ item }: { item: Extract<Item, { type: 'app' }> }) {
+  const exists = useStore((s) => s.nodes.some((n) => n.id === item.node));
+  const errors = useStore((s) => s.apps.errors[item.app] ?? 0);
+  return (
+    <div className="msg app-card">
+      <span className="dim">[app]</span>{' '}
+      <button className="link" disabled={!exists} title={exists ? 'pan to the app' : 'not on the canvas'} onClick={() => focusNode(item.node)}>{item.name}</button>
+      <span className="faint"> · v{item.version} · {item.files.length} file{item.files.length === 1 ? '' : 's'}{errors ? ` · ! ${errors}` : ''}</span>
+      {exists && (
+        <>
+          {'  '}
+          <button className="link dim" title="pan to it and play (keyboard and mouse go to the app; esc returns)" onClick={() => { focusNode(item.node); focusApp(item.node); }}>[play]</button>{' '}
+          <button className="link dim" title="read-only sources" onClick={() => setState({ appSrc: item.node })}>[src]</button>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -195,6 +216,8 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
       return <BatchLine b={item} />;
     case 'files':
       return <FileCards files={item.files} dir={item.dir} />;
+    case 'app':
+      return <AppCard item={item} />;
     case 'question':
       return (
         <div className={`msg question ${item.answered ? 'answered' : ''}`}>

@@ -15,6 +15,7 @@ import { Md } from './Transcript';
 import { desktop, isDesktop } from '../desktop';
 import { reveal as revealNodes } from '../out';
 import { bytes as fmtBytes } from '../format';
+import { appUrl, frames, isApp, sendMute, toggleSound } from '../apps';
 
 const NO_IDS = new Set<string>();
 
@@ -754,6 +755,58 @@ function FileCard({ item, note }: { item: PreviewItem; note?: string }) {
   );
 }
 
+// ---- apps ------------------------------------------------------------------------------------
+
+/** A live app full screen: the same sandboxed page as on the canvas, focused, muted unless
+ *  the node's sound is on. Esc (forwarded by the app) closes. */
+function AppView({ item }: { item: PreviewItem }) {
+  const node = useStore((s) => s.nodes.find((n) => n.id === item.node));
+  const v = useStore((s) => (node && isApp(node) ? Math.max(s.apps.versions[String(node.props.app)] ?? 0, Number(node.props.version) || 0) : 0));
+  const ref = useRef<HTMLIFrameElement>(null);
+  const key = `${item.node}:preview`;
+  const url = node && isApp(node) ? appUrl(node, v) : null;
+  useEffect(() => {
+    const f = ref.current;
+    if (!f) return;
+    frames.set(key, f);
+    return () => {
+      if (frames.get(key) === f) frames.delete(key);
+    };
+  }, [key, url]);
+  if (!url) return <FileCard item={item} note="the app server isn't reachable" />;
+  return (
+    <iframe
+      ref={ref}
+      className="pv-app"
+      src={url}
+      title={item.name}
+      sandbox="allow-scripts"
+      allow="autoplay 'none'; camera 'none'; microphone 'none'; geolocation 'none'"
+      referrerPolicy="no-referrer"
+      onLoad={() => {
+        ref.current?.focus();
+        if (item.node) sendMute(item.node);
+      }}
+    />
+  );
+}
+
+/** `[mute]` / `[sound]` and `[tab]` for an app in the preview head. */
+function AppActions({ item }: { item: PreviewItem }) {
+  const node = useStore((s) => s.nodes.find((n) => n.id === item.node));
+  const sound = useStore((s) => (node && isApp(node) ? !!s.apps.sound[String(node.props.app)] : false));
+  if (!node || !isApp(node)) return null;
+  const url = appUrl(node);
+  return (
+    <>
+      <button className="link" title={sound ? 'mute' : 'sound on'} onClick={() => toggleSound(node.id)}>{sound ? '[sound]' : '[mute]'}</button>
+      {url && (
+        <a className="link" href={url} target="_blank" rel="noreferrer noopener" title="open in a browser tab (sound plays there)">[tab]</a>
+      )}
+    </>
+  );
+}
+
 // ---- dispatch ------------------------------------------------------------------------------
 
 /** The right viewer for an item. `keepAudio`: leave audio playing when the viewer closes
@@ -779,6 +832,8 @@ export function Viewer({ item, keepAudio }: { item: PreviewItem; keepAudio?: boo
       return <LutView item={item} />;
     case 'subs':
       return <SubsView item={item} />;
+    case 'app':
+      return <AppView item={item} />;
     case 'markdown':
     case 'text':
     case 'html':
@@ -822,7 +877,7 @@ export function NodePreview() {
             <button className="link" title="next (→)" onClick={() => stepPreview(1)}>[→]</button>
           </>
         )}
-        <ItemActions item={item} />
+        {item.kind === 'app' ? <AppActions item={item} /> : <ItemActions item={item} />}
         <button className="link" title="close (esc / space)" onClick={closePreview}>[esc]</button>
       </div>
       <div className="pv-body" key={item.key}>

@@ -18,6 +18,8 @@ import { installKeys, pointer } from '../keys';
 import { theme } from '../theme';
 import { FloatingHead } from './AppMenu';
 import { VideoLayer } from './VideoLayer';
+import { AppLayer, clickedApp } from './AppLayer';
+import { blurApp } from '../apps';
 import { AudioLayer } from './AudioLayer';
 import { openPreview, previewable } from '../preview';
 import { openFocus, pointerPressed } from '../video';
@@ -133,6 +135,8 @@ export function Stage() {
     const meta = (e: MouseEvent | KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
     // Dragging a canvas node onto the chat panel attaches it (and puts it back).
     let press: { x: number; y: number; node: string | null } | null = null;
+    // A click (no drag) on an app node focuses it.
+    let appPress: { x: number; y: number; node: string | null } | null = null;
     const overChat = (e: PointerEvent) => {
       const c = document.querySelector('.chat');
       if (!c) return false;
@@ -148,6 +152,9 @@ export function Stage() {
       pointerPressed(); // a space press with a drag pans instead of toggling the video
       const [x, y] = pos(e);
       app.pointerDown(x, y, e.button, e.shiftKey, e.altKey, meta(e));
+      const hit = app.hitTest(x, y) ?? null;
+      appPress = e.button === 0 && !e.altKey && !e.shiftKey && !meta(e) && getState().tool === 'select' ? { x, y, node: hit } : null;
+      if (getState().appFocus && hit !== getState().appFocus) blurApp();
       const sel = getState().selection;
       press = e.button === 0 && !e.altKey && getState().tool === 'select' && sel.length ? { x, y, node: app.hitTest(x, y) ?? null } : null;
       // Files for a drag-out are prepared before the drag needs them.
@@ -201,6 +208,8 @@ export function Stage() {
       press = null;
       if (getState().dragToChat) setState({ dragToChat: false });
       app.pointerUp(x, y, e.shiftKey, e.altKey, meta(e));
+      if (appPress && Math.hypot(x - appPress.x, y - appPress.y) < 4 && appPress.node) clickedApp(appPress.node);
+      appPress = null;
     };
     const leave = () => app.pointerLeave();
     const wheel = (e: WheelEvent) => {
@@ -301,6 +310,7 @@ export function Stage() {
       onDrop={onDrop}
     >
       <canvas ref={canvas} className="stage-canvas" />
+      <Guard name="apps"><AppLayer /></Guard>
       <Guard name="text"><TextLayer /></Guard>
       <Guard name="overlays"><NodeOverlays /></Guard>
       <Guard name="video"><VideoLayer /></Guard>

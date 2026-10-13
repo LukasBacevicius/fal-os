@@ -16,6 +16,7 @@ import { canvasVideoKey, focusKey, openFocus, spacePressed, spaceReleased } from
 import { openLibrary } from './library';
 import { openPreview, previewable, previewKey } from './preview';
 import { copyFiles, openExport } from './out';
+import { blurApp, focusApp, installAppMessages } from './apps';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 export const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -50,7 +51,8 @@ export const SHORTCUTS: Shortcut[] = [
   { group: 'canvas', keys: 'V', desc: 'select tool' },
   { group: 'canvas', keys: 'H  or  hold space', desc: 'pan' },
   { group: 'canvas', keys: 'N  or  double-click', desc: 'new note at the cursor (editing)' },
-  { group: 'canvas', keys: '⏎', desc: 'edit the selected note / focus view of a video / preview other media' },
+  { group: 'canvas', keys: '⏎', desc: 'edit the selected note / focus view of a video / play the selected app / preview other media' },
+  { group: 'canvas', keys: 'click app  esc', desc: 'app node: click (or ⏎) gives it keyboard and mouse; esc returns to the canvas' },
   { group: 'canvas', keys: 'space (tap)  K', desc: 'selected video or audio: play / pause; other media: preview (hold space to pan)' },
   { group: 'canvas', keys: 'J  L', desc: 'selected video / audio: back / forward 5 s (arrows still nudge)' },
   { group: 'canvas', keys: ',  .', desc: 'selected video: one frame back / forward (audio: 1 s)' },
@@ -150,6 +152,7 @@ function enter(): boolean {
   const n = nodes.find((x) => x.id === selection[0]);
   if (!n) return false;
   if (n.kind === 'note' || n.kind === 'text') editNode(n.id);
+  else if (n.kind === 'app') focusApp(n.id);
   else if (n.kind === 'video' && n.props.asset) openFocus(n.id);
   else if (previewable(n)) openPreview(n.id);
   else app.zoomToNodes([n.id]);
@@ -185,6 +188,13 @@ export function installKeys(): () => void {
       else if (!mod) done();
       return;
     }
+    // The read-only app sources (`[src]`): esc closes; the viewer handles the rest.
+    if (getState().appSrc) {
+      if (k === 'Escape') done(), setState({ appSrc: null });
+      return;
+    }
+    // A focused app: esc gives the keyboard back (keys inside the app never reach us).
+    if (getState().appFocus && k === 'Escape') return done(), blurApp();
     // The video focus view owns the keyboard.
     if (getState().focusVideo) {
       if (focusKey(e)) done();
@@ -247,12 +257,14 @@ export function installKeys(): () => void {
   const onPaste = (e: ClipboardEvent) => {
     if (!editable(e.target) && !getState().editing && !getState().overlay) void paste(e, pointer.at);
   };
+  const offApps = installAppMessages();
   window.addEventListener('keydown', kd, true);
   window.addEventListener('keyup', ku);
   window.addEventListener('blur', blur);
   document.addEventListener('copy', onCopy);
   document.addEventListener('paste', onPaste);
   return () => {
+    offApps();
     window.removeEventListener('keydown', kd, true);
     window.removeEventListener('keyup', ku);
     window.removeEventListener('blur', blur);

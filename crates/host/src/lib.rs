@@ -3,6 +3,7 @@
 //! the client sync WebSocket on one loopback HTTP server.
 
 pub mod activity;
+pub mod apps;
 pub mod assets;
 pub mod auth;
 pub mod batch;

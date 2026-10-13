@@ -75,6 +75,24 @@ button, textarea, select, input { font: inherit; color: inherit; }
 }
 
 .text-layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; }
+
+/* ---- app nodes (AppLayer.tsx): live iframes in world space, a mono header line ---- */
+.app-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.app-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.app-live { position: absolute; outline: 0 solid transparent; }
+.app-live.selected, .app-live.focused { outline-style: solid; outline-color: var(--text); }
+.app-live iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; background: var(--bg); color-scheme: normal; }
+.app-head { position: absolute; left: 0; top: 0; will-change: transform; pointer-events: auto; font-size: 11px; line-height: 14px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
+.app-head .link { color: var(--dim); }
+.app-head .link:hover, .app-head.focused .app-name { color: var(--text); }
+.pv-app { border: 0; width: 100%; height: 100%; display: block; background: #0a0a0a; }
+.app-src-body { gap: 12px; }
+.pv-body > .app-src-files { flex: none; width: 200px; overflow-y: auto; display: flex; flex-direction: column; }
+.app-src-file { text-align: left; padding: 1px 4px; border: 0; background: none; color: #8a8a8a; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app-src-file:hover { color: #e6e6e6; }
+.app-src-file.on { color: #0a0a0a; background: #e6e6e6; }
+.app-src-code { margin: 0; overflow: auto; font-size: 12px; line-height: 17px; color: #e6e6e6; border-left: 1px solid #262626; padding-left: 8px; tab-size: 2; }
+.app-src-ln { display: inline-block; width: 4ch; margin-right: 2ch; text-align: right; color: #4a4a4a; user-select: none; }
 .note-text {
   position: absolute;
   /* Covers the engine's raster of the same text (crossfade); the transparent 1 px border

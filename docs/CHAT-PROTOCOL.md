@@ -348,6 +348,27 @@ Behaviour:
   - The input has context chips. Selecting assets on the canvas offers "Add to chat". **Alt-click** a spot, or **Alt-drag** a region on an image or video, to add a spot, region or frame chip; for video the frame is the current playhead.
 - Removed in v0: the left layers panel, the annotations panel and tool, demo cursors, heavy branding. Cursors show only for real agent sessions that are active.
 
+## App nodes
+Live web apps on the canvas ([ARCHITECTURE.md](ARCHITECTURE.md#app-nodes-live-code)).
+- **MCP tools** (host):
+  - `create_app(sessionId, canvas, name, files?, entry?, placement?)` → `{app, node, name, version, dir, url, files, check}`
+  - `write_app_files(sessionId, app, files?[{path, content|base64}], delete?, replace?, check?)` → the same plus `written`
+  - `read_app(sessionId, app, paths?)` → `{…, contents, errors}`
+  - `app_logs(sessionId, app, rerun?, all?)` → `{version, errors, ok, entries[{level, text, source: check|preview, version, at}], note}`
+
+  `check` = `{ok, errors[], warnings[], note}` from a headless load. `app` takes an app id or the node id.
+- **Chat event.** The host appends it for agent sessions in a chat after every create or write. The UI keeps one card per app per turn:
+  ```jsonc
+  { "kind": "app", "app": "ping-pong", "node": "a1b2c3", "name": "Ping Pong", "version": 3, "files": ["index.html", "main.js"] }
+  ```
+- **Sync frames.**
+  - `hello` gains `"apps": "http://127.0.0.1:<port>"` (the app server) and `"project"`.
+  - Host → client `{"type":"app","app","node","version","what":"files"|"logs","errors"?}`: reload on `files`; `errors` = console errors of that version.
+- **Context.** A chip on an app node resolves with `"app": {app, dir, url, entry, version, files, errors, hint}`, and the snapshot still as its `asset` / `file` (sent to Claude as an image). Selecting the app and asking for a change is enough.
+- **Drivers.**
+  - opus: the director builds small apps itself; the `coder` subagent (role "code & apps") handles big ones.
+  - codex: its sandbox can write `<project>/apps/` directly. The host versions the change, reloads the node and attributes it to the session that last touched the app.
+
 ## Parallel execution
 
 The director plans a job as a dependency graph and runs independent branches at once: parallel

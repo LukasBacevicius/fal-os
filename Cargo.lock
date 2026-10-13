@@ -1107,6 +1107,7 @@ dependencies = [
  "futures",
  "futures-util",
  "image",
+ "libc",
  "rand 0.9.5",
  "reqwest",
  "rmcp",

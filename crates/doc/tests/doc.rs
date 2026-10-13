@@ -1075,3 +1075,21 @@ fn untracked_fill_ins_ride_along_with_the_creating_transaction() {
     assert_eq!(c.node(&image).unwrap().props["asset"], "sha256:ab");
     assert_eq!(c.node(&image).unwrap().parent.as_deref(), Some(frame.as_str()));
 }
+
+#[test]
+fn app_nodes_version_like_any_prop() {
+    assert_eq!(NodeKind::parse("app"), Some(NodeKind::App));
+    assert_eq!(NodeKind::App.to_string(), "app");
+    let mut c = Canvas::new("c1", "Main");
+    let id = c
+        .apply(&claude(), None, &[create(NodeKind::App, "Ping Pong", json!({"w": 800, "h": 600, "app": "ping-pong", "version": 1}))])
+        .unwrap()
+        .created[0]
+        .clone();
+    let v0 = c.version();
+    c.apply(&claude(), None, &[Command::UpdateNode { id: id.clone(), props: props(json!({"version": 2})) }]).unwrap();
+    assert!(read(&c).contains("app(ping-pong) version(2)"), "{}", read(&c));
+    // Turn revert: the app goes back to version 1 (the host restores those files).
+    c.revert_since("claude", &v0).unwrap();
+    assert_eq!(c.node(&id).unwrap().props["version"], json!(1));
+}
