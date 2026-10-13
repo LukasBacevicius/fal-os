@@ -68,7 +68,7 @@ def cell_mask(grid, size, box, gap=GAP, radius=RADIUS, every=False, ss=4):
 def squircle_mask(size, x0, y0, side, ss=4):
     """macOS tile: rounded square with ~continuous corners (each corner a superellipse quadrant,
     radius 22.4% of the side, the Big Sur grid)."""
-    r = 0.224 * side * ss * 1.25  # superellipse corners need a larger box for the same visual radius
+    r = 0.25 * side * ss * 1.25  # superellipse corners need a larger box for the same visual radius
     x0, y0, s = x0 * ss, y0 * ss, side * ss
     pts = []
     for cx, cy, a0 in ((x0 + s - r, y0 + r, -90), (x0 + s - r, y0 + s - r, 0), (x0 + r, y0 + s - r, 90), (x0 + r, y0 + r, 180)):
@@ -95,11 +95,19 @@ def blur(mask, r):
     return arr(mask.filter(ImageFilter.GaussianBlur(r))) if r > 0.3 else arr(mask)
 
 
-def tile_icon(grid, size, lit, *, margin=100 / 1024, glyph=None, favicon=False):
-    """The app icon: dark tile, LED glyph. `favicon`: full-bleed rounded square, no shadow."""
+def pad_grid(grid, k=1):
+    n = len(grid) + 2 * k
+    return [[False] * n for _ in range(k)] + [[False] * k + list(r) + [False] * k for r in grid] + [[False] * n for _ in range(k)]
+
+
+def tile_icon(grid, size, lit=True, *, margin=100 / 1024, glyph=None, favicon=False):
+    """The app icon: dark tile, LED glyph always lit. The LED grid fills the tile: the mark plus one
+    ring of unlit LEDs. `favicon`: full-bleed rounded square, no shadow."""
+    lit = True  # the mark is always on; "working" is shown in the UI, not by dimming the icon
+    grid = pad_grid(grid)
     small = size <= 64
     if glyph is None:
-        glyph = 0.80 if small else 0.62
+        glyph = 0.94 if small else 0.88
     if favicon:
         tx = ty = 0.0
         tside = float(size)
@@ -184,7 +192,10 @@ def favicon_svg(grid, lit):
              '@media (prefers-color-scheme: light){.m{fill:#111}.g{display:none}}</style>')
     glow = ('<filter id="b" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation=".5"/></filter>'
             f'<g class="g" opacity=".7" filter="url(#b)">{rects}</g>') if lit else ''
-    op = '' if lit else f' opacity="{FAVICON_DIM}"'
+    lit = True
+    glow = glow or ('<filter id="b" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation=".5"/></filter>'
+            f'<g class="g" opacity=".7" filter="url(#b)">{rects}</g>')
+    op = ''
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {v:.3g} {v:.3g}">{style}'
             f'{glow}<g class="m"{op}>{rects}</g></svg>\n')
 
@@ -198,7 +209,7 @@ def favicon_png(grid, size, lit):
     cell = big / (n + 2 * pad)
     im = Image.new('RGBA', (big, big), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    a = 255 if lit else int(255 * FAVICON_DIM)
+    a = 255  # always lit
     for x, y in cells(grid):
         x0 = (x + pad + 0.07) * cell
         y0 = (y + pad + 0.07) * cell
