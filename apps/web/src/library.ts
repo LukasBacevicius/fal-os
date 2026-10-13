@@ -399,4 +399,4 @@ export function libraryDrop(e: React.DragEvent, rect: DOMRect, frame: string | n
   return true;
 }
 
-export const GLYPH: Record<string, string> = { import: '↓', generate: '✦', derive: 'ƒ', render: '▶' };
+export const GLYPH: Record<string, string> = { import: '↓', generate: '∷', derive: 'ƒ', render: '▶' };

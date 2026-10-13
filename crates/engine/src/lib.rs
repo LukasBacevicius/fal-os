@@ -311,7 +311,7 @@ impl OverlayPrim {
     /// screen. Not animated.
     pub const GLYPH: u32 = 7;
 
-    /// Badge glyphs: `↓` import, `✦` generated, `ƒ` derived, `▶` render, `★` final, and the
+    /// Badge glyphs: `↓` import, `∷` generated, `ƒ` derived, `▶` render, `★` final, and the
     /// `↑` dot (uploaded to fal).
     pub const BADGE_IMPORT: u32 = 0;
     pub const BADGE_GENERATE: u32 = 1;

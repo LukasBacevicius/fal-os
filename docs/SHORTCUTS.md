@@ -119,7 +119,7 @@ Selected media can go to Finder, Premiere, Slack, Mail and other apps as real fi
 
 Chat file cards (an agent's export) drag out like nodes and have `[reveal]`, `[open in]` and
 `[copy]`. Dropping a node into a frame named "Deliverables" marks it final. Badges at a tile's
-top-left show where it came from (`↓` import with a dot when uploaded to fal, `✦` generated,
+top-left show where it came from (`↓` import with a dot when uploaded to fal, `∷` generated (LED dots),
 `ƒ` derived, `▶` render, `★` final), on hover, on selection or on big tiles.
 
 ## Layers and properties (left panel)

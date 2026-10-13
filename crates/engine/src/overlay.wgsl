@@ -140,8 +140,10 @@ fn glyph_sdf(id: u32, q: vec2<f32>, w: f32) -> f32 {
                     min(seg(q, vec2(-0.42, 0.14), vec2(0.0, 0.58)), seg(q, vec2(0.42, 0.14), vec2(0.0, 0.58))));
             return d - w;
         }
-        case 1u: { // ✦ generated
-            return star_sdf(q, 0.78, 4.0, 2.3);
+        case 1u: { // ∷ generated: 2×2 LED dots (fal mark pixels)
+            let c = vec2(select(-0.4, 0.4, q.x > 0.0), select(-0.4, 0.4, q.y > 0.0));
+            let d = abs(q - c) - vec2(0.24);
+            return length(max(d, vec2(0.0))) + min(max(d.x, d.y), 0.0);
         }
         case 2u: { // ƒ derived
             var d = seg(q, vec2(0.12, -0.42), vec2(-0.12, 0.6));

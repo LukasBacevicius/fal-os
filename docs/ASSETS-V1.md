@@ -122,7 +122,7 @@ A host op registry: one implementation for the UI context menu, the Opus swarm a
 - **Fixes:** audit `project.duplicate` hardlinks, which should be clonefile.
 
 ## 5. UI provenance
-- **Badges:** on nodes and library tiles, drawn by the engine, mono and minimal: `↓` import (plus a `↑` dot if uploaded to fal), `✦` generated, `ƒ` derived, `▶` render, `★` final.
+- **Badges:** on nodes and library tiles, drawn by the engine, mono and minimal: `↓` import (plus a `↑` dot if uploaded to fal), `∷` generated (LED dots), `ƒ` derived, `▶` render, `★` final.
 - **Filter chips** in the layers panel and library: inputs / generated / derived / finals / rejected.
 - **Show lineage:** dims everything outside the selected node's ancestors and descendants, with connectors on hover.
 - **Properties → provenance:** the chain with `[rerun] [rerun with changes] [copy recipe] [apply to selection]`, and an "upstream changed" marker.
