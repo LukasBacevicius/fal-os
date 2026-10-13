@@ -1951,6 +1951,10 @@ pub struct ImportFileArgs {
     pub replace: Option<String>,
     /// Node role: input|candidate|wip|final|rejected (default: input without lineage, candidate for generations).
     pub role: Option<String>,
+    /// App the file comes from, e.g. "resolve", "premiere", "figma", "finder" (recorded in the asset's origin).
+    pub source_app: Option<String>,
+    /// Provenance note, e.g. "color pass on the exported hero cut" (recorded in the asset's origin).
+    pub note: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -2178,7 +2182,7 @@ impl CanvasMcp {
     }
 
     #[tool(
-        description = "Import a local file (image, video, audio, svg, pdf, glb/usdz, heic/tiff/exr (PNG proxy, original kept), srt/vtt, .cube LUT, fonts, md/txt) into the project: copies it into assets by sha256 and creates its node (or converts the `replace` generation placeholder in place). Without lineage it is a protected user input; pass lineage {kind:derive|render|generate, op, recipe, parents} for files you made (e.g. ffmpeg in Bash, a Remotion render). Returns the node id.",
+        description = "Import a local file (image, video, audio, svg, pdf, glb/usdz, heic/tiff/exr (PNG proxy, original kept), srt/vtt, .cube LUT, fonts, md/txt) into the project: copies it into assets by sha256 and creates its node (or converts the `replace` generation placeholder in place). Without lineage it is a protected user input; pass lineage {kind:derive|render|generate, op, recipe, parents} for files you made (e.g. ffmpeg in Bash, a Remotion render, an edit in another app of files you exported); with parents it is placed next to them. `sourceApp` + `note` record where it came from. Returns the node id and its file.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2194,7 +2198,7 @@ impl CanvasMcp {
             if !path.is_absolute() {
                 bail!("path must be absolute");
             }
-            let opts = ImportOpts { place: a.placement, name: a.name, lineage: a.lineage, replace: a.replace, role: a.role, ..Default::default() };
+            let opts = ImportOpts { place: a.placement, name: a.name, lineage: a.lineage, replace: a.replace, role: a.role, app: a.source_app.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()), note: a.note.filter(|s| !s.trim().is_empty()), ..Default::default() };
             let i = import_file(&host, &actor, &a.canvas, &path, opts).await?;
             host.activity(&a.session_id, &a.canvas, "write", std::slice::from_ref(&i.node));
             host.touch_nodes(&a.session_id, &a.canvas, std::slice::from_ref(&i.node));

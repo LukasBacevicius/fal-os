@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { getState, setState, toast, useStore } from '../store';
 import { hostSync } from '../sync';
+import { DirectorConnect } from './DirectorConnect';
 
 interface ClientDef {
   id: string;
@@ -67,11 +68,13 @@ function copy(text: string, what: string) {
  *  the dialog closes and the canvas shows the result). */
 export function ConnectModal() {
   const connect = useStore((s) => s.connect);
-  const [tab, setTab] = useState('claude');
+  // First tab: one click for the user's own Claude Code, Claude app and Codex (MCP + skill).
+  const [tab, setTab] = useState('director');
   const [manual, setManual] = useState(false);
   const [busy, setBusy] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
-  const def = CLIENTS.find((c) => c.id === tab)!;
+  const def = CLIENTS.find((c) => c.id === tab) ?? CLIENTS[0];
+  const TABS = ['director', ...CLIENTS.map((c) => c.id)];
   const info = hostSync()?.info;
   const url = info ? `http://${info.addr}/mcp` : '';
   const token = info?.token ?? '';
@@ -117,7 +120,7 @@ export function ConnectModal() {
     window.setTimeout(() => setBusy(false), 6000);
   };
 
-  const ix = CLIENTS.findIndex((c) => c.id === tab);
+  const ix = TABS.indexOf(tab);
   return (
     <div className="modal" onPointerDown={close}>
       <div
@@ -127,12 +130,15 @@ export function ConnectModal() {
           if (e.key === 'Escape') close();
           else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && (e.target as HTMLElement).tagName !== 'TEXTAREA') {
             e.preventDefault();
-            setTab(CLIENTS[(ix + (e.key === 'ArrowDown' ? 1 : CLIENTS.length - 1)) % CLIENTS.length].id);
+            setTab(TABS[(ix + (e.key === 'ArrowDown' ? 1 : TABS.length - 1)) % TABS.length]);
           }
         }}
       >
         <div className="connect-tabs">
           <div className="dim connect-title">connect your agent</div>
+          <div className={`connect-tab ${tab === 'director' ? 'on' : ''}`} onClick={() => setTab('director')}>
+            Claude + Codex
+          </div>
           {CLIENTS.map((c) => {
             const ok = Object.keys(connect.connected).some((k) => matches(c.id, k));
             return (
@@ -143,6 +149,30 @@ export function ConnectModal() {
           })}
         </div>
         <div className="connect-body" ref={panel} tabIndex={-1}>
+          {tab === 'director' ? (
+            <>
+              <div className="step">
+                <div className="step-head">use fal-os from your own Claude and Codex</div>
+                <div className="step-body faint">
+                  they direct: generate and lay out here, hand exported files to other apps (editors via computer use) and bring results back with lineage.
+                  one click adds the fal-os MCP server and the fal-os skill to each.
+                </div>
+              </div>
+              <div className="step-body">
+                <DirectorConnect />
+              </div>
+              <div className="step">
+                <div className="step-head">{Object.keys(connect.firstWrite).length ? '[x]' : '[ ]'} then try a prompt</div>
+                {PROMPTS.map((p) => (
+                  <div key={p} className="step-body prompt-row">
+                    <span className="prompt-text">“{p}”</span>
+                    <button className="link dim" onClick={() => copy(p, 'prompt')}>[copy]</button>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+          <>
           <div className="step">
             <div className="step-head">{step1 ? '[x]' : '[ ]'} 1. connect</div>
             {def.register ? (
@@ -181,6 +211,8 @@ export function ConnectModal() {
             ))}
             <div className="step-body faint">{conn ? 'waiting for its first change on the canvas…' : 'its first change shows up here'}</div>
           </div>
+          </>
+          )}
         </div>
       </div>
     </div>

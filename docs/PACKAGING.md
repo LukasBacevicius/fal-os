@@ -134,8 +134,8 @@ not at dev commands.
 - Projects: `~/fal-os-projects` (per user). Settings, token, templates, skills and logs: `~/.fal-os`.
   Overrides: `FALOS_HOME`, `FALOS_PROJECTS`.
 - MCP registration for Claude Code, Codex, Cursor, Gemini and OpenCode already exists, with consent: Connect modal → "add to …", which calls the host's `register` and keeps other settings.
-  - **Caveat:** it registers `http://127.0.0.1:<port>/mcp`, and the port changes when 7317 is busy.
-  - **Next:** register the stdio relay with an absolute path instead, as Paper and Atlas do: `/Applications/fal-os.app/Contents/MacOS/falos-host mcp`. It reads `host.json`, so it survives port changes and app updates.
+  - **Caveat:** per-client "add to …" registers `http://127.0.0.1:<port>/mcp`, and the port changes when 7317 is busy.
+  - **Done:** Connect → "Claude + Codex" (and Setup step 5) registers the stdio relay with an absolute path in the packaged app, as Paper and Atlas do: `/Applications/fal-os.app/Contents/MacOS/falos-host mcp`, for Claude Code, the Claude app and Codex, plus the `fal-os` skill. The relay reads `host.json` lazily and re-initializes after a host restart, so it survives port changes and app updates. Details: [ARCHITECTURE.md → Director agents](ARCHITECTURE.md#director-agents-the-users-own-claude--codex).
 - Logs: `~/.fal-os/logs/host.log` (host + runtime) and `setup.log`. There is no telemetry or crash reporting; colleagues send these logs instead. Later: opt-in Sentry for Rust + JS.
 
 ### 2.7 Licensing notes (internal use; check before any external release)

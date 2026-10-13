@@ -687,8 +687,10 @@ impl Library {
         self.with_db(|c| {
             let k = query::resolve_key(c, key).or_else(|| query::key_of_node(c, key, project)).ok_or_else(|| anyhow!("no asset `{key}` in the library"))?;
             let mut item = query::items(c, std::slice::from_ref(&k), None)?.into_iter().next().context("asset vanished")?;
-            let (lineage, origin, media, palette, err): (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) =
-                c.query_row("SELECT lineage, origin, media, palette, thumb_err FROM assets WHERE sha=?", [&k], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+            let (lineage, origin, media, palette, err, path): (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) =
+                c.query_row("SELECT lineage, origin, media, palette, thumb_err, path FROM assets WHERE sha=?", [&k], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+            // The original's absolute path (to hand to other apps; never edit it in place).
+            item["file"] = json!(path.map(PathBuf::from).filter(|p| p.is_file()).and_then(|p| std::path::absolute(p).ok()).map(|p| p.display().to_string()));
             let parse = |s: Option<String>| s.and_then(|s| serde_json::from_str::<Json>(&s).ok()).unwrap_or(Json::Null);
             item["lineage"] = parse(lineage);
             item["origin"] = parse(origin);

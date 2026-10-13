@@ -219,6 +219,9 @@ export class HostSync {
       case 'agent.registered':
         setState((s) => ({ connect: { ...s.connect, registered: { ...s.connect.registered, [m.client]: { ok: !!m.ok, path: m.path, error: m.error } } } }));
         break;
+      case 'director.status':
+        setState({ director: { targets: Array.isArray(m.targets) ? m.targets : [], home: m.home, changed: m.changed, error: m.error } });
+        break;
       case 'agent.connected':
         setState((s) => ({ connect: { ...s.connect, connected: { ...s.connect.connected, [m.client]: { agentName: String(m.agentName ?? m.client), session: String(m.session ?? '') } } } }));
         break;
@@ -345,6 +348,11 @@ export class HostSync {
   /** "Connect your agent": the host writes the client's MCP config (`agent.registered`). */
   registerAgent(client: string): boolean {
     return this.sendJson({ type: 'agent.register', client });
+  }
+
+  /** Use fal-os from the user's own Claude Code / desktop app / Codex (`director.status`). */
+  director(type: 'status' | 'connect' | 'disconnect', targets: string[] = []): boolean {
+    return this.sendJson({ type: `director.${type}`, targets });
   }
 
   private selTimer = 0;

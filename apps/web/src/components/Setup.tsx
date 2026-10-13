@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getState, setState, toast } from '../store';
 import { createProject } from '../projects';
+import { DirectorConnect } from './DirectorConnect';
 
 // First-run setup for the packaged desktop app (apps/desktop, Tauri commands in
 // src-tauri/src/sidecar.rs). Shown on launch until a fal key is stored, Claude Code is signed in
@@ -413,6 +414,13 @@ export function Setup() {
               <TaskLog t={t['codex-install'] ?? null} />
               <TaskLog t={t['codex-login'] ?? null} n={3} />
               <Fallback t={t['codex-login'] ?? null} cmd="codex login" />
+            </div>
+          </div>
+
+          <div className="step">
+            <div className="step-head">5. your own Claude / Codex (optional: they direct fal-os and your other apps)</div>
+            <div className="step-body">
+              <DirectorConnect />
             </div>
           </div>
 

@@ -122,6 +122,8 @@ pub struct ImportOpts {
     pub protected: Option<bool>,
     /// App the file came from (`finder`, `premiere`, …), recorded in `origin`.
     pub app: Option<String>,
+    /// Provenance note recorded in `origin` (where the file came from / what was done).
+    pub note: Option<String>,
     /// Extra node props (e.g. a video's `muted`).
     pub props: Props,
 }
@@ -335,7 +337,9 @@ pub async fn import_file(
         mime: Some(mime.into()),
         uri,
         source,
-        origin: (source == Source::Import).then(|| Origin {
+        // Imports always record where they came from; derived files too when the caller says
+        // which app made them (the director round-trip: export → editor → import_file).
+        origin: (source == Source::Import || opts.app.is_some() || opts.note.is_some()).then(|| Origin {
             path: Some(path.display().to_string()),
             url: None,
             filename: path
@@ -343,6 +347,7 @@ pub async fn import_file(
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             app: opts.app.clone(),
+            note: opts.note.clone(),
             imported_by: actor.id.clone(),
             at: now_ms(),
         }),

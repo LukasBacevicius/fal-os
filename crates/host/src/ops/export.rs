@@ -225,6 +225,8 @@ pub async fn export(host: &Arc<Host>, actor: &Actor, session: Option<&str>, canv
         None => host.dir().join("exports").join(chrono::Local::now().format("%Y-%m-%d").to_string()),
     };
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Absolute paths in the result: agents hand them to other apps.
+    let dir = std::path::absolute(&dir).unwrap_or(dir);
     let pattern = o.naming.clone().unwrap_or_else(|| presets()["naming"].as_str().unwrap_or("{name}_{preset}.{ext}").to_string());
     let tmp = std::env::temp_dir().join(format!("falos-export-{}", rand::random::<u64>()));
     std::fs::create_dir_all(&tmp)?;
