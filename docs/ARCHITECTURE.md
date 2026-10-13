@@ -29,9 +29,9 @@ crates/
 - **Engine:** follows Brilliant's design.
   - The engine owns the camera, so pan and zoom only update a uniform.
   - One instanced draw for the whole scene, with SDF shapes and mip levels chosen by zoom.
-  - A retained frame where only damaged areas are redrawn.
+  - *(Planned, not built yet: only redrawing damaged areas.)*
   - Budgets for everything, an image LRU, and progressive open.
-  - Half resolution while you're gesturing, and a kill switch for each optimization.
+  - *(Planned, not built yet: half resolution while gesturing, and a kill switch for each optimization.)*
   - Canvas-level UI (selection, handles, cursors, annotation pins, labels) is drawn by the engine, so it stays native-fast on every platform.
 - **Media decode is platform-native and zero-copy**, behind one engine trait.
 
