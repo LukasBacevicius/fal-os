@@ -637,8 +637,9 @@ export function groupTurns(items: Item[]): Turn[] {
     else {
       // Text before more work was narration: it belongs to the work section.
       if (t.final.length) {
-        t.work.push(...t.final);
-        t.final = [];
+        // File and app cards stay visible; narration text moves into the work section.
+        t.work.push(...t.final.filter((x) => x.type !== 'files' && x.type !== 'app'));
+        t.final = t.final.filter((x) => x.type === 'files' || x.type === 'app');
       }
       t.work.push(it);
     }

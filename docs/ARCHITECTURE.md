@@ -64,6 +64,30 @@ Every media node has an asset (content-addressed, stored in the local cache and 
 
 Image derivatives (depth, normals, masks, segmentation) are attached as **layers** of the image node, not separate nodes.
 
+## App nodes (live code)
+Ask any agent for "a ping pong game" and a playable app lands on the canvas, which you then iterate on by chat. Code: `crates/host/src/apps/`, `apps/web/src/components/AppLayer.tsx`.
+- **Storage.** An app is a folder of plain web files, `<project>/apps/<app>/`: `index.html` plus ES modules, CSS and assets. Libraries come from CDNs at exact versions. There's no build step in v1; an optional one can come later.
+- **Doc node.** Kind `app` with props `app` (the folder id), `entry`, `version`, `asset` (a snapshot still) and `chat` (the chat that wrote it). `created_by` / `updated_by` record who wrote it.
+- **Versions.** Every write copies the folder to `apps/.history/<app>/<n>/` and sets `version = n` as the writing agent's actor.
+  - Undo, chat-turn revert and redo move that prop like any other change. The host watches doc changes and restores that version's files.
+  - Writes are atomic: a staged copy is swapped in with `renamex_np(RENAME_SWAP)` / `renameat2(RENAME_EXCHANGE)`.
+- **Serving.** A second loopback listener runs on the host port + 100 (or an ephemeral port): `http://127.0.0.1:<p>/<project>/<app>/<path>`.
+  - It needs no token, because that origin holds no privileges. Responses use correct MIME types, `no-store` and CORS `*` (opaque-origin iframes load modules cross-origin).
+  - HTML gets a guard script first:
+    - audio starts muted (`AudioContext` suspended, media muted) until the node's `[mute]` toggle is flipped;
+    - console errors, exceptions and failed loads are beaconed to `__falos/log`;
+    - Esc is forwarded to the canvas;
+    - `localStorage` gets an in-memory shim.
+- **Live reload.** Tool writes, and edits made directly in the folder (Codex, an editor; a 500 ms poll), commit a version. They also broadcast `{"type":"app","app","node","version","what":"files"|"logs","errors"?}` on the project's sync sockets.
+- **Check.** After a change, a headless chrome-headless-shell (DevTools protocol, `--mute-audio`) loads the app at the node's size. It collects console errors and exceptions and takes a screenshot, which becomes the node's still. `app_logs` merges these logs with what live previews report.
+- **MCP tools.** `create_app`, `write_app_files` (multi-file, atomic; returns `check`), `read_app`, `app_logs`; reference in knowledge `apps`. They're available to the Opus director (small apps), the `coder` subagent, the Codex driver (its sandbox can also write `<project>/apps/`) and external agents over the local MCP.
+- **Canvas.**
+  - Apps big enough on screen (at most 3) run in a sandboxed iframe (`sandbox="allow-scripts"`, opaque origin) inside the camera-transformed overlay. The others show the engine-drawn still.
+  - A new version loads in a hidden second iframe and swaps in on load, so it never flashes.
+  - A click (no drag) or ⏎ focuses the app, giving it keyboard and mouse; Esc returns them to the canvas.
+  - Header: `app · name · [src] [reload] [open] [mute]`. `[src]` is a read-only file list and code view; `[open]` is the full-screen preview.
+- **Chat.** Tool writes add an `app` card to the chat, linking to the node. An app-node chip resolves with `app: {app, dir, url, files, errors}` and its still as an image.
+
 ## Annotations & comments
 The killer feature. A first-class part of the doc model, not an overlay.
 

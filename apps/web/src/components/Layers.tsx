@@ -13,6 +13,7 @@ import { PanelTabs } from './AppMenu';
 import { ResizeHandle } from './ResizeHandle';
 import { openMenuAt } from './ContextMenu';
 import { openPrompt } from './SelectionPrompt';
+import { focusApp } from '../apps';
 import {
   applyRecipe, assetOf, assetRecord, copyPrompt, copyRecipe, FILTERS, matchesFilter, parentRefs, promptOf, rerun, roleOf,
   setRole, sourceOf, upstreamChanged, type Filter, type ParentRef,
@@ -415,7 +416,8 @@ function Properties() {
   const raw = detail?.asset?.lineage;
   // Imported media carry an `import` lineage: no generation to rerun.
   const lin = raw && (raw.op || (raw.model && raw.model !== 'import')) ? raw : undefined;
-  const media = one && !!assetOf(one);
+  // An app's asset is its snapshot still, not media.
+  const media = one && one.kind !== 'app' && !!assetOf(one);
   const prompt = one ? promptOf(one.id) : '';
   const src = one ? sourceOf((detail?.asset as Record<string, any> | undefined) ?? null) : null;
   const steps = one && lin ? chain(one.id) : [];
@@ -446,6 +448,16 @@ function Properties() {
       {one && (one.kind === 'note' || one.kind === 'text') && (
         <div className="props-grid">
           <Field label="text size" value={String(Number(one.props.fontSize) || 12.5)} onSet={(v) => Number(v) > 0 && set({ fontSize: Number(v) })} />
+        </div>
+      )}
+      {one && one.kind === 'app' && (
+        <div className="props-sec">
+          <div><span className="faint">app </span>{String(one.props.app)} <span className="faint">· v{String(one.props.version ?? 0)} · by @{one.updatedBy}</span></div>
+          <div className="props-actions">
+            <button className="link dim" title="keyboard and mouse to the app (esc returns)" onClick={() => focusApp(one.id)}>[play]</button>
+            <button className="link dim" title="read-only sources" onClick={() => setState({ appSrc: one.id })}>[src]</button>
+            <button className="link dim" title="add as a chip to the chat" onClick={() => { addContext(chip); setState({ chatOpen: true }); }}>[use as reference]</button>
+          </div>
         </div>
       )}
       {gen && (
