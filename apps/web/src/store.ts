@@ -54,7 +54,7 @@ export interface State {
   reduceMotion: boolean;
   /** ⌘ (Ctrl) held: tabs show their ⌘1…9 badges. */
   modHeld: boolean;
-  /** The ✦ selection prompt is open. */
+  /** The selection prompt is open. */
   promptOpen: boolean;
   /** Video node shown in the focus view (near-fullscreen player), if open. */
   focusVideo: string | null;

@@ -43,10 +43,10 @@
 - The bottom floating toolbar. Tools are keys: V select, H/space hand, and drop files to import.
 
 ## Generating state (important)
-A `generation` node renders as a dark tile (`#1a1a1c`) with **sparse square pixel dots**: 2–3 px gray squares, 6–20 per tile, slowly drifting and twinkling at random. See the designer's reference in `docs/ref-generating-tiles.webp` and the fal web-app's generating tiles.
-- Draw it in the engine, ideally as one shader effect on the tile: hash-based dots with time; no per-frame CPU work.
-- Respect the shader budget: animate only visible tiles, and pause the animation during heavy gestures.
-- **Progress:** if known, a 1px bottom bar in `--dim`. The prompt snippet and model show only on hover, as tiny dim mono text.
+A `generation` node renders as a dark tile (`#1a1a1c`) with **the fal mark as LED dots** centred on it: the 13×13 grid of `assets/brand/fal-mark.grid`, 2–3 px square dots on a 3–6 px pitch. Cells sit dim and light in discrete steps (about 2 per second, each cell on its own phase), so nothing slides, fades smoothly or flashes as a whole. No gradients, glows or sweeps. Tiles too small for the mark stay plain.
+- Draw it in the engine as one shader effect on the tile: O(1) per pixel, no per-frame CPU work, redrawn at ~10 Hz only while a tile is visible.
+- Pause the animation during heavy gestures.
+- **Progress:** if known, the mark lights in reading order up to the progress, and a 1px bottom bar in `--dim` shows it too. Hovering shows `<model> · <elapsed> · <progress>` and the prompt snippet as tiny dim mono text.
 - **When it completes:** a 200ms crossfade from dots to the media.
 - **Failed:** the tile shows `failed` in dim mono text with a retry affordance. The text goes in the chat.
 

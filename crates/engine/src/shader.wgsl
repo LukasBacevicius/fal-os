@@ -110,39 +110,54 @@ fn hash_u(n: u32) -> f32 {
     return f32(x) / 4294967295.0;
 }
 
-// Generating tile: 6–20 sparse square dots (2–3 CSS px, pixel-snapped) that drift slowly and
-// twinkle at random. Everything derives from the node seed and the time uniform.
-// Returns the dot coverage (0..1).
-fn gen_dots(local: vec2<f32>, screen_size: vec2<f32>, seed_f: f32) -> f32 {
-    if min(screen_size.x, screen_size.y) < 24.0 * cam.dpr {
+// The fal mark on its 13x13 LED grid (assets/brand/fal-mark.grid): one row per entry, bit x
+// = column x (the mark is symmetric). 72 cells.
+const MARK_ROWS = array<u32, 13>(0x1F0u, 0x1F0u, 0x3F8u, 0x60Cu, 0x1C07u, 0x1C07u, 0x1C07u,
+                                 0x1C07u, 0x1C07u, 0x60Cu, 0x3F8u, 0x1F0u, 0x1F0u);
+const MARK_CELLS: f32 = 72.0;
+
+// Generating tile: the fal mark as square LED dots centred on the dark tile (2-3 CSS px dots on
+// a 3-6 px pitch, pixel-snapped). Cells sit dim and light in discrete steps, each on its own
+// phase (about 2 steps/s), so the pattern never flashes as a whole and has no gradients. Known
+// progress lights the mark in reading order. Everything derives from the node seed and the
+// time uniform; O(1) per pixel. Returns the cell's brightness (0 = background).
+fn gen_led(local: vec2<f32>, screen_size: vec2<f32>, seed_f: f32, progress: f32) -> f32 {
+    let d = cam.dpr;
+    let pitch_css = clamp(floor(min(screen_size.x, screen_size.y) / d / 28.0), 3.0, 6.0);
+    let pitch = pitch_css * d;
+    if min(screen_size.x, screen_size.y) < 13.0 * pitch * 1.6 {
         return 0.0;
     }
-    let seed = u32(seed_f);
-    let px = floor(local * screen_size);
-    let t = cam.time;
-    let count = 6u + u32(hash_u(seed * 7919u + 17u) * 14.99);
-    var a = 0.0;
-    for (var i = 0u; i < 20u; i = i + 1u) {
-        if i >= count { break; }
-        let k = seed * 131u + i * 5u + 1u;
-        let r0 = hash_u(k);
-        let r1 = hash_u(k + 1u);
-        let r2 = hash_u(k + 2u);
-        let r3 = hash_u(k + 3u);
-        let r4 = hash_u(k + 4u);
-        // Slow wander: a few percent of the tile over 10–30 s.
-        let sp = 0.2 + 0.4 * r2;
-        let drift = vec2(sin(t * sp + r3 * 6.2832), cos(t * sp * 0.73 + r4 * 6.2832)) * 0.04;
-        let c = clamp(vec2(r0, r1) * 0.88 + 0.06 + drift, vec2(0.02), vec2(0.98));
-        let size = (2.0 + step(0.6, r4)) * cam.dpr;
-        let q = px - floor(c * screen_size);
-        if q.x >= 0.0 && q.y >= 0.0 && q.x < size && q.y < size {
-            // Twinkle: each dot fades in and out on its own period.
-            let tw = 0.5 + 0.5 * sin(t * (0.6 + 1.6 * r3) + r2 * 40.0);
-            a = max(a, smoothstep(0.2, 0.8, tw));
-        }
+    let dot = max(2.0, floor(pitch_css * 0.5)) * d;
+    let origin = floor((screen_size - vec2(13.0 * pitch)) * 0.5);
+    let q = floor(local * screen_size) - origin;
+    if q.x < 0.0 || q.y < 0.0 || q.x >= 13.0 * pitch || q.y >= 13.0 * pitch {
+        return 0.0;
     }
-    return a;
+    let cell = floor(q / pitch);
+    if q.x - cell.x * pitch >= dot || q.y - cell.y * pitch >= dot {
+        return 0.0;
+    }
+    let cx = u32(cell.x);
+    let cy = u32(cell.y);
+    let row = MARK_ROWS[cy];
+    if ((row >> cx) & 1u) == 0u {
+        return 0.0;
+    }
+    // Reading-order index of this cell among the mark's cells.
+    var idx = countOneBits(row & ((1u << cx) - 1u));
+    for (var r = 0u; r < 13u; r = r + 1u) {
+        if r >= cy { break; }
+        idx = idx + countOneBits(MARK_ROWS[r]);
+    }
+    if progress >= 0.0 && f32(idx) < floor(progress * MARK_CELLS) {
+        return 0.8;
+    }
+    let seed = u32(seed_f);
+    let phase = hash_u(seed * 7919u + idx * 131u + 7u);
+    let step = u32(floor(cam.time * 2.0 + phase));
+    let on = hash_u(seed * 31u + idx * 977u + step * 2654435761u) < 0.22;
+    return select(0.2, 0.7, on);
 }
 
 @fragment
@@ -181,8 +196,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         rgb = in.color.rgb * in.color.a;
         a = in.color.a;
     }
-    // Generating tiles (mode 1: dots; mode 2: dots until the media is resident, then a
-    // crossfade to it).
+    // Generating tiles (mode 1: the LED mark; mode 2: the mark until the media is resident,
+    // then a crossfade to it).
     let mode = in.gen.z;
     // A text raster under the page's (transparent) DOM text: fades out as that fades in.
     if mode > 2.5 {
@@ -197,7 +212,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         if fade < 1.0 {
             let dot = vec3(0.54);
             var tile = in.color.rgb;
-            tile = mix(tile, dot, gen_dots(in.local, in.screen_size, in.gen.x) * 0.85);
+            tile = mix(tile, dot, gen_led(in.local, in.screen_size, in.gen.x, in.gen.y));
             // 1 px progress bar along the bottom edge.
             let p = in.local * in.screen_size;
             if in.gen.y >= 0.0 && p.y >= in.screen_size.y - cam.dpr && in.local.x <= in.gen.y {

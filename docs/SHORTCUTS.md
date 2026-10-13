@@ -19,7 +19,7 @@ lists these too.
 | Right-click a node (canvas or layers row) | Ask about it…, add to chat, copy file / image, open in… / download, reveal, export…, mark final, copy, paste, duplicate, delete, group, frame selection, ungroup, bring forward, send backward, zoom to selection, show lineage, rerun with changes…, more… |
 | Right-click empty canvas | Paste, add note, import files…, select all, zoom to fit, zoom to 100%, undo, redo, keyboard shortcuts, more… |
 | `− 43% +` bottom-left | Zoom out / in; click the level to fit all |
-| `[✦]` `[⇲]` by the selection | Ask about it / drag out (web: click downloads) |
+| `[>]` `[⇲]` by the selection | Ask about it / drag out (web: click downloads) |
 | Chat | `+` new chat, `≡` history, `opus fal codex` agent picker, `[+]` attach files, `[+ N selected]` add the canvas selection, `[send]`, `[stop]` (also on the "running" line) |
 | Library | Filter words; drag tiles (the thumbnail follows the pointer, true size on the canvas, a multi-selection lands as a grid, into the frame under the pointer, onto the chat to attach); double-click places; with a selection: `[place] [+ chat] [look] [♥] [tag] [collect] [upload] [local] [similar]` |
 
@@ -35,11 +35,11 @@ lists these too.
 ## Start a chat from the canvas
 | Keys | Action |
 |---|---|
-| `/` or click `[✦]` | With a selection: open the inline prompt next to it, pre-filled with the selection as chips. Without one: focus the chat input |
-| ⏎ | In the ✦ prompt: start a **new chat** |
-| ⌘⏎ | In the ✦ prompt: send to the **current chat** |
-| ⇥ | In the ✦ prompt: move the draft and chips into the chat panel ("open in chat") |
-| Esc | Close the ✦ prompt (the draft is kept for that selection) |
+| `/` or click `[>]` | With a selection: open the inline prompt next to it, pre-filled with the selection as chips. Without one: focus the chat input |
+| ⏎ | In the ask prompt: start a **new chat** |
+| ⌘⏎ | In the ask prompt: send to the **current chat** |
+| ⇥ | In the ask prompt: move the draft and chips into the chat panel ("open in chat") |
+| Esc | Close the ask prompt (the draft is kept for that selection) |
 | ⌘L | Add the selection to the chat as context chips |
 | Drag a node onto the chat | Attach it as a chip (the node stays where it was) |
 | Drop or paste files on the chat | Import them as canvas nodes in empty space near the view and attach them |

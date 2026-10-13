@@ -1,4 +1,4 @@
-// Chat actions shared by the panel, the tabs, the ✦ selection prompt, the palette and keys.
+// Chat actions shared by the panel, the tabs, the selection prompt, the palette and keys.
 
 import { getState, setState, toast } from './store';
 import { hostSync } from './sync';

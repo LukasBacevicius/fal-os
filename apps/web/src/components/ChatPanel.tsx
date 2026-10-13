@@ -4,13 +4,14 @@ import { hostSync } from '../sync';
 import { addSelectionToChat, attachFiles, emptySpot, pickFiles } from '../controller';
 import { ASSET_MIME, draggedShas, placeMany } from '../library';
 import { addChips, agentLine, chatColor, chatTitle, groupTurns, isExternal, slug, transcript, type Chip, type Transcript } from '../chat';
-import { DRIVERS, sendChatMessage, setDriver, steerQueued, steerText } from '../chatActions';
+import { sendChatMessage, setDriver, steerQueued, steerText } from '../chatActions';
 import { toast } from '../store';
 import { Chips } from './Chips';
 import { ChatHistory, ChatTabs, DeleteConfirm } from './ChatTabs';
 import { bar, Row, selectBatch, TurnView } from './Transcript';
 import { fuzzy } from './Palette';
 import { ResizeHandle } from './ResizeHandle';
+import { DriverPicker } from './DriverPicker';
 
 export { sendChatMessage } from '../chatActions';
 
@@ -32,7 +33,6 @@ function Composer({ running, readOnly, question, agent, queued }: {
   running: boolean; readOnly: boolean; question: string[] | null; agent: string | null; queued: { id: string; text: string }[];
 }) {
   const chat = useStore((s) => s.chat);
-  const driver = useStore((s) => s.driver);
   const chatDriver = chat.active ? chat.meta[chat.active]?.driver : undefined;
   useEffect(() => {
     if (chatDriver === 'opus' || chatDriver === 'fal' || chatDriver === 'codex') setDriver(chatDriver);
@@ -174,13 +174,7 @@ function Composer({ running, readOnly, question, agent, queued }: {
         </div>
       )}
       <div className="prompt">
-        {!readOnly && (
-          <span className="driver" title="agent for the next message (⌘.)">
-            {DRIVERS.map((d) => (
-              <button key={d} className={`link ${d === driver ? 'on' : 'faint'}`} title={`${d} drives the next message (${mod}. cycles)`} onClick={() => setDriver(d)}>{d}</button>
-            ))}
-          </span>
-        )}
+        {!readOnly && <DriverPicker />}
         <span className="dim">&gt;</span>
         <textarea
           ref={input}
@@ -362,7 +356,7 @@ export function ChatPanel() {
           >
             {empty && conn === 'connected' && (
               <div className="faint empty-chat">
-                select images or notes and press <span className="dim">/</span> (or click <span className="dim">✦</span>) to start from them
+                select images or notes and press <span className="dim">/</span> (or click <span className="dim">[&gt;]</span>) to start from them
                 <br />
                 or type below · drop images here to attach
               </div>

@@ -1,8 +1,8 @@
 // Agent activity on the canvas (docs/UX-V1.md §4). The host sends one `activity` event per
 // agent read / write / edit / delete with node ids; entries expire after 30 s or when the
 // agent finishes (`activity.clear`). Each event plays a one-shot effect in the engine overlay
-// (GPU-animated, in the chat's color), and the frames/groups agents are working in get a
-// slow pulsing outline with drifting dots on their title line. Agents never move the camera.
+// (a 1 px outline in the chat's color that holds, then steps down), and the frames/groups
+// agents are working in get a steady outline. Agents never move the camera.
 
 import { getState, setState } from './store';
 import { worldRects, type Rect } from './geometry';

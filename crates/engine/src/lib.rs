@@ -84,8 +84,8 @@ pub struct NodeDesc {
     /// A text raster (note / text node): never takes a [`Tier::Hires`] slot; once it is big
     /// on screen the page draws crisp DOM text over it.
     pub text: bool,
-    /// Draw as a generating tile: sparse drifting square dots over `color` (one shader effect,
-    /// no CPU work per frame).
+    /// Draw as a generating tile: the fal mark as stepped LED dots over `color` (one shader
+    /// effect, no CPU work per frame).
     pub generating: Option<GenTile>,
     /// A text raster under transparent DOM text: fades out between these camera zooms (CSS px
     /// per world unit) while the page's text fades in over it.
@@ -95,7 +95,7 @@ pub struct NodeDesc {
 /// A generation placeholder drawn by the shader (see [`NodeDesc::gen`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GenTile {
-    /// Per-node seed (dot layout, drift and twinkle phases).
+    /// Per-node seed (LED step phases).
     pub seed: u32,
     /// 0..1 draws a 1 px progress bar along the bottom; negative = unknown (no bar).
     pub progress: f32,
@@ -286,7 +286,7 @@ pub struct OverlayPrim {
     pub stroke_px: f32,
     pub radius_px: f32,
     pub shape: u32,
-    /// Animated shapes (`PULSE` and up): start time on the renderer clock (seconds, the
+    /// Activity shapes (`STEP`, `STEP_DASHED`): start time on the renderer clock (seconds, the
     /// `time` passed to [`Renderer::render`]), and duration (0 = persistent).
     pub t0: f32,
     pub dur: f32,
@@ -300,26 +300,16 @@ impl OverlayPrim {
     pub const CURSOR: u32 = 2;
     pub const DASHED: u32 = 3;
     pub const PIN: u32 = 4;
-    /// Agent activity (UX-V1 §4), animated in the shader from `t0`/`dur` and the clock:
-    /// a slowly pulsing outline (persistent while an agent works on a frame).
-    pub const PULSE: u32 = 5;
-    /// Read: a band sweeping upward over the rect.
-    pub const SWEEP_UP: u32 = 6;
-    /// Write: a band sweeping downward, revealing the rect.
-    pub const SWEEP_DOWN: u32 = 7;
-    /// Edit: an outline flash that decays.
-    pub const FLASH: u32 = 8;
-    /// Delete: a filled ghost that fades out.
-    pub const GHOST: u32 = 9;
-    /// Drifting dots in a strip (the "rain" on a worked frame's title line).
-    pub const RAIN: u32 = 10;
-    /// An outline that fades in, holds and fades out (sequential child outlines).
-    pub const BLINK: u32 = 11;
+    /// Agent activity (UX-V1 §4), stepped in the shader from `t0`/`dur` and the clock: a 1 px
+    /// outline that holds, then steps down in three levels (writes, edits, child outlines).
+    pub const STEP: u32 = 5;
+    /// The same, dashed (reads, deletes).
+    pub const STEP_DASHED: u32 = 6;
     /// A tiny mono provenance badge (docs/ASSETS-V1.md §5): a glyph (`seed`, one of the
     /// `BADGE_*` ids) in `stroke` on a faint `fill` square, constant size on screen. `t0`/`dur` carry the
     /// node's world width/height: the shader hides the badge while the node is small on
     /// screen. Not animated.
-    pub const GLYPH: u32 = 12;
+    pub const GLYPH: u32 = 7;
 
     /// Badge glyphs: `↓` import, `✦` generated, `ƒ` derived, `▶` render, `★` final, and the
     /// `↑` dot (uploaded to fal).
@@ -332,7 +322,7 @@ impl OverlayPrim {
 
     /// Whether the shape animates (needs frames while live).
     pub fn animated(&self) -> bool {
-        self.shape >= Self::PULSE && self.shape != Self::GLYPH
+        self.shape == Self::STEP || self.shape == Self::STEP_DASHED
     }
 
     /// A badge of `px` physical pixels at the node's top-left corner (inset 3 px), `slot`
@@ -564,7 +554,6 @@ pub struct Renderer {
     overlay_dirty: bool,
     /// Renderer-clock time until which animated overlay primitives are live.
     overlay_anim_until: f32,
-    overlay_fast_until: f32,
 
     dpr: f32,
     /// Time of the last rendered frame (s).
@@ -794,7 +783,6 @@ impl Renderer {
             overlay: Vec::new(),
             overlay_dirty: false,
             overlay_anim_until: f32::NEG_INFINITY,
-            overlay_fast_until: f32::NEG_INFINITY,
             dpr: 1.0,
             time: 0.0,
             animating: false,
@@ -1151,8 +1139,6 @@ impl Renderer {
                 .filter(|p| p.animated())
                 .map(|p| if p.dur <= 0.0 { f32::INFINITY } else { p.t0 + p.dur })
                 .fold(f32::NEG_INFINITY, f32::max);
-            self.overlay_fast_until =
-                prims.iter().filter(|p| p.animated() && p.dur > 0.0).map(|p| p.t0 + p.dur).fold(f32::NEG_INFINITY, f32::max);
         }
     }
 
@@ -1170,16 +1156,11 @@ impl Renderer {
             || self.fading
     }
 
-    /// Whether a generating tile is on screen. Its dots move slowly, so the platform may redraw
-    /// at a reduced rate (e.g. 30 Hz) while this is true, and not at all while it is false.
+    /// Whether a generating tile or an activity outline is on screen. Both change in discrete
+    /// steps, so the platform may redraw at a low rate (e.g. 10 Hz) while this is true, and not
+    /// at all while it is false.
     pub fn animating(&self) -> bool {
         self.animating || self.time < self.overlay_anim_until
-    }
-
-    /// Whether a short overlay effect (sweep, flash, fade) is playing: those want every frame,
-    /// unlike the slow dots and pulses that [`Renderer::animating`] covers.
-    pub fn animating_fast(&self) -> bool {
-        self.time < self.overlay_fast_until
     }
 
     /// Restricts playback to these videos (e.g. hovered or selected); `None` plays every
