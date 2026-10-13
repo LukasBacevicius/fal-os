@@ -25,6 +25,15 @@ export function falKey(): string | undefined {
   return undefined;
 }
 
+// Tools the desktop setup screen installs without Homebrew or a global npm: a static ffmpeg +
+// ffprobe in `$FALOS_HOME/bin`, the Codex CLI in `$FALOS_HOME/npm/bin`. They win over PATH, for
+// the runtime and everything it spawns (agents' Bash, renders).
+{
+  const dirs = [join(falosHome(), "bin"), join(falosHome(), "npm", "bin")].filter((d) => existsSync(d));
+  const path = (env.PATH ?? "").split(":").filter((d) => d && !dirs.includes(d));
+  if (dirs.length) env.PATH = [...dirs, ...path].join(":");
+}
+
 function which(bin: string): string | undefined {
   try {
     return execFileSync("which", [bin], { encoding: "utf8" }).trim() || undefined;

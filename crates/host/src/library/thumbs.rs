@@ -18,6 +18,8 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow, bail};
 use image::{DynamicImage, GenericImageView, RgbaImage, imageops::FilterType};
 
+use crate::ops::probe::{ffmpeg_bin, ffprobe_bin};
+
 pub const SMALL: u32 = 256;
 pub const LARGE: u32 = 1024;
 
@@ -104,7 +106,7 @@ pub fn decode_image(bytes: &[u8], path: Option<&Path>) -> Result<DynamicImage> {
             tmp
         }
     };
-    let out = Command::new("ffmpeg")
+    let out = Command::new(ffmpeg_bin())
         .args(["-v", "error", "-i"])
         .arg(&src)
         .args(["-frames:v", "1", "-vf", "scale='min(2048,iw)':-2", "-f", "image2pipe", "-c:v", "png", "-"])
@@ -142,7 +144,7 @@ pub struct Probe {
 
 /// ffprobe a local path or URL.
 pub fn probe(src: &str) -> Result<Probe> {
-    let out = Command::new("ffprobe")
+    let out = Command::new(ffprobe_bin())
         .args(["-v", "error", "-show_entries", "stream=codec_type,width,height,duration:format=duration", "-of", "json", src])
         .output()
         .context("running ffprobe (is ffmpeg installed?)")?;
@@ -170,7 +172,7 @@ pub fn probe(src: &str) -> Result<Probe> {
 }
 
 fn frame_at(src: &str, t: f64, vf: &str) -> Result<DynamicImage> {
-    let out = Command::new("ffmpeg")
+    let out = Command::new(ffmpeg_bin())
         .args(["-v", "error", "-ss", &format!("{t:.3}"), "-i", src, "-frames:v", "1", "-vf", vf, "-f", "image2pipe", "-c:v", "png", "-"])
         .output()
         .context("running ffmpeg")?;
@@ -257,7 +259,7 @@ pub fn video_thumbs(src: &str, dir: &Path, key: &str) -> Result<Made> {
 
 /// Peak amplitudes (0..1) of a mono 8 kHz decode, `cols` buckets.
 fn peaks(src: &str, cols: usize) -> Result<(Vec<f32>, f64)> {
-    let out = Command::new("ffmpeg")
+    let out = Command::new(ffmpeg_bin())
         .args(["-v", "error", "-i", src, "-t", "1800", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"])
         .output()
         .context("running ffmpeg")?;

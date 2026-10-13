@@ -15,10 +15,11 @@
 //! SIGTERMs the group (the host then stops the runtime's group), and a crashed app leaves
 //! nothing behind (the host notices it was reparented and exits; the runtime follows its host).
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value as Json, json};
@@ -34,6 +35,7 @@ pub struct Sidecar {
     path_env: OnceLock<String>,
     host: Mutex<Option<Child>>,
     setup: Mutex<Option<Child>>,
+    tasks: Mutex<HashMap<String, Arc<Mutex<Task>>>>,
 }
 
 pub fn falos_home() -> PathBuf {
@@ -104,13 +106,28 @@ impl Sidecar {
             .filter(|r| r.join("runtime/dist/main.mjs").exists() && r.join("node/bin/node").exists())
             .filter(|_| std::env::var_os("FALOS_NO_SIDECAR").is_none());
         let host_bin = exe_dir.map(|d| d.join("falos-host")).filter(|b| b.exists());
-        Self { resources, host_bin, home: falos_home(), path_env: OnceLock::new(), host: Mutex::default(), setup: Mutex::default() }
+        Self::with_layout(resources, host_bin, falos_home())
+    }
+
+    fn with_layout(resources: Option<PathBuf>, host_bin: Option<PathBuf>, home: PathBuf) -> Self {
+        let (path_env, host, setup, tasks) = Default::default();
+        Self { resources, host_bin, home, path_env, host, setup, tasks }
     }
 
     /// Bundled Node first (agents run `npx remotion …` / `node …` with a known-good Node 22),
-    /// then the login shell's PATH. Computed once, off the main thread (`start` runs on its own).
+    /// then what the setup screen installs (`$FALOS_HOME/bin`: ffmpeg + ffprobe,
+    /// `$FALOS_HOME/npm/bin`: codex), then the login shell's PATH. Computed once, off the main
+    /// thread (`start` runs on its own).
     fn path_env(&self, resources: &Path) -> &str {
-        self.path_env.get_or_init(|| format!("{}:{}", resources.join("node/bin").display(), login_path()))
+        self.path_env.get_or_init(|| {
+            format!(
+                "{}:{}:{}:{}",
+                resources.join("node/bin").display(),
+                self.home.join("bin").display(),
+                self.home.join("npm/bin").display(),
+                login_path()
+            )
+        })
     }
 
     pub fn packaged(&self) -> bool {
@@ -176,6 +193,10 @@ impl Sidecar {
 
     /// SIGTERM the host's process group, wait up to 5 s, then SIGKILL.
     pub fn stop(&self) {
+        let tasks: Vec<String> = self.tasks.lock().unwrap().keys().cloned().collect();
+        for name in tasks {
+            self.cancel_task(&name);
+        }
         for slot in [&self.setup, &self.host] {
             let Some(mut c) = slot.lock().unwrap().take() else { continue };
             let group = format!("-{}", c.id());
@@ -296,6 +317,110 @@ impl Sidecar {
         Ok(())
     }
 
+    /// A login tool: `$FALOS_<NAME>_PATH`, then our own installs, then the PATH the host gets.
+    fn find_tool(&self, name: &str) -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os(format!("FALOS_{}_PATH", name.to_uppercase())) {
+            return Some(p.into());
+        }
+        let r = self.resources.as_ref()?;
+        self.path_env(r).split(':').map(|d| Path::new(d).join(name)).find(|p| p.is_file())
+    }
+
+    /// Start one of the setup screen's fixed tasks (never an arbitrary command) in the
+    /// background; `task` reports its output. A finished install restarts the host, so the
+    /// runtime sees the new `claude` / `ffmpeg` / `codex`.
+    pub fn run_task(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        let r = self.resources.clone().ok_or("not running from the packaged app")?;
+        // Held until the task is registered: a double click starts it once.
+        let mut tasks = self.tasks.lock().unwrap();
+        if tasks.get(name).is_some_and(|t| t.lock().unwrap().running) {
+            return Ok(());
+        }
+        let setup = |sub: &str| {
+            let mut c = Command::new(r.join("node/bin/node"));
+            c.arg(r.join("runtime/dist/setup.mjs")).arg(sub);
+            c
+        };
+        let tool = |n: &str| self.find_tool(n).ok_or_else(|| format!("{n} isn't installed yet"));
+        let mut cmd = match name {
+            // Anthropic's official installer: everything goes under $HOME (~/.local/bin/claude).
+            "claude-install" => {
+                let mut c = Command::new("/bin/bash");
+                c.args(["-c", "set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash"]);
+                c
+            }
+            // Opens the browser; the CLI waits for the OAuth callback on localhost.
+            "claude-login" => {
+                let mut c = Command::new(tool("claude")?);
+                c.args(["auth", "login"]);
+                c
+            }
+            "ffmpeg" => setup("ffmpeg"),
+            "codex-install" => setup("codex"),
+            "codex-login" => {
+                let mut c = Command::new(tool("codex")?);
+                c.arg("login");
+                c
+            }
+            _ => return Err(format!("unknown setup task {name}")),
+        };
+        self.env(&mut cmd);
+        // Installers and logins have no business with the fal key.
+        cmd.env_remove("FAL_KEY");
+        cmd.current_dir(&self.home).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        std::fs::create_dir_all(self.home.join("logs")).map_err(|e| e.to_string())?;
+        let mut child = cmd.spawn().map_err(|e| format!("{name}: {e}"))?;
+        let state = Arc::new(Mutex::new(Task { running: true, pid: child.id(), ..Task::default() }));
+        let log = Arc::new(Mutex::new(
+            std::fs::OpenOptions::new().create(true).append(true).open(self.home.join("logs/setup.log")).ok(),
+        ));
+        let readers: Vec<_> = [child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>), child.stderr.take().map(|e| Box::new(e) as _)]
+            .into_iter()
+            .flatten()
+            .map(|out| {
+                let (state, log, name) = (state.clone(), log.clone(), name.to_string());
+                std::thread::spawn(move || pump(out, &state, &log, &name))
+            })
+            .collect();
+        tasks.insert(name.to_string(), state.clone());
+        drop(tasks);
+        let (side, name) = (self.clone(), name.to_string());
+        std::thread::spawn(move || {
+            let code = child.wait().ok().and_then(|s| s.code());
+            {
+                let mut t = state.lock().unwrap();
+                t.running = false;
+                t.code = Some(code.unwrap_or(-1));
+            }
+            // The rest of the output (a helper the tool left running may hold the pipes; the
+            // task counts as done either way).
+            for r in readers {
+                let _ = r.join();
+            }
+            if code == Some(0) && matches!(name.as_str(), "claude-install" | "ffmpeg" | "codex-install") {
+                let _ = side.restart();
+            }
+        });
+        Ok(())
+    }
+
+    /// `{running, code, lines, url}` of a setup task (null if it never ran). `url` is the first
+    /// https link in its output (the login page, when the browser didn't open by itself).
+    pub fn task(&self, name: &str) -> Json {
+        let Some(t) = self.tasks.lock().unwrap().get(name).cloned() else { return Json::Null };
+        let t = t.lock().unwrap();
+        json!({ "running": t.running, "code": t.code, "lines": t.lines, "url": t.url })
+    }
+
+    pub fn cancel_task(&self, name: &str) {
+        let Some(t) = self.tasks.lock().unwrap().get(name).cloned() else { return };
+        let t = t.lock().unwrap();
+        if t.running {
+            let _ = Command::new("kill").args(["-TERM", &format!("-{}", t.pid)]).status();
+        }
+    }
+
     /// Store the fal key: Keychain first, else `$FALOS_HOME/fal.env` (0600). Restarts the host so
     /// the runtime picks it up.
     pub fn save_key(&self, key: &str) -> Result<&'static str, String> {
@@ -327,6 +452,94 @@ impl Sidecar {
     }
 }
 
+/// A setup task's live state (see `Sidecar::run_task`).
+#[derive(Default)]
+struct Task {
+    running: bool,
+    pid: u32,
+    code: Option<i32>,
+    /// The last lines of output (stdout + stderr), ANSI stripped; `\r` progress counts as a line.
+    lines: Vec<String>,
+    url: Option<String>,
+}
+
+fn pump(mut out: Box<dyn Read + Send>, state: &Mutex<Task>, log: &Mutex<Option<std::fs::File>>, name: &str) {
+    use std::io::Write;
+    let mut buf = [0u8; 4096];
+    let mut line = Vec::new();
+    let push = |raw: &[u8]| {
+        let text = strip_ansi(&String::from_utf8_lossy(raw));
+        let text = text.trim_end();
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some(f) = log.lock().unwrap().as_mut() {
+            let _ = writeln!(f, "[{name}] {text}");
+        }
+        let mut t = state.lock().unwrap();
+        if t.url.is_none()
+            && let Some(i) = text.find("https://")
+        {
+            let u: String = text[i..].chars().take_while(|c| !c.is_whitespace() && !"\"'<>)".contains(*c)).collect();
+            t.url = Some(u);
+        }
+        t.lines.push(text.chars().take(300).collect());
+        let n = t.lines.len();
+        if n > 40 {
+            t.lines.drain(..n - 40);
+        }
+    };
+    while let Ok(n) = out.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            if b == b'\n' || b == b'\r' {
+                push(&line);
+                line.clear();
+            } else {
+                line.push(b);
+            }
+        }
+    }
+    push(&line);
+}
+
+/// Drop terminal escape sequences (colors, cursor moves) from CLI output.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match it.peek() {
+            Some('[') => {
+                it.next();
+                for c in it.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC (e.g. hyperlinks): up to BEL or ESC \
+                it.next();
+                while let Some(c) = it.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && it.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                it.next();
+            }
+        }
+    }
+    out
+}
+
 fn keychain_entry() -> Result<keyring::Entry, String> {
     if std::env::var_os("FALOS_NO_KEYCHAIN").is_some() {
         return Err("keychain disabled".into());
@@ -355,4 +568,53 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_ansi() {
+        assert_eq!(strip_ansi("\u{1b}[1;32mok\u{1b}[0m done"), "ok done");
+        assert_eq!(strip_ansi("\u{1b}]8;;https://x\u{7}link\u{1b}]8;;\u{1b}\\ end"), "link end");
+    }
+
+    /// A login task runs the tool found on the app's PATH with fixed args (no fal key in its
+    /// env), streams its output ANSI-stripped and picks up the sign-in URL. A stub stands in
+    /// for `claude`.
+    #[test]
+    fn login_task_streams_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("falos-sidecar-test-{}", std::process::id()));
+        let bin = root.join("res/node/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let stub = bin.join("claude");
+        let script = r#"#!/bin/sh
+echo 'Opening browser to sign in'
+printf '\033[2mvisit https://claude.ai/oauth/authorize?code=true&x=1\033[0m\r\n'
+echo "args: $*"
+[ -z "$FAL_KEY" ] && echo 'no fal key'
+exit 0
+"#;
+        std::fs::write(&stub, script).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let side = Arc::new(Sidecar::with_layout(Some(root.join("res")), None, root.join("home")));
+        assert!(side.run_task("rm -rf").is_err());
+        side.run_task("claude-login").unwrap();
+        let start = Instant::now();
+        while side.task("claude-login")["running"] == json!(true) && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(300)); // the readers drain after the exit
+        let t = side.task("claude-login");
+        assert_eq!(t["code"], json!(0), "{t}");
+        let lines: Vec<&str> = t["lines"].as_array().unwrap().iter().filter_map(|l| l.as_str()).collect();
+        assert!(lines.contains(&"args: auth login"), "{lines:?}");
+        assert!(lines.contains(&"no fal key"), "{lines:?}");
+        assert_eq!(t["url"], json!("https://claude.ai/oauth/authorize?code=true&x=1"));
+        let log = std::fs::read_to_string(root.join("home/logs/setup.log")).unwrap();
+        assert!(log.contains("[claude-login] args: auth login"), "{log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

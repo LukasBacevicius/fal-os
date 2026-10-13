@@ -530,6 +530,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .setup-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 .setup-input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); padding: 2px 6px; outline: none; }
 .setup-input:focus { border-color: var(--dim); }
+.setup-log { margin: 4px 0 0; font: inherit; color: var(--faint); white-space: pre-wrap; word-break: break-all; }
 
 /* ---- projects ---- */
 .project-head { display: inline-flex; align-items: baseline; min-width: 0; max-width: 60%; white-space: nowrap; color: var(--text); }

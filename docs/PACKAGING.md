@@ -8,7 +8,9 @@ steps to sign and notarize the app later.
 **TL;DR**
 - **This week:** an ad-hoc signed, Apple Silicon only DMG built by `scripts/package-macos.sh`.
   Share it in Slack or Drive. Colleagues drag it to /Applications, run one `xattr` command, and
-  paste a fal key on the setup screen. The app uses their own `claude` login.
+  follow the setup screen: paste a fal key, click install / sign in for Claude Code, ffmpeg and
+  the motion tools download by themselves. No Terminal, no Homebrew. The app uses their own
+  `claude` login. Colleague-facing steps: [INSTALL.md](INSTALL.md).
 - **Later:** a fal Developer ID certificate and notarization. Build with `cargo tauri build`
   (`externalBin` + `resources`), add `tauri-plugin-updater` with a signed `latest.json` on an
   internal bucket, and optionally a private Homebrew cask.
@@ -79,9 +81,9 @@ These findings come from static inspection only; none of the bundles was execute
 | `falos-host` | **bundle** as a sidecar (`Contents/MacOS/falos-host`) | 21 MB stripped |
 | Agent runtime | **bundle**, esbuild → `dist/main.mjs` (2.6 MB) + `dist/setup.mjs` | no `node_modules`, no tsx, no pnpm at runtime |
 | Node | **bundle the official Node 22** (`node/bin/node` + npm/npx, 122 MB, keeps its OpenJS Developer ID signature) | The agents run `npx remotion render`, `node motion-qa.mjs` and `npm install` themselves, so a real Node with npm is needed anyway. `node --experimental-sea-config` (SEA) would still embed the full ~107 MB binary, is CJS-only in Node 22, and provides no `npx`. `bun build --compile` (~60 MB) is a different runtime under the Agent SDK's process handling, and the agents would still need Node. The bundled Node goes first on the runtime's PATH, so renders use a known-good version. |
-| `claude` CLI | **require the user's own install and login** | The Agent SDK spawns `claude` and uses that user's subscription; no API key is shared and there is no per-seat billing for us. Bundling it would add 219 MB and an update treadmill. The setup screen detects it (`claude auth status --json`) and shows the install command. |
-| Codex | **optional, the user's own `codex`** (`FALOS_CODEX_PATH`, else `which codex`) | `@openai/codex` is 318 MB. Few people will use the codex driver. |
-| ffmpeg | **require Homebrew** (`brew install ffmpeg`) for now | Homebrew's build is GPL (x264 and others), which is fine as the user's own install. Bundling would mean an **LGPL-only** build (no x264/x265; use VideoToolbox `h264_videotoolbox` for encoding), shipping the source offer plus relinkability, and +~25 MB per tool. Revisit when non-engineers join. |
+| `claude` CLI | **the user's own install and login**, installed from the setup screen if missing | The Agent SDK spawns `claude` and uses that user's subscription; no API key is shared and there is no per-seat billing for us. Bundling it would add 219 MB and an update treadmill. The setup screen detects it (`claude auth status --json`), runs Anthropic's official installer (`curl -fsSL https://claude.ai/install.sh \| bash`, everything under `$HOME`, `~/.local/bin/claude`) and `claude auth login` (browser) on a click. |
+| Codex | **optional, the user's own `codex`** (`FALOS_CODEX_PATH`, else PATH), or one click: the bundled npm installs `@openai/codex` into `~/.fal-os/npm` | `@openai/codex` is 318 MB. Few people will use the codex driver, so it's never downloaded unasked. |
+| ffmpeg | **downloaded on first run** into `~/.fal-os/bin` (setup screen; the user's own Homebrew ffmpeg also works) | A pinned static arm64 build (Martin Riedl's release builds, Developer ID signed + notarized), sha256-checked; ~56 MB of zips, 130 MB on disk. No Homebrew needed. It is GPL (x264/x265), which is fine because it is downloaded and installed on the user's machine, not shipped by us (§2.7). Host, runtime and agents prefer `~/.fal-os/bin` over PATH. |
 | Remotion + HyperFrames template deps, chrome-headless-shell | **install on first run** into `~/.fal-os/templates` (Setup → install) | about 0.85 GB on disk (`motion-template` ≈ 600 MB, chrome ≈ 90 MB, HyperFrames ≈ 126 MB). The bundle stays small, and updates don't re-download it. The npm cache is reused. |
 | Remotion / HyperFrames agent skills | **fetch on first run** (GitHub tarballs at the commits pinned in `install-skills.sh`, no git needed) | Remotion's skills repo has no LICENSE file, so we fetch them and never redistribute. |
 
@@ -95,12 +97,35 @@ These findings come from static inspection only; none of the bundles was execute
 - In packaged mode the runtime reads only `$FALOS_HOME`; it skips the dev fallback to `~/.fal-os`.
 
 ### 2.5 First-run onboarding (implemented)
-The setup screen opens at launch until a fal key is stored and Claude Code is signed in. It is
-also available from ⌘K → "setup…".
-1. **fal key**: paste, validate (models + AGENT preset), store in the Keychain. It shows where the key is stored and offers [check] / [remove].
-2. **Claude Code**: path + `loggedIn` + subscription, or `curl -fsSL https://claude.ai/install.sh | bash` / `claude auth login`.
-3. **Motion tools**: per-part status, free disk, and an install button with progress (from `~/.fal-os/setup-state.json`). If `ffmpeg` is missing it shows `brew install ffmpeg`.
-4. **Codex (optional)**: path + sign-in state.
+The setup screen opens at launch until the required parts are there: a fal key, Claude Code
+installed and signed in, and ffmpeg. It is also available from ⌘K → "setup…" (for example to
+change the key). Nothing on it needs Terminal or Homebrew.
+1. **fal key**: [open fal.ai/dashboard/keys] opens the keys page in the system browser. Paste
+   with ⌘V (the paste itself triggers the check) or [paste] (reads the clipboard only on that
+   click; nothing reads it unprompted). The key is validated (models + AGENT preset) and stored
+   in the Keychain. Once stored: [check] / [change] / [remove]; [change] saves a new key over the
+   old one after the same check.
+2. **Claude Code**: path + `loggedIn` + subscription. Not installed → [install] runs Anthropic's
+   official installer with streamed output. Not signed in → [sign in] runs `claude auth login`,
+   which opens the browser; the screen shows [open the sign-in page] when the CLI prints a URL,
+   and [cancel]. While anything required is missing, the screen polls `claude auth status --json`
+   every 3 s, so it turns green by itself after the browser sign-in.
+3. **Motion tools**: ffmpeg + per-part status (Remotion, browser, HyperFrames, skills), free disk.
+   Right after a key is saved, the ffmpeg download and the motion tools install start by
+   themselves in the background (progress inline; they keep going if the screen is closed).
+   [install] retries what's missing.
+4. **Codex (optional)**: [install] (bundled npm → `~/.fal-os/npm`) and [sign in] (`codex login`,
+   browser).
+5. **ready → [start →]**: when 1–3 (fal key, Claude, ffmpeg) are done, one button closes the
+   screen and opens a fresh project (the empty first project, else a new one), chat focused. The
+   motion tools may still be finishing in the background. Reopened from ⌘K it says [done].
+
+How it runs: the installs and sign-ins are a fixed list of tasks in the shell (`setup_run`,
+`setup_task`, `setup_cancel` in `sidecar.rs`; never an arbitrary command), each in its own process
+group with the app's PATH and **without** `FAL_KEY` in its env. Output is kept in memory (last 40
+lines, ANSI stripped) for the screen and appended to `~/.fal-os/logs/setup.log`. A finished
+install restarts the host, so the runtime sees the new `claude` / `ffmpeg` / `codex`. `ffmpeg` and
+`codex` are subcommands of `dist/setup.mjs`.
 
 The runtime's capability fixes point at "fal-os → Setup" when packaged (`FALOS_PACKAGED=1`),
 not at dev commands.
@@ -116,7 +141,7 @@ not at dev commands.
 ### 2.7 Licensing notes (internal use; check before any external release)
 - **Remotion**: free only for individuals and companies of up to 3 people. **fal needs a Remotion Company License** even for internal use of the motion agent; check the current terms at remotion.dev/license. We don't bundle Remotion; it's npm-installed on first run, but the license is about use, not bundling.
 - **HyperFrames**: Apache-2.0 (HeyGen). Its skills ship with their LICENSE.
-- **ffmpeg**: not bundled. If bundled later: LGPL-only build, dynamic linking or the source offer, no GPL encoders.
+- **ffmpeg**: not bundled. The setup screen downloads Martin Riedl's static macOS arm64 release build (ffmpeg.martin-riedl.de, FFmpeg 9.0.2, `--enable-gpl --enable-version3`, so GPLv3 with x264/x265) on the user's machine, pinned by URL and sha256 in `apps/agent-runtime/src/setup.ts`. We don't distribute it; the user downloads it from its publisher, like a Homebrew install. Because it's GPL, never copy it into the DMG. If ffmpeg is ever bundled: LGPL-only build, dynamic linking or the source offer, no GPL encoders. To bump it: new version, URLs and both hashes together (the site publishes a `.sha256` next to each zip; verify locally with `shasum -a 256`).
 - **Node**: MIT, LICENSE included at `Resources/node/LICENSE`. **npm** is Artistic-2.0.
 - **Claude Agent SDK**: Anthropic's commercial terms, inlined in `dist/main.mjs`; fine for internal use. **@openai/codex-sdk**: Apache-2.0. **@fal-ai/client**: MIT.
 - chrome-headless-shell (Chromium, BSD plus others) is downloaded by Remotion on the user's machine.
@@ -149,7 +174,7 @@ Remotion is what keeps it small.
 ### This week: ad-hoc DMG (built and verified, see §4)
 1. `scripts/package-macos.sh` → `fal-os-0.1.0-arm64.dmg` (54 MB).
 2. Post it in the internal channel with the install steps from §5.
-3. Colleagues need Claude Code signed in, a fal key with the AGENT preset, and `brew install ffmpeg` for motion.
+3. Colleagues need a fal key with the AGENT preset and a Claude account. The setup screen installs Claude Code and ffmpeg and signs in; see [INSTALL.md](INSTALL.md).
 4. Updates: post a new DMG.
 
 ### Next (1–2 weeks)
@@ -189,7 +214,7 @@ fal-os.app/Contents/
 - **Port:** the host picks 7317 or the next free port and writes `host.json`. The `host_info` command waits until `host.json` is the one *its* child wrote (pid match), so the UI never connects to a stale port or to someone else's host.
 - **Quit:** `RunEvent::Exit` SIGTERMs the host's group (and the setup helper's), waits 5 s, then SIGKILLs. The host stops the runtime's group.
 - **Crash:** if the app dies, the host notices it was reparented and exits (`FALOS_EXIT_WITH_PARENT`), and the runtime follows its host (`FALOS_HOST_PID`).
-- **Setup commands:** `setup_status`, `check_fal_key`, `save_fal_key`, `forget_fal_key`, `install_extras` and `restart_host` call `node dist/setup.mjs doctor|check-key|install` or the Keychain.
+- **Setup commands:** `setup_status`, `check_fal_key`, `save_fal_key`, `forget_fal_key`, `install_extras` and `restart_host` call `node dist/setup.mjs doctor|check-key|install` or the Keychain. `setup_run` / `setup_task` / `setup_cancel` run the fixed install and sign-in tasks (§2.5).
 - **Dev:** `cargo run` from a checkout spawns nothing and finds your own `falos-host serve` as before.
 
 **Verified** (DMG installed into a temp "Applications" dir; launched with a Finder-like minimal env, `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and `FALOS_HOME`, `FALOS_PROJECTS` and the Keychain service all pointed at test locations):
@@ -216,18 +241,16 @@ fal-os.app/Contents/
 
 > fal-os is an internal experiment. Apple Silicon Mac with **macOS 26 (Tahoe)** or newer.
 
-1. **Before you start**
-   - Claude Code installed and signed in: `curl -fsSL https://claude.ai/install.sh | bash`, then run `claude` once to sign in.
-   - For motion and video: `brew install ffmpeg`.
-   - A fal key with the **AGENT** preset (fal.ai/dashboard/keys).
-   - Optional, for the codex driver: `npm i -g @openai/codex && codex login`.
+The short version for colleagues is [INSTALL.md](INSTALL.md).
+
+1. **Before you start**: a fal account (for a key with the **AGENT** preset) and a Claude account. Nothing to install by hand.
 2. Open `fal-os-<version>-arm64.dmg` and drag **fal-os** to **Applications**.
 3. This build isn't notarized yet, so tell macOS you trust it (once per download):
    ```sh
    xattr -dr com.apple.quarantine /Applications/fal-os.app
    ```
    Without Terminal: open it once, dismiss the warning, then go to System Settings → Privacy & Security → "fal-os was blocked…" → **Open Anyway**.
-4. Open fal-os. The setup screen asks for your fal key (stored in your Keychain). It checks Claude Code and offers to install the motion tools (~0.85 GB into `~/.fal-os`).
+4. Open fal-os and follow the setup screen: open the keys page, paste your fal key (stored in your Keychain), click [install] and [sign in] for Claude Code. ffmpeg and the motion tools (~0.9 GB into `~/.fal-os`) download by themselves after the key is saved. When it says "ready", press [start →].
    macOS may ask whether fal-os may use the "ai.fal.os" Keychain item. Click **Always Allow** (it asks again after each update until builds are notarized).
 5. Your projects live in `~/fal-os-projects`. To connect Claude Code or Codex to the canvas, use ⌘K → "connect agent".
 6. Problems? Send `~/.fal-os/logs/host.log` and `~/.fal-os/logs/setup.log`.
@@ -281,7 +304,8 @@ There is no signing identity on the build machine today (`security find-identity
 - Ad-hoc signature: Gatekeeper needs the `xattr` step, and the Keychain asks again after each update.
 - No auto-update; no single-instance guard. Two app instances start two hosts on different ports, and the last one owns `~/.fal-os/host.json`. The same applies if a colleague also runs a dev `falos-host serve` with the default `FALOS_HOME`.
 - MCP registration writes an HTTP URL with the current port (§2.6).
-- ffmpeg isn't bundled.
+- ffmpeg isn't bundled; it's a ~56 MB first-run download (§2.3). x86 Macs would need `brew install ffmpeg` (the download is arm64 only).
+- `claude auth login` from the app is wired and tested with a stub, but a real browser sign-in from the packaged app hasn't been run yet. If the CLI ever insists on a TTY, the screen shows the Terminal command as a fallback.
 - Before a key is saved, `host.log` says "run `falos-host login`", which is a dev hint. The host's own `generate` tool picks up `FAL_KEY` from the env once a key is saved.
 - The DMG has no background or window layout. It uses the version from `tauri.conf.json` and the git sha as `CFBundleVersion`.
 - Node is taken from the build machine (`NODE_DIST`, default: the nvm Node on PATH). CI should download a pinned official tarball and verify its SHASUMS.

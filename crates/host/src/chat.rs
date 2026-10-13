@@ -1891,7 +1891,7 @@ pub struct Probe {
 
 /// Width/height/duration via ffprobe (when installed), with a PNG header fallback.
 pub async fn probe(path: &Path) -> Result<Probe> {
-    let ffprobe = std::env::var("FALOS_FFPROBE").unwrap_or_else(|_| "ffprobe".into());
+    let ffprobe = crate::ops::probe::ffprobe_bin();
     let out = tokio::process::Command::new(&ffprobe)
         .args([
             "-v",

@@ -6,12 +6,25 @@ use anyhow::{Context, Result, bail};
 use falos_doc::Media;
 use serde_json::{Value as Json, json};
 
+/// `$FALOS_<NAME>`, else `$FALOS_HOME/bin/<name>` (the static build the desktop setup screen
+/// installs), else `<name>` from PATH.
+fn tool(var: &str, name: &str) -> String {
+    if let Ok(v) = std::env::var(var) {
+        return v;
+    }
+    let local = crate::server::home_dir().join("bin").join(name);
+    if local.is_file() {
+        return local.display().to_string();
+    }
+    name.into()
+}
+
 pub fn ffprobe_bin() -> String {
-    std::env::var("FALOS_FFPROBE").unwrap_or_else(|_| "ffprobe".into())
+    tool("FALOS_FFPROBE", "ffprobe")
 }
 
 pub fn ffmpeg_bin() -> String {
-    std::env::var("FALOS_FFMPEG").unwrap_or_else(|_| "ffmpeg".into())
+    tool("FALOS_FFMPEG", "ffmpeg")
 }
 
 /// Raw `ffprobe -show_streams -show_format` JSON.
