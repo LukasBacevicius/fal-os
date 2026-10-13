@@ -206,6 +206,10 @@ pub fn scan_canvas(c: &Canvas, canvas_id: &str, out: &mut Scan) {
         }
     }
     for n in c.nodes() {
+        // An app's `asset` is its snapshot still, not library media.
+        if n.kind == falos_doc::NodeKind::App {
+            continue;
+        }
         let Some(sha) = n.props.get("asset").and_then(Json::as_str).and_then(crate::assets::parse_id) else { continue };
         out.placements.push(Placement {
             canvas: canvas_id.to_string(),

@@ -336,6 +336,19 @@ pub async fn serve_workspace(space: Arc<Workspace>, port: u16, token: &str) -> R
     space.set_endpoint(mcp_url(addr.port()), token.to_string());
     space.start();
     let cancel = CancellationToken::new();
+    // App nodes get their own origin (no token, no host API): port + 100, else ephemeral.
+    let apps_listener = match TcpListener::bind(("127.0.0.1", addr.port().saturating_add(100))).await {
+        Ok(l) => l,
+        Err(_) => TcpListener::bind(("127.0.0.1", 0)).await.context("binding the app server")?,
+    };
+    crate::apps::set_base_url(format!("http://127.0.0.1:{}", apps_listener.local_addr()?.port()));
+    let apps_app = crate::apps::serve::router(space.clone());
+    let act = cancel.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(apps_listener, apps_app)
+            .with_graceful_shutdown(async move { act.cancelled_owned().await })
+            .await;
+    });
     let app = router(space.clone(), token, cancel.clone());
     let ct = cancel.clone();
     let ws = space.clone();

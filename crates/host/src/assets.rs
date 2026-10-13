@@ -156,15 +156,20 @@ pub struct AssetQuery {
 }
 
 /// The stored file for `hex`: in `project`, else the default project, else any project.
+/// An asset file of a project: `assets/`, or an app snapshot still (`apps/.snapshots/`).
+pub fn find_in_project(dir: &Path, hex: &str) -> Option<PathBuf> {
+    find(&dir.join("assets"), hex).or_else(|| find(&crate::apps::snapshots_dir(dir), hex))
+}
+
 pub fn locate(space: &Workspace, project: Option<&str>, hex: &str) -> Option<PathBuf> {
     if project.is_some() {
-        return find(&space.host_for_frame(project).ok()?.dir().join("assets"), hex);
+        return find_in_project(space.host_for_frame(project).ok()?.dir(), hex);
     }
-    if let Some(p) = space.default_host().ok().and_then(|h| find(&h.dir().join("assets"), hex)) {
+    if let Some(p) = space.default_host().ok().and_then(|h| find_in_project(h.dir(), hex)) {
         return Some(p);
     }
     match space.root() {
-        Some(root) => space.ids().iter().find_map(|id| find(&root.join(id).join("assets"), hex)),
+        Some(root) => space.ids().iter().find_map(|id| find_in_project(&root.join(id), hex)),
         None => None,
     }
 }

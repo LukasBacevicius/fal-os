@@ -12,9 +12,10 @@ const DOCS: &[(&str, &str)] = &[
     ),
     ("assets", include_str!("../knowledge/assets.md")),
     ("export", include_str!("../knowledge/export.md")),
+    ("apps", include_str!("../knowledge/apps.md")),
 ];
 
-pub const KEYS: &[&str] = &["format", "annotations", "generation", "collaboration", "assets", "export"];
+pub const KEYS: &[&str] = &["format", "annotations", "generation", "collaboration", "assets", "export", "apps"];
 
 pub fn get(keys: &[String]) -> Result<String> {
     let mut out = vec![];

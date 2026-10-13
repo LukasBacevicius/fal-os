@@ -143,6 +143,16 @@ pub enum Event {
         chat: Option<String>,
         transport: String,
     },
+    /// An app's files changed (`what: files`: reload) or it logged errors (`what: logs`); see `apps`.
+    #[serde(rename = "app")]
+    App {
+        app: String,
+        node: Option<String>,
+        version: u64,
+        what: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        errors: Option<usize>,
+    },
     /// An external agent session's first mutation (connect flow).
     #[serde(rename = "agent.first_write")]
     AgentFirstWrite {
@@ -170,6 +180,7 @@ impl Event {
             | Event::SessionClosed { .. }
             | Event::ActivityClear { .. }
             | Event::AgentConnected { .. }
+            | Event::App { .. }
             | Event::AgentFirstWrite { .. } => None,
         }
     }
@@ -343,6 +354,8 @@ pub struct Host {
     pub batches: crate::batch::Batches,
     /// Running and finished op runs (`transform` / `compose`).
     pub ops_runs: crate::ops::Runs,
+    /// App nodes: versions, logs, checks (see `apps`).
+    pub apps: crate::apps::Apps,
     sweeper: std::sync::Once,
 }
 
@@ -416,6 +429,7 @@ impl Host {
             endpoint: Mutex::default(),
             batches: Default::default(),
             ops_runs: Default::default(),
+            apps: Default::default(),
             sweeper: std::sync::Once::new(),
         }))
     }
@@ -459,6 +473,7 @@ impl Host {
     pub fn start_tasks(self: &Arc<Self>) {
         self.start_sweeper();
         self.chat.start_list_task(self);
+        crate::apps::start(self);
         self.autosaver.call_once(|| {
             tokio::spawn(self.clone().autosave());
         });

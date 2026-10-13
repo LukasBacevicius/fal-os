@@ -120,6 +120,9 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
         "session": info,
         "sessions": host.sessions(),
         "claims": host.claims(&canvas),
+        // App nodes load from here: `<apps>/<project>/<app>/` (see apps.rs).
+        "apps": crate::apps::base_url(),
+        "project": host.id,
     });
     if !send_json(&mut socket, hello).await
         || !send_snapshot(&host, &canvas, &mut socket).await

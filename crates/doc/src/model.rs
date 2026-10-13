@@ -62,6 +62,8 @@ pub enum NodeKind {
     Vector,
     Document,
     Embed,
+    /// A live web app (a folder of plain web files in `<project>/apps/<app>/`).
+    App,
     Timeline,
     Stream,
     Generation,
@@ -81,7 +83,7 @@ const STYLES: [(StyleKind, &str); 6] = [
     (StyleKind::Lora, "lora"),
 ];
 
-const KINDS: [(NodeKind, &str); 15] = [
+const KINDS: [(NodeKind, &str); 16] = [
     (NodeKind::Image, "image"),
     (NodeKind::Video, "video"),
     (NodeKind::Audio, "audio"),
@@ -90,6 +92,7 @@ const KINDS: [(NodeKind, &str); 15] = [
     (NodeKind::Vector, "vector"),
     (NodeKind::Document, "document"),
     (NodeKind::Embed, "embed"),
+    (NodeKind::App, "app"),
     (NodeKind::Timeline, "timeline"),
     (NodeKind::Stream, "stream"),
     (NodeKind::Generation, "generation"),
@@ -174,6 +177,10 @@ impl NodeKind {
             NodeKind::Model3d | NodeKind::Vector => &[("asset", Str)],
             NodeKind::Document => &[("asset", Str), ("page", Num)],
             NodeKind::Embed => &[("url", Str), ("asset", Str)],
+            // `app`: folder id under `<project>/apps/`; `version`: the file snapshot the node
+            // shows (reverting it restores the files); `asset`: a still of the running app;
+            // `chat`: the chat that wrote it (provenance).
+            NodeKind::App => &[("app", Str), ("entry", Str), ("version", Num), ("asset", Str), ("chat", Str)],
             NodeKind::Timeline => &[("duration", Num)],
             NodeKind::Stream => &[("url", Str), ("model", Str), ("muted", Bool)],
             NodeKind::Generation => &[
