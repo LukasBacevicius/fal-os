@@ -156,7 +156,7 @@ function Composer({ running, readOnly, question, agent, queued }: {
     : agent
       ? `message ${agent}…`
       : ext
-        ? `message ${short(chatTitle(chat, chat.active!))} · ${chat.meta[chat.active!]?.state === 'detached' ? 'waits for its next session' : 'read between steps'}…`
+        ? `message ${short(chatTitle(chat, chat.active!))} · ${chat.meta[chat.active!]?.state === 'detached' ? 'next session' : 'read between steps'}…`
         : chat.active
           ? running ? 'steer: ⏎ queue · ⌘⏎ now…' : `message ${short(chatTitle(chat, chat.active))}`
           : 'start a chat…';
@@ -361,10 +361,10 @@ export function ChatPanel() {
             );
           })()}
           {ext && (
-            <div className="sub-head faint" title="your own agent, connected over MCP: messages here reach it between its steps">
+            <div className="sub-head faint" title={detached ? 'your own agent is not connected: messages here wait for its next session' : 'your own agent, connected over MCP: messages here reach it between its steps'}>
               <span style={{ color }}>{detached ? '○' : '●'}</span>{' '}
               {detached
-                ? `${extMeta?.client ?? 'agent'} · detached${extMeta?.seen ? ` ${ago(extMeta.seen)} ago` : ''} · messages wait for its next session`
+                ? `${extMeta?.client ?? 'agent'} · detached${extMeta?.seen ? ` ${ago(extMeta.seen)} ago` : ''}`
                 : `${extMeta?.client ?? attached?.client ?? 'agent'} · ${extMeta?.state === 'running' ? 'working' : 'attached · idle'}${attached?.presence.status ? ` · ${attached.presence.status}` : ''}`}
             </div>
           )}
