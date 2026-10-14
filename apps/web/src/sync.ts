@@ -13,7 +13,7 @@
 
 import { setUpload } from './dnd';
 import { discoverHost, explicitHost, type HostInfo } from './host';
-import { clearNotices, dismissNotice, getState, hideCard, notify, resolveNotice, setState, showCard, toast } from './store';
+import { clearNotices, copyText, dismissNotice, getState, hideCard, notify, resolveNotice, setState, showCard, toast } from './store';
 import { bootDone, bootSkip, bootStart } from './boot';
 import type { CanvasApp } from './wasm';
 import type { NodeView, Presence } from './types';
@@ -47,14 +47,6 @@ export function restoreViewOnBoot(v: typeof pendingView) {
   pendingView = v;
 }
 
-async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    notify('copied');
-  } catch (e) {
-    toast(`copy failed: ${e}`);
-  }
-}
 
 export type ConnState = 'local' | 'connecting' | 'connected' | 'reconnecting';
 
@@ -329,8 +321,10 @@ export class HostSync {
         if (recovered) notify('reloaded after a webview crash · view restored', { key: 'webview', level: 'ok' });
         bootDone('project');
       } else {
-        // Resync after a reconnect: merge (CRDT), then offline edits flow out.
-        this.app.importUpdates(bytes);
+        // Resync after a reconnect: merge (CRDT), then everything the host lacks goes out,
+        // measured against the host's snapshot: edits "sent" to a host that died before
+        // saving them, or into a dead socket, aren't lost.
+        this.app.resyncSnapshot(bytes);
       }
       this.retry = 0;
       this.failures = 0;

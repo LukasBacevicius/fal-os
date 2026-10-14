@@ -55,7 +55,7 @@ export async function deviceLost(reason: string) {
   const frozen = freezeFrame(canvas);
   if (losses.length > MAX_LOSSES) {
     frozen.at(-1)?.remove();
-    showCard('gpu', `the canvas lost its GPU ${MAX_LOSSES} times in 30 minutes · rendering paused`, [
+    showCard('gpu', `the canvas lost its GPU ${losses.length} times in 30 minutes · rendering paused`, [
       { label: 'restart rendering', run: () => location.reload() },
     ]);
     busy = false;

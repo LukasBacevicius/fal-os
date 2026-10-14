@@ -335,6 +335,10 @@ fn app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 fn main() {
     let side = Arc::new(Sidecar::new());
     install_panic_hook(side.home.clone());
+    // Check the crash-report path end to end (the next host start announces it).
+    if std::env::var_os("FALOS_TEST_PANIC_APP").is_some() {
+        panic!("FALOS_TEST_PANIC_APP: a deliberate panic to check crash reports");
+    }
     let hidden = std::env::args().any(|a| a == "--hidden");
     let terminated = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<std::time::Instant>::new()));
     let side_for_webview = side.clone();

@@ -1872,6 +1872,23 @@ impl CanvasApp {
         Ok(())
     }
 
+    /// After a reconnect: merge the host's snapshot, then send everything the host lacks.
+    /// What was "sent" before can be gone: a host that crashed (or was restarted from disk)
+    /// before saving it, or bytes that went into a socket that was already dead. The host's
+    /// own version vector (from its snapshot) is the truth, not what we think we sent.
+    #[wasm_bindgen(js_name = resyncSnapshot)]
+    pub fn resync_snapshot(&self, bytes: &[u8]) -> Result<(), JsValue> {
+        let host_vv = Canvas::from_snapshot(bytes).map_err(err)?.vv();
+        let mut a = self.app.borrow_mut();
+        a.import_remote(bytes).map_err(err)?;
+        a.sent_vv = host_vv;
+        a.sync_doc();
+        a.flush_transport();
+        drop(a);
+        dispatch(&self.app);
+        Ok(())
+    }
+
     /// Encoded version vector of the local replica.
     pub fn vv(&self) -> Uint8Array {
         Uint8Array::from(self.app.borrow().doc.vv().encode().as_slice())

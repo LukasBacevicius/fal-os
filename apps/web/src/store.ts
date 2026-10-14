@@ -298,6 +298,33 @@ export function hideCard(key: string) {
   if (state.cards.some((c) => c.key === key)) setState((s) => ({ cards: s.cards.filter((c) => c.key !== key) }));
 }
 
+/** Copy text for [copy report]-style buttons: the async clipboard, else the old
+ *  `execCommand('copy')` path (webviews that deny clipboard writes). Says how it went. */
+export async function copyText(text: string, done = 'copied') {
+  try {
+    await navigator.clipboard.writeText(text);
+    return void notify(done);
+  } catch {
+    /* fall back below */
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  if (ok) notify(done);
+  else notify('copy failed: the clipboard is blocked here', { level: 'error' });
+}
+
 const FAILURE = /\b(fail|failed|error|couldn'?t|can'?t|cannot|unable|denied|refused|invalid|missing|not found)\b/i;
 
 /** A one-line note (the old single toast). Failures stay until dismissed; everything else

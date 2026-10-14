@@ -106,10 +106,18 @@ pub fn load_crash_notice() {
     }
     copy.push_str(&format!("\n\nreport file: {}\n", newest.display()));
     let more = if reports.len() > 1 { format!(" ({} reports)", reports.len()) } else { String::new() };
+    // The desktop app restarted a host that died: this is that restart, not a new launch.
+    let restarted = newest.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-host-exit.txt"))
+        && std::env::var_os("FALOS_EXIT_WITH_PARENT").is_some();
+    let text = if restarted {
+        format!("the fal OS host stopped unexpectedly and was restarted{more}")
+    } else {
+        format!("fal OS stopped unexpectedly last time{more}")
+    };
     *CRASH.lock().unwrap() = Some(json!({
         "key": "crash",
         "level": "error",
-        "text": format!("fal OS stopped unexpectedly last time{more}"),
+        "text": text,
         "actions": [{"id": "copy", "label": "copy report"}, {"id": "dismiss", "label": "dismiss"}],
         "copy": copy,
     }));

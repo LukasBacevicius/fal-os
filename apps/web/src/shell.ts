@@ -7,7 +7,7 @@
 //   (sidecar.rs). Restarting is one held line; stopped is the card
 //   `host stopped · [restart] [copy report] [open logs]`.
 
-import { dismissNotice, getState, hideCard, notify, resolveNotice, showCard, toast } from './store';
+import { copyText, dismissNotice, getState, hideCard, notify, resolveNotice, showCard, toast } from './store';
 import { hostSync, switchProject } from './sync';
 import { invoke, isDesktop } from './desktop';
 import { openChat } from './chatActions';
@@ -57,10 +57,7 @@ function onHostState(s: HostState | null | undefined) {
       },
       {
         label: 'copy report',
-        run: () =>
-          void invoke<string>('host_report')
-            .then((t) => navigator.clipboard.writeText(t))
-            .then(() => notify('report copied'), (e) => toast(`copy failed: ${e}`)),
+        run: () => void invoke<string>('host_report').then((t) => copyText(t, 'report copied'), (e) => toast(`report failed: ${e}`)),
       },
       { label: 'open logs', run: () => void invoke('open_logs').catch((e) => toast(`open logs failed: ${e}`)) },
     ]);

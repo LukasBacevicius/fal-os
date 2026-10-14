@@ -27,7 +27,7 @@ export function bootStart(step: BootStep) {
     window.setTimeout(() => {
       stalled = step;
       console.warn(`boot: ${step} is past its ${BUDGET_MS[step] / 1000}s budget`);
-      showCard('boot', `stuck ${LABEL[step]} (${step})`, [{ label: 'retry', run: () => location.reload() }]);
+      showCard('boot', `stuck ${LABEL[step]}`, [{ label: 'retry', run: () => location.reload() }]);
     }, BUDGET_MS[step]),
   );
 }
