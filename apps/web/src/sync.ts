@@ -52,6 +52,18 @@ export function sessionMeta(s: SessionInfo) {
   };
 }
 
+/** Stop drops the chat's queued messages: their text goes back into the composer so
+ *  nothing the user typed is lost. */
+function restoreQueued(chat: string, id: string) {
+  setState((s) => {
+    const q = s.chat.threads[chat]?.events.find((e: any) => e.kind === 'queued' && String(e.id) === id) as { text?: string } | undefined;
+    const text = String(q?.text ?? '').trim();
+    if (!text) return {};
+    const cur = s.drafts[chat] ?? '';
+    return { drafts: { ...s.drafts, [chat]: cur.trim() ? `${cur}\n${text}` : text } };
+  });
+}
+
 /** `#rrggbb` + alpha byte. */
 function dimmed(color: string, alpha: number): string {
   if (!/^#[0-9a-f]{6}$/i.test(color)) return color;
@@ -209,7 +221,10 @@ export class HostSync {
           setState((s) => ({ chat: s.chat.creating ? { ...selectChat(s.chat, m.chat), creating: false, order: s.chat.order.includes(m.chat) ? s.chat.order : [...s.chat.order, m.chat] } : s.chat }));
         break;
       case 'chat.event':
-        if (typeof m.chat === 'string' && m.event) setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event, typeof m.ts === 'number' ? m.ts : Date.now()) }));
+        if (typeof m.chat === 'string' && m.event) {
+          if (m.event.kind === 'dequeued' && m.event.reason === 'stopped') restoreQueued(m.chat, String(m.event.id));
+          setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event, typeof m.ts === 'number' ? m.ts : Date.now()) }));
+        }
         break;
       case 'chat.deleted':
         if (typeof m.chat === 'string') setState((s) => ({ chat: removeChat(s.chat, m.chat), subView: s.chat.active === m.chat ? null : s.subView }));
