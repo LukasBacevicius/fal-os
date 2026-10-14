@@ -11,3 +11,4 @@ initPanelWidths();
 installCardArt();
 installShellEvents();
 createRoot(document.getElementById('root')!).render(<App />);
+if (new URLSearchParams(location.search).has('bench')) void import('./bench').then((b) => b.runBench());

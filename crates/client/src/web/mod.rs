@@ -93,6 +93,8 @@ struct App {
     dirty: bool,
     cursor: &'static str,
     frame_times: Vec<f64>,
+    /// CPU ms per render phase since the last `stats` (measure, overlay, render, present).
+    phase_ms: [f64; 4],
     last_frame: f64,
     last_stats: f64,
     last_camera: Camera,
@@ -969,9 +971,11 @@ impl App {
                     "frames": self.frame_times.len(),
                     "nodes": s.nodes, "visible": s.visible, "detail": s.detail_resident,
                     "videos": s.active_videos, "hiresVideos": s.hires_videos, "zoom": self.camera.zoom / self.dpr,
+                    "ms": self.phase_ms.map(|v| (v * 10.0).round() / 10.0),
                 }),
             );
             self.frame_times.clear();
+            self.phase_ms = [0.0; 4];
         }
     }
 
@@ -980,10 +984,13 @@ impl App {
             return;
         }
         self.dirty = false;
+        let t0 = now_ms();
         let m = self.measure();
         self.refresh_measure(&m);
+        let t1 = now_ms();
         let prims = self.build_overlay();
         self.gpu.renderer.set_overlay(&prims);
+        let t2 = now_ms();
         let frame = match self.gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             _ => {
@@ -996,7 +1003,12 @@ impl App {
         self.last_anim_frame = now;
         self.gpu.renderer.set_pixel_ratio(self.dpr);
         self.stats = self.gpu.renderer.render(&view, &self.camera, self.anim_time as f32);
+        let t3 = now_ms();
         self.gpu.renderer.present(frame);
+        let t4 = now_ms();
+        for (i, d) in [t1 - t0, t2 - t1, t3 - t2, t4 - t3].into_iter().enumerate() {
+            self.phase_ms[i] += d;
+        }
         if self.last_frame > 0.0 && now - self.last_frame < 250.0 {
             self.frame_times.push(now - self.last_frame);
         }
@@ -1385,6 +1397,7 @@ impl CanvasApp {
                 dirty: true,
                 cursor: "default",
                 frame_times: Vec::new(),
+                phase_ms: [0.0; 4],
                 last_frame: 0.0,
                 last_stats: 0.0,
                 last_camera: Camera::default(),
