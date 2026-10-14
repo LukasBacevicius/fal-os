@@ -111,6 +111,11 @@ export interface DirectorTarget {
 export interface DirectorStatus {
   targets: DirectorTarget[];
   home?: string;
+  /** The MCP server name connect writes: `fal-os`, or `fal-os-dev` on a host that isn't the
+   *  installed app. */
+  server?: string;
+  /** Why this host isn't the installed app (dev build, other FALOS_HOME, other port). */
+  instance?: string | null;
   changed?: string[];
   error?: string;
   /** A connect/disconnect is in flight. */

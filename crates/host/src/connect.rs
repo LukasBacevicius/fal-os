@@ -2,6 +2,10 @@
 //! fal-os MCP server and installs the `fal-os` skill for each target, shows per-target status
 //! (connected / outdated / not installed) and removes exactly what it added.
 //!
+//! A host that isn't the installed app (a dev build, another `FALOS_HOME`, another port)
+//! registers as `fal-os-dev` instead of `fal-os` and leaves the skill alone, so connecting a
+//! test host never rewires the user's real agents to it (see [`Ctx::for_host`]).
+//!
 //! Every writer takes the home directory explicitly (tests use temp dirs). Edits keep the
 //! rest of each file: JSON configs keep key order and other keys (and are refused when they
 //! don't parse), `config.toml` keeps comments and formatting (`toml_edit`). Writes are atomic
@@ -95,20 +99,54 @@ pub struct Ctx {
     pub http: Option<(String, String)>,
     /// Packaged app (or `FALOS_CONNECT_STDIO=1`): register the stdio relay everywhere.
     pub prefer_stdio: bool,
+    /// The MCP server name written: `fal-os`, or `fal-os-dev` for a host that isn't the
+    /// installed one.
+    pub server: String,
+    /// Why this host isn't the installed one ("a dev build · FALOS_HOME=… · port 7417").
+    pub instance: Option<String>,
 }
+
+/// The server name a non-default host registers under.
+pub const DEV_SERVER_NAME: &str = "fal-os-dev";
 
 impl Ctx {
     /// The running host's context: stdio when packaged (the binary sits in an `.app`),
     /// else HTTP with the current URL + token (a dev build's path moves with `cargo clean`).
+    ///
+    /// Only the installed app (packaged, default `FALOS_HOME`, default port) owns the
+    /// `fal-os` entry: any other host writes `fal-os-dev` (`FALOS_CONNECT_NAME` overrides),
+    /// so "connect" on a dev or test host can't point the user's Claude Code / Codex at it.
     pub fn for_host(home: PathBuf, http: Option<(String, String)>) -> Ctx {
         let exe = std::env::current_exe().ok();
         let packaged = exe.as_ref().is_some_and(|e| e.to_string_lossy().contains(".app/Contents/MacOS/"));
         let forced = std::env::var("FALOS_CONNECT_STDIO").is_ok_and(|v| v == "1");
         let mut env = vec![];
+        let mut why: Vec<String> = vec![];
+        if !packaged {
+            why.push("a dev build".into());
+        }
         if let Some(h) = std::env::var_os("FALOS_HOME") {
+            let h = PathBuf::from(h);
+            let default = home.join(".fal-os");
+            let same = h == default || (h.canonicalize().ok().is_some_and(|c| Some(c) == default.canonicalize().ok()));
+            if !same {
+                why.push(format!("FALOS_HOME={}", h.display()));
+            }
             env.push(("FALOS_HOME".to_string(), h.to_string_lossy().into_owned()));
         }
+        if let Some(port) = http.as_ref().and_then(|(u, _)| u.rsplit_once(':')).and_then(|(_, p)| p.split('/').next()?.parse::<u16>().ok())
+            && port != crate::server::DEFAULT_PORT
+        {
+            why.push(format!("port {port}"));
+        }
+        let instance = (!why.is_empty()).then(|| why.join(" · "));
+        let server = std::env::var("FALOS_CONNECT_NAME")
+            .ok()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| if instance.is_some() { DEV_SERVER_NAME.into() } else { SERVER_NAME.into() });
         Ctx {
+            server,
+            instance,
             home,
             stdio: Stdio {
                 command: exe.map(|e| e.display().to_string()).unwrap_or_else(|| "falos-host".into()),
@@ -117,6 +155,11 @@ impl Ctx {
             prefer_stdio: packaged || forced || http.is_none(),
             http,
         }
+    }
+
+    /// The skill is the installed app's: other hosts leave it alone.
+    pub fn skill_path(&self, t: Target) -> Option<PathBuf> {
+        if self.server == SERVER_NAME { t.skill_path(&self.home) } else { None }
     }
 
     fn use_stdio(&self, t: Target) -> bool {
@@ -258,17 +301,17 @@ fn to_text(v: &Json, before: &str) -> Result<String> {
 }
 
 /// New text with our entry set (`Some`) or removed (`None`); `None` result = no change.
-fn json_edit(path: &Path, before: &str, want: Option<&Map<String, Json>>) -> Result<Option<String>> {
+fn json_edit(path: &Path, before: &str, name: &str, want: Option<&Map<String, Json>>) -> Result<Option<String>> {
     let mut root = parse_json(path, before)?;
     let obj = root.as_object_mut().unwrap();
     match want {
         Some(want) => {
             let servers = obj.entry("mcpServers").or_insert_with(|| Json::Object(Map::new()));
             let servers = servers.as_object_mut().with_context(|| format!("{}: `mcpServers` is not an object", path.display()))?;
-            if json_state(servers.get(SERVER_NAME), want) == State::Connected {
+            if json_state(servers.get(name), want) == State::Connected {
                 return Ok(None);
             }
-            let e = servers.entry(SERVER_NAME).or_insert_with(|| Json::Object(Map::new()));
+            let e = servers.entry(name).or_insert_with(|| Json::Object(Map::new()));
             if !e.is_object() {
                 *e = Json::Object(Map::new());
             }
@@ -282,7 +325,7 @@ fn json_edit(path: &Path, before: &str, want: Option<&Map<String, Json>>) -> Res
             let Some(servers) = obj.get_mut("mcpServers").and_then(Json::as_object_mut) else {
                 return Ok(None);
             };
-            if servers.shift_remove(SERVER_NAME).is_none() {
+            if servers.shift_remove(name).is_none() {
                 return Ok(None);
             }
         }
@@ -344,8 +387,8 @@ fn item_value(i: &toml_edit::Item) -> Option<toml_edit::Value> {
     }
 }
 
-fn toml_state(doc: &toml_edit::DocumentMut, want: &[(&'static str, toml_edit::Value)]) -> State {
-    let Some(e) = doc.get("mcp_servers").and_then(|s| s.get(SERVER_NAME)).and_then(|e| e.as_table_like()) else {
+fn toml_state(doc: &toml_edit::DocumentMut, name: &str, want: &[(&'static str, toml_edit::Value)]) -> State {
+    let Some(e) = doc.get("mcp_servers").and_then(|s| s.get(name)).and_then(|e| e.as_table_like()) else {
         return State::NotInstalled;
     };
     let same = want.iter().all(|(k, v)| e.get(k).and_then(item_value).is_some_and(|x| toml_eq(&x, v)))
@@ -357,12 +400,12 @@ fn parse_toml(path: &Path, s: &str) -> Result<toml_edit::DocumentMut> {
     s.parse().with_context(|| format!("{} is not valid TOML; fix or edit it by hand (left unchanged)", path.display()))
 }
 
-fn toml_edit_text(path: &Path, before: &str, want: Option<&[(&'static str, toml_edit::Value)]>) -> Result<Option<String>> {
+fn toml_edit_text(path: &Path, before: &str, name: &str, want: Option<&[(&'static str, toml_edit::Value)]>) -> Result<Option<String>> {
     use toml_edit::{Item, Table};
     let mut doc = parse_toml(path, before)?;
     match want {
         Some(want) => {
-            if toml_state(&doc, want) == State::Connected {
+            if toml_state(&doc, name, want) == State::Connected {
                 return Ok(None);
             }
             let servers = doc
@@ -374,7 +417,7 @@ fn toml_edit_text(path: &Path, before: &str, want: Option<&[(&'static str, toml_
                 })
                 .as_table_mut()
                 .with_context(|| format!("{}: `mcp_servers` is not a table", path.display()))?;
-            let entry = servers.entry(SERVER_NAME).or_insert_with(|| Item::Table(Table::new()));
+            let entry = servers.entry(name).or_insert_with(|| Item::Table(Table::new()));
             if !entry.is_table() {
                 *entry = Item::Table(Table::new());
             }
@@ -394,7 +437,7 @@ fn toml_edit_text(path: &Path, before: &str, want: Option<&[(&'static str, toml_
             let Some(servers) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_like_mut()) else {
                 return Ok(None);
             };
-            if servers.remove(SERVER_NAME).is_none() {
+            if servers.remove(name).is_none() {
                 return Ok(None);
             }
             if servers.is_empty()
@@ -423,8 +466,8 @@ fn mcp_status(t: Target, ctx: &Ctx) -> FileStatus {
     let exists = before.is_some();
     let before = before.unwrap_or_default();
     let state = match t {
-        Target::Codex => parse_toml(&path, &before).map(|d| toml_state(&d, &toml_want(ctx))),
-        _ => parse_json(&path, &before).map(|v| json_state(v.get("mcpServers").and_then(|s| s.get(SERVER_NAME)), &ctx.json_entry(t))),
+        Target::Codex => parse_toml(&path, &before).map(|d| toml_state(&d, &ctx.server, &toml_want(ctx))),
+        _ => parse_json(&path, &before).map(|v| json_state(v.get("mcpServers").and_then(|s| s.get(&ctx.server)), &ctx.json_entry(t))),
     };
     match state {
         Ok(s) => fs.state = s,
@@ -466,7 +509,7 @@ fn skill_status(path: &Path) -> FileStatus {
 
 pub fn status(t: Target, ctx: &Ctx) -> TargetStatus {
     let mut files = vec![mcp_status(t, ctx)];
-    if let Some(p) = t.skill_path(&ctx.home) {
+    if let Some(p) = ctx.skill_path(t) {
         files.push(skill_status(&p));
     }
     let state = if files.iter().all(|f| f.state == State::Connected) {
@@ -485,14 +528,14 @@ pub fn connect(t: Target, ctx: &Ctx) -> Result<Vec<String>> {
     let path = t.config_path(&ctx.home);
     let before = read(&path)?.unwrap_or_default();
     let after = match t {
-        Target::Codex => toml_edit_text(&path, &before, Some(&toml_want(ctx)))?,
-        _ => json_edit(&path, &before, Some(&ctx.json_entry(t)))?,
+        Target::Codex => toml_edit_text(&path, &before, &ctx.server, Some(&toml_want(ctx)))?,
+        _ => json_edit(&path, &before, &ctx.server, Some(&ctx.json_entry(t)))?,
     };
     if let Some(a) = after {
         write_atomic(&path, &a)?;
         changed.push(path.display().to_string());
     }
-    if let Some(p) = t.skill_path(&ctx.home) {
+    if let Some(p) = ctx.skill_path(t) {
         let s = skill_status(&p);
         if s.problem.is_none() && s.connect != "none" {
             write_atomic(&p, &skill_text())?;
@@ -514,15 +557,15 @@ pub fn disconnect(t: Target, ctx: &Ctx) -> Result<Vec<String>> {
     let path = t.config_path(&ctx.home);
     if let Some(before) = read(&path)? {
         let after = match t {
-            Target::Codex => toml_edit_text(&path, &before, None)?,
-            _ => json_edit(&path, &before, None)?,
+            Target::Codex => toml_edit_text(&path, &before, &ctx.server, None)?,
+            _ => json_edit(&path, &before, &ctx.server, None)?,
         };
         if let Some(a) = after {
             write_atomic(&path, &a)?;
             changed.push(path.display().to_string());
         }
     }
-    if let Some(p) = t.skill_path(&ctx.home)
+    if let Some(p) = ctx.skill_path(t)
         && read(&p)?.is_some_and(|s| s.contains(MARKER))
     {
         std::fs::remove_file(&p)?;
@@ -554,7 +597,8 @@ pub fn handle(ctx: &Ctx, msg: &Json) -> Json {
         }
     }
     let targets: Vec<TargetStatus> = Target::ALL.iter().map(|t| status(*t, ctx)).collect();
-    let mut out = json!({"type": "director.status", "targets": targets, "changed": changed, "home": ctx.home.display().to_string()});
+    let mut out = json!({"type": "director.status", "targets": targets, "changed": changed, "home": ctx.home.display().to_string(),
+                         "server": ctx.server, "instance": ctx.instance});
     if !errors.is_empty() {
         out["error"] = json!(errors.join("; "));
     }
@@ -571,7 +615,43 @@ mod tests {
             stdio: Stdio { command: "/Applications/fal-os.app/Contents/MacOS/falos-host".into(), env: vec![] },
             http: Some(("http://127.0.0.1:7317/mcp".into(), "tok1".into())),
             prefer_stdio: stdio,
+            server: SERVER_NAME.into(),
+            instance: None,
         }
+    }
+
+    #[test]
+    fn a_dev_host_registers_beside_the_real_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().join(".claude.json");
+        let real = ctx(home.path(), true);
+        connect(Target::ClaudeCode, &real).unwrap();
+        connect(Target::Codex, &real).unwrap();
+        let claude_before = std::fs::read_to_string(&p).unwrap();
+        // A test host (dev build, port 7417): `fal-os-dev`, no skill.
+        let mut dev = Ctx::for_host(home.path().to_path_buf(), Some(("http://127.0.0.1:7417/mcp".into(), "tok2".into())));
+        assert_eq!(dev.server, DEV_SERVER_NAME);
+        assert!(dev.instance.as_deref().is_some_and(|i| i.contains("port 7417")), "{:?}", dev.instance);
+        dev.prefer_stdio = false;
+        let st = status(Target::ClaudeCode, &dev);
+        assert_eq!((st.state, st.files.len()), (State::NotInstalled, 1));
+        let ch = connect(Target::ClaudeCode, &dev).unwrap();
+        assert_eq!(ch.len(), 1);
+        connect(Target::Codex, &dev).unwrap();
+        let v: Json = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let ours: Json = serde_json::from_str(&claude_before).unwrap();
+        assert_eq!(v["mcpServers"]["fal-os"], ours["mcpServers"]["fal-os"], "the real entry is untouched");
+        assert_eq!(v["mcpServers"]["fal-os-dev"]["url"], "http://127.0.0.1:7417/mcp");
+        let t = std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap();
+        assert!(t.contains("[mcp_servers.fal-os]\ncommand") && t.contains("[mcp_servers.fal-os-dev]\nurl = \"http://127.0.0.1:7417/mcp\""), "{t}");
+        assert_eq!(status(Target::ClaudeCode, &real).state, State::Connected, "the real host still sees itself connected");
+        // Disconnecting the dev host removes only its entry.
+        disconnect(Target::ClaudeCode, &dev).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), claude_before);
+        assert!(home.path().join(".claude/skills/fal-os/SKILL.md").is_file());
+        let r = handle(&dev, &json!({"type": "director.status"}));
+        assert_eq!(r["server"], DEV_SERVER_NAME);
+        assert!(r["instance"].is_string());
     }
 
     #[test]

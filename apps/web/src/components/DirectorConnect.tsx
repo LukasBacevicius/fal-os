@@ -45,8 +45,14 @@ export function DirectorConnect() {
   };
   const label = sel.length === d.targets.length && sel.length > 1 ? 'all' : sel.map((t) => t.label).join(' + ');
 
+  const server = d.server ?? 'fal-os';
   return (
     <div className="director">
+      {d.instance && (
+        <div className="dim director-instance">
+          this host isn't the installed fal OS ({d.instance}): it registers as <span className="md-code">{server}</span>, your <span className="md-code">fal-os</span> entry stays as it is.
+        </div>
+      )}
       {d.targets.map((t) => (
         <div key={t.id} className="director-row">
           <button
@@ -70,7 +76,7 @@ export function DirectorConnect() {
           {writes.map(({ t, f }) => (
             <div key={f.path} className="faint">
               {'  '}
-              {f.connect} {tilde(f.path)} <span className="dim">({f.what === 'mcp' ? `fal OS MCP server, ${t.transport}` : 'fal OS skill'})</span>
+              {f.connect} {tilde(f.path)} <span className="dim">({f.what === 'mcp' ? `MCP server ${server}, ${t.transport}` : 'fal OS skill'})</span>
             </div>
           ))}
         </div>
@@ -97,7 +103,7 @@ export function DirectorConnect() {
           {removes.map(({ f }) => (
             <div key={f.path} className="faint">
               {'  '}
-              {f.what === 'mcp' ? `the fal-os entry in ${tilde(f.path)}` : `${tilde(f.path)}`}
+              {f.what === 'mcp' ? `the ${server} entry in ${tilde(f.path)}` : `${tilde(f.path)}`}
             </div>
           ))}
           <div className="setup-row">

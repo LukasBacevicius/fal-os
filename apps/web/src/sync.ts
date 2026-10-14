@@ -252,7 +252,7 @@ export class HostSync {
         setState((s) => ({ connect: { ...s.connect, registered: { ...s.connect.registered, [m.client]: { ok: !!m.ok, path: m.path, error: m.error } } } }));
         break;
       case 'director.status':
-        setState({ director: { targets: Array.isArray(m.targets) ? m.targets : [], home: m.home, changed: m.changed, error: m.error } });
+        setState({ director: { targets: Array.isArray(m.targets) ? m.targets : [], home: m.home, server: m.server, instance: m.instance, changed: m.changed, error: m.error } });
         break;
       case 'agent.continue':
         if (m.error) toast(`continue: ${m.error}`);
