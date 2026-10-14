@@ -166,6 +166,10 @@ capable.
   - Codex: `[mcp_servers.fal-os]` in `~/.codex/config.toml` (toml_edit, comments kept) with
     `default_tools_approval_mode = "approve"` + `~/.codex/skills/fal-os/SKILL.md` (Codex 0.160/0.162
     load user skills from both `~/.codex/skills` and `~/.agents/skills`; verified with `skills/list`).
+  - Only the installed app owns the `fal-os` entry. A host that isn't it (a dev build, another
+    `FALOS_HOME`, another port) writes `fal-os-dev` beside it and leaves the skill alone, and
+    Connect says why; disconnect removes only `fal-os-dev` (`FALOS_CONNECT_NAME` overrides the
+    name). A second host can't rewire the user's real agents.
   - Entry: packaged → stdio `…/fal-os.app/Contents/MacOS/falos-host mcp` (reads host.json, so it
     survives port/token changes and re-initializes after a host restart); dev → HTTP URL + token
     (`--stdio` or `FALOS_CONNECT_STDIO=1` forces stdio). Status per target: connected / outdated /
@@ -186,8 +190,10 @@ capable.
   local files, notes, deliverables, open comments, in-app chats, other agents, jobs);
   `get_context` without chips returns it again (`detail:"full"` adds the canvas outline) plus
   512 px JPEG previews of the references and selection as MCP image content.
-- **Two-way steering** (`director.rs`). User → agent: the agent's `ext:` tab in fal OS takes
-  messages (and stop); they, the human's new comments, new nodes and selection changes queue in
+- **Two-way steering** (`director.rs`). User → agent: the agent's `ext:` tab in fal OS (one per
+  agent identity per project; a new session reattaches; attached → idle → detached, see
+  CHAT-PROTOCOL.md "External agents") takes messages (and stop); messages typed while it's
+  detached wait for its next session; they, the human's new comments, new nodes and selection changes queue in
   the session's inbox. `inbox(waitSecs?)` drains it (long-poll up to 300 s; Codex gets
   `tool_timeout_sec = 600` from connect) and messages / comments are also appended to every tool
   result, so the agent hears the user mid-run without polling. Push: the server declares

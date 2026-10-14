@@ -179,18 +179,30 @@ run fresh with the transcript as context; the `run` frame says `previous_driver`
 
 ### External agents
 - **Agent tabs.** An MCP session without `X-Falos-Chat` (Claude Code, Codex, Cursor, … connected
-  directly) gets a chat `ext:<client>-<n>` (title = agentName, a color, `external: true`,
-  `client`). Its tool calls appear there as `tool` events (`running`, then `done`/`error` with a
-  summary and `nodes`); `report` adds `text` (+ `done` with `nodes`). `status` events: `running`
-  while it works, `idle` after 30 s quiet, `idle` + `detached: true` when the session ends.
+  directly) works in its agent's tab: one per agent identity per project, `ext:<client>` when the
+  agentName is just the client's ("Codex", "Claude Code"), else `ext:<client>-<name>` ("Reviewer"
+  from Claude Code → `ext:claude-reviewer`). Title = agentName (renamable), a color,
+  `external: true`, `client`, and `seen` (its last tool call, ms) in `chat.list`. A new session
+  of the same agent reattaches to the tab (reopened if the user closed it) and its history
+  continues there. Its tool calls appear as `tool` events (`running`, then `done`/`error` with a
+  summary and `nodes`); `report` adds `text` (+ `done` with `nodes`).
+- **Liveness.** `status` events: `running` at a tool call, `idle` after 30 s quiet, `idle` +
+  `detached: true` (list `state: "detached"`) when its MCP connection closes, when no session is
+  attached (host restart), or after 10 min of silence with no call in flight
+  (`FALOS_EXT_DETACH_SECS` overrides). A tool call of a detached session attaches it again.
+  Liveness isn't saved: tabs load detached. Duplicate `ext:<client>-<n>` tabs from older hosts
+  merge into one on load (events in time order). Tabs can be closed (also while the agent works).
   Chat ids may be `ext:` + `[A-Za-z0-9_-]`; logs are `chats/ext_<…>.jsonl`.
-- **Messaging the agent (inbox).** `chat.send` / `chat.steer` to an `ext:` chat queue the text in
-  that session's inbox (`queued` event); when the agent picks it up (`inbox`, or appended to
-  any of its tool results as "notices from the user in fal OS") it becomes `dequeued` +
-  `{"kind":"user","queued":id,"author":<name>}`. `chat.stop` queues a stop message,
-  `chat.unqueue` takes a message back. With no session attached the message waits for the
-  client's next session (its queued line moves to the new tab). The inbox also gets the
-  human's new comments, new nodes (references, notes) and selection changes on that canvas.
+- **Messaging the agent (inbox).** `chat.send` / `chat.steer` to an `ext:` chat queue the text
+  for that tab (`queued` event with `author`, `context`; `stop: true` for a stop); whichever
+  session of that agent calls next picks it up (`inbox`, appended to any of its tool results as
+  "notices from the user in fal OS", or the next session's `session` result as "waiting for you
+  from the user") and it becomes `dequeued` + `{"kind":"user","queued":id,"author":<name>}`.
+  Undelivered messages are rebuilt from the log after a host restart. The tab shows them as
+  "waits for next session" while detached. `chat.stop` queues a stop message (refused when
+  detached; a stop left for an earlier session expires when a new one attaches),
+  `chat.unqueue` takes a message back. Each session's inbox also gets the human's new comments,
+  new nodes (references, notes) and selection changes on that canvas.
 - **Binding.** `session` without `project` picks: `cwd` argument / the stdio relay's
   `X-Falos-Cwd` inside a workspace project folder → `FALOS_PROJECT` (`X-Falos-Project`) → the
   project open in fal OS (connected human, latest `focus` / selection / cursor) → the most
