@@ -158,6 +158,36 @@ async function asyncClipboardImages(): Promise<File[]> {
   }
 }
 
+/** Repeated pastes at the same spot (the pointer didn't move) cascade by 20 screen px
+ *  instead of landing exactly on top of each other. */
+let lastPaste: { x: number; y: number; n: number } | null = null;
+function worldAt(app: { screenToWorld(x: number, y: number): ArrayLike<number> }, p: [number, number] | number[]): [number, number] {
+  const w = app.screenToWorld(p[0], p[1]);
+  return [w[0], w[1]];
+}
+function cascade(x: number, y: number): [number, number] {
+  if (lastPaste && Math.abs(lastPaste.x - x) < 0.5 && Math.abs(lastPaste.y - y) < 0.5) lastPaste.n++;
+  else lastPaste = { x, y, n: 0 };
+  const step = 20 / (getState().camera.zoom || 1);
+  return [x + step * lastPaste.n, y + step * lastPaste.n];
+}
+
+/** Text of pasted HTML with its links kept as `label (url)` (plain text drops them). */
+export function htmlText(html: string): string | null {
+  if (!/<a\b[^>]*href/i.test(html) || typeof DOMParser === 'undefined') return null;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  for (const a of Array.from(doc.querySelectorAll('a[href]'))) {
+    const href = a.getAttribute('href') ?? '';
+    const label = (a.textContent ?? '').trim();
+    if (!/^(https?:|mailto:)/i.test(href)) continue;
+    a.replaceWith(doc.createTextNode(!label || label === href ? href : `${label} (${href})`));
+  }
+  for (const br of Array.from(doc.querySelectorAll('br'))) br.replaceWith(doc.createTextNode('\n'));
+  for (const b of Array.from(doc.querySelectorAll('p, div, li, h1, h2, h3, h4, tr'))) b.append(doc.createTextNode('\n'));
+  const t = (doc.body.textContent ?? '').replace(/\n{3,}/g, '\n\n').trim();
+  return t || null;
+}
+
 /** Paste, in priority order: a Figma scene (native import: frames, text, images, vectors),
  *  image data (files, `<img>` data URLs, or the async clipboard) as image nodes, our own
  *  copied nodes, and plain text as a note. Lands at the cursor (`at`) or the view center. */
@@ -197,7 +227,7 @@ export async function paste(e: ClipboardEvent, at: [number, number] | null, opts
   if (clip) {
     const c = getState().camera;
     const p = at ?? [c.width / 2, c.height / 2];
-    const [wx, wy] = app.screenToWorld(p[0], p[1]);
+    const [wx, wy] = cascade(...worldAt(app, p));
     const minX = Math.min(...clip.nodes.filter((n) => !n.parent || !clip!.nodes.some((m) => m.id === n.parent)).map((n) => n.x));
     const minY = Math.min(...clip.nodes.filter((n) => !n.parent || !clip!.nodes.some((m) => m.id === n.parent)).map((n) => n.y));
     pasteClip(clip, [wx - minX, wy - minY]);
@@ -215,8 +245,9 @@ export async function paste(e: ClipboardEvent, at: [number, number] | null, opts
   if (text.trim()) {
     const c = getState().camera;
     const p = at ?? [c.width / 2, c.height / 2];
-    const [x, y] = app.screenToWorld(p[0], p[1]);
-    const r = app.apply({ op: 'create', kind: 'note', props: { x: Math.round(x), y: Math.round(y), w: 280, h: 160 }, text: text.slice(0, 20_000) }) as { created: string[] };
+    const [x, y] = cascade(...worldAt(app, p));
+    const body = (html && htmlText(html)) || text;
+    const r = app.apply({ op: 'create', kind: 'note', props: { x: Math.round(x), y: Math.round(y), w: 280, h: 160 }, text: body.slice(0, 20_000) }) as { created: string[] };
     if (r.created?.[0]) app.setSelection([r.created[0]]);
   }
 }
