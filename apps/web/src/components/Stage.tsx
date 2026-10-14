@@ -330,8 +330,8 @@ export function Stage() {
       )}
       {error && <div className="empty">can't start the canvas: {error}</div>}
       <Guard name="drop"><DropLayer /></Guard>
-      <ActivityBars />
-      <StatusBar />
+      <Guard name="activity-bars"><ActivityBars /></Guard>
+      <Guard name="status"><StatusBar /></Guard>
       {!layers && library !== 'panel' && <FloatingHead />}
     </div>
   );
