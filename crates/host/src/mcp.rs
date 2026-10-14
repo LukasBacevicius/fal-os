@@ -32,7 +32,7 @@ pub struct CanvasMcp {
     host: Arc<Host>,
     ws: Arc<crate::workspace::Workspace>,
     tool_router: ToolRouter<Self>,
-    conn: Arc<Conn>,
+    pub(crate) conn: Arc<Conn>,
 }
 
 /// One MCP connection's external agent sessions: closed when the connection goes away (the
@@ -41,6 +41,8 @@ pub struct CanvasMcp {
 #[derive(Default)]
 pub struct Conn {
     sessions: std::sync::Mutex<Vec<(std::sync::Weak<Host>, String)>>,
+    /// The project this connection created last: its next `session` binds there.
+    pub(crate) created: std::sync::Mutex<Option<String>>,
 }
 
 impl Conn {
@@ -473,6 +475,9 @@ impl CanvasMcp {
             if let Some(id) = self.ws.project_for_path(std::path::Path::new(&cwd)) {
                 return Ok((self.ws.get(&id)?, Some(format!("folder {cwd}"))));
             }
+        }
+        if let Some(id) = self.conn.created.lock().unwrap().clone() {
+            return Ok((self.ws.get(&id)?, Some("the project you just created".into())));
         }
         if let Some(id) = self.ws.active_id() {
             return Ok((self.ws.get(&id)?, Some("the project open in fal OS".into())));

@@ -756,6 +756,7 @@ impl CanvasMcp {
             let ws = self.workspace();
             let id = ws.create(&a.name)?;
             let name = ws.name_of(&id).unwrap_or_default();
+            *self.conn.created.lock().unwrap() = Some(id.clone());
             Ok(serde_json::to_string_pretty(&json!({"id": id, "name": name, "hint": "session(agentName, project=<id>)"}))?)
         })();
         self.finish(None, r)

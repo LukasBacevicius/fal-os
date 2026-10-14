@@ -275,15 +275,15 @@ async fn projects_are_isolated_sync_assets_and_mcp() {
     let bl = env.ws.get(&b).unwrap().chat.list(&env.ws.get(&b).unwrap(), None);
     assert!(bl.as_array().unwrap().iter().any(|r| r["external"] == true));
 
-    // list_projects / create_project; the default project is the most recently used one.
+    // list_projects / create_project; a connection's next session binds to the project it just
+    // created (ahead of the one open in fal OS); an explicit project always wins.
     let ps = call(&c, "list_projects", json!({})).await;
     assert!(ps.as_array().unwrap().iter().any(|p| p["id"] == "demo"));
     let np = call(&c, "create_project", json!({"name": "Gamma"})).await;
     assert_eq!(np["id"], "gamma");
     let s = call(&c, "session", json!({"agentName": "Cursor"})).await;
     assert_eq!(s["project"]["id"], "gamma");
-    env.ws.touch("demo").unwrap();
-    let s = call(&c, "session", json!({"agentName": "Cursor"})).await;
+    let s = call(&c, "session", json!({"agentName": "Cursor", "project": "demo"})).await;
     assert_eq!(s["project"]["id"], "demo");
     // X-Falos-Project (the runtime's agents) picks the project too.
     let rc = client(env.port, &[("x-falos-project", &b)]).await;
