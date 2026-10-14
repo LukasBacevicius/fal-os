@@ -102,10 +102,11 @@ fn edit_project_json(dir: &Path, f: impl FnOnce(&mut serde_json::Map<String, Jso
     let path = dir.join("project.json");
     let mut v: Json = serde_json::from_slice(&std::fs::read(&path)?).context("reading project.json")?;
     let obj = v.as_object_mut().context("project.json is not an object")?;
+    if obj.get("format").and_then(Json::as_u64).is_some_and(|f| f > falos_doc::FORMAT as u64) {
+        bail!("project.json was made by a newer fal OS: read-only here");
+    }
     f(obj);
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&v)?)?;
-    std::fs::rename(tmp, path)?;
+    falos_doc::write_durable(&path, &serde_json::to_vec_pretty(&v)?)?;
     Ok(())
 }
 
@@ -377,7 +378,8 @@ impl Workspace {
                 (p.name, p.extra)
             }
             None => {
-                let v: Json = serde_json::from_slice(&std::fs::read(dir.join("project.json")).ok()?).ok()?;
+                // A damaged project.json still lists the project (it's rebuilt when opened).
+                let v: Json = serde_json::from_slice(&std::fs::read(dir.join("project.json")).ok()?).unwrap_or_default();
                 (
                     v["name"].as_str().unwrap_or(id).to_string(),
                     v.as_object().cloned().unwrap_or_default(),
@@ -600,6 +602,8 @@ impl Workspace {
             Ok(id.to_string())
         };
         match msg["type"].as_str() {
+            // Heartbeat (see sync.rs).
+            Some("ping") => Ok(Some(json!({"type": "pong", "t": msg["t"]}))),
             Some("project.create") => {
                 let id = self.create(msg["name"].as_str().unwrap_or("Untitled"))?;
                 Ok(Some(json!({"type": "project.created", "id": id})))

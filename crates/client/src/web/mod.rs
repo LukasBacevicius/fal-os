@@ -98,7 +98,16 @@ struct App {
     last_camera: Camera,
     stats: falos_engine::FrameStats,
     raf: Option<RafSlot>,
+    /// This app's GPU device (see [`LOST_DEVICES`]); `lost` once it is gone: nothing renders,
+    /// and a `device_lost` event tells the page to recreate the app (the last frame stays).
+    gpu_id: u32,
+    lost: bool,
 }
+
+/// Devices whose `lost` promise resolved: (gpu id, reason). wgpu's callback must be `Send`, so
+/// it can't hold the app; `tick` picks its entry up.
+static LOST_DEVICES: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
+static NEXT_GPU_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 /// The canvas client. Create with `CanvasApp.create(canvas, options)`.
 #[wasm_bindgen]
@@ -789,6 +798,18 @@ impl App {
     }
 
     fn tick(&mut self, now: f64) {
+        if !self.lost {
+            let mut lost = LOST_DEVICES.lock().unwrap();
+            if let Some(i) = lost.iter().position(|(id, _)| *id == self.gpu_id) {
+                let (_, reason) = lost.remove(i);
+                self.lost = true;
+                log::warn!("WebGPU device lost: {reason}");
+                self.emit("device_lost", serde_json::json!({ "reason": reason }));
+            }
+        }
+        if self.lost {
+            return;
+        }
         let mut incoming = self.transport.poll();
         incoming.append(&mut self.js_inbox.borrow_mut());
         for msg in incoming {
@@ -849,6 +870,9 @@ impl App {
     }
 
     fn render(&mut self, now: f64) {
+        if self.lost {
+            return;
+        }
         self.dirty = false;
         let prims = self.build_overlay();
         self.gpu.renderer.set_overlay(&prims);
@@ -1194,6 +1218,10 @@ impl CanvasApp {
             })
             .await
             .map_err(err)?;
+        let gpu_id = NEXT_GPU_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        device.set_device_lost_callback(move |reason, msg| {
+            LOST_DEVICES.lock().unwrap().push((gpu_id, format!("{reason:?}: {msg}")));
+        });
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
         let (w, h) = (canvas.width().max(1), canvas.height().max(1));
@@ -1254,6 +1282,8 @@ impl CanvasApp {
                 last_camera: Camera::default(),
                 stats: Default::default(),
                 raf: None,
+                gpu_id,
+                lost: false,
             })
         });
         app.borrow_mut().fit_all();
@@ -1291,6 +1321,19 @@ impl CanvasApp {
 
     pub fn stop(&self) {
         self.app.borrow_mut().raf = None;
+    }
+
+    /// Debug / recovery checks: destroy the GPU device as if the GPU went away. The app emits
+    /// `device_lost` on its next tick.
+    #[wasm_bindgen(js_name = loseDevice)]
+    pub fn lose_device(&self) {
+        self.app.borrow().gpu.renderer.device().destroy();
+    }
+
+    /// Whether the GPU device is gone (see `device_lost`).
+    #[wasm_bindgen(js_name = deviceLost)]
+    pub fn device_lost(&self) -> bool {
+        self.app.borrow().lost
     }
 
     /// One frame of work (sync, media, render if needed). Called by the rAF loop.
@@ -1823,6 +1866,23 @@ impl CanvasApp {
         a.import_remote(bytes).map_err(err)?;
         a.sync_doc();
         // A resync snapshot may add nothing, but edits made while offline must still go out.
+        a.flush_transport();
+        drop(a);
+        dispatch(&self.app);
+        Ok(())
+    }
+
+    /// After a reconnect: merge the host's snapshot, then send everything the host lacks.
+    /// What was "sent" before can be gone: a host that crashed (or was restarted from disk)
+    /// before saving it, or bytes that went into a socket that was already dead. The host's
+    /// own version vector (from its snapshot) is the truth, not what we think we sent.
+    #[wasm_bindgen(js_name = resyncSnapshot)]
+    pub fn resync_snapshot(&self, bytes: &[u8]) -> Result<(), JsValue> {
+        let host_vv = Canvas::from_snapshot(bytes).map_err(err)?.vv();
+        let mut a = self.app.borrow_mut();
+        a.import_remote(bytes).map_err(err)?;
+        a.sent_vv = host_vv;
+        a.sync_doc();
         a.flush_transport();
         drop(a);
         dispatch(&self.app);

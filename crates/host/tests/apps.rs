@@ -23,7 +23,7 @@ async fn call(c: &Client, tool: &'static str, args: Json) -> Json {
         .call_tool(CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone()))
         .await
         .unwrap();
-    let t: String = r.content.iter().filter_map(|c| c.as_text().map(|t| t.text.clone())).collect::<Vec<_>>().join("\n");
+    let t: String = r.content.iter().filter_map(|c| c.as_text().map(|t| t.text.clone())).filter(|t| !t.starts_with("{\"project\"")).collect::<Vec<_>>().join("\n");
     assert_ne!(r.is_error, Some(true), "{tool} failed: {t}");
     let end = t.find("\n\nnotices").unwrap_or(t.len());
     serde_json::from_str(&t[..end]).unwrap_or_else(|e| panic!("{e}: {t}"))

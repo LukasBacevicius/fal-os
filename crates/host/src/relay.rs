@@ -13,6 +13,11 @@
 //! so the client keeps working without a restart. Requests that still fail get a JSON-RPC
 //! error that says what to do.
 //!
+//! fal OS not running: `initialize` and `tools/list` are answered from the manifest the host
+//! writes on every start (`$FALOS_HOME/mcp-manifest.json`), so an agent started before the app
+//! still sees every tool; a tool call then returns a tool error that says to ask the user to
+//! open fal OS (and not to launch it). Once the app runs, the next request connects for real.
+//!
 //! Project binding: every request carries `X-Falos-Cwd` (the relay's working directory, i.e.
 //! the folder the agent was started in) and, when set, `FALOS_PROJECT` as `X-Falos-Project`.
 //! Push: after `initialize` the relay also holds the server's GET event stream open and
@@ -27,7 +32,32 @@ use tokio::sync::Mutex;
 
 use crate::server::HostFile;
 
-const NOT_RUNNING: &str = "fal-os is not running: open the fal-os app (or run `falos-host serve`), then retry";
+const NOT_RUNNING: &str = "fal OS isn't running: tell the user to open it, then retry; don't try to launch it";
+
+/// The manifest the host wrote on its last start (see `mcp::write_manifest`).
+fn manifest() -> Option<Json> {
+    serde_json::from_slice(&std::fs::read(crate::mcp::manifest_path()).ok()?).ok()
+}
+
+/// What to answer while the host is unreachable, from the manifest: `initialize`,
+/// `tools/list`, `ping`, and a tool error for `tools/call`. None: no manifest or another method.
+fn offline_answer(msg: &Json) -> Option<Json> {
+    let id = msg.get("id")?.clone();
+    let result = match msg["method"].as_str()? {
+        "ping" => json!({}),
+        "tools/call" => json!({"content": [{"type": "text", "text": NOT_RUNNING}], "isError": true}),
+        "initialize" => {
+            let mut init = manifest()?["initialize"].clone();
+            if let Some(p) = msg["params"]["protocolVersion"].as_str() {
+                init["protocolVersion"] = json!(p);
+            }
+            init
+        }
+        "tools/list" => json!({"tools": manifest()?["tools"].clone()}),
+        _ => return None,
+    };
+    Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+}
 
 #[derive(Default)]
 struct State {
@@ -109,6 +139,11 @@ impl Relay {
         if let Err(e) = self.relay_retrying(&msg).await
             && let Some(id) = id
         {
+            let down = format!("{e:#}").starts_with(NOT_RUNNING);
+            if down && let Some(answer) = offline_answer(&msg) {
+                self.write(&answer).await;
+                return;
+            }
             self.write(&json!({"jsonrpc": "2.0", "id": id,
                 "error": {"code": -32000, "message": format!("fal-os relay: {e:#}")}}))
                 .await;
@@ -267,7 +302,9 @@ impl Relay {
 
 pub async fn run() -> Result<()> {
     let relay = Arc::new(Relay {
-        http: reqwest::Client::new(),
+        // A host that accepts connections but never answers (stopped, wedged) must not hang
+        // the agent on connect; calls themselves can legitimately take long.
+        http: reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5)).build()?,
         state: Default::default(),
         out: Mutex::new(tokio::io::stdout()),
         reinit: Mutex::new(()),

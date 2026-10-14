@@ -70,7 +70,8 @@ already in use). Two frame kinds:
 
 ### server → client
 ```jsonc
-{"type":"hello","canvas":"main","version":"12@345,…","session":{SessionInfo},"sessions":[SessionInfo],"claims":[Claim]}
+{"type":"hello","hostVersion":"0.1.0","protocol":2,"notices":[Notice],"view":{"camera":{x,y,zoom},"selection":[…]}|null,
+ "canvas":"main","version":"12@345,…","session":{SessionInfo},"sessions":[SessionInfo],"claims":[Claim]}
 {"type":"doc","canvas":"main","actor":"claude-code","version":"…","created":["881s9r"],"touched":["881s9r"]}
 //   sent right after the matching binary update (not echoed to the connection it came from)
 {"type":"presence","session":{SessionInfo}}
@@ -85,8 +86,16 @@ already in use). Two frame kinds:
 {"type":"agent.connected","client":"claude","clientName":"claude-code","agentName":"Claude Code","session":"s_…","chat":"ext:claude-1","transport":"http"|"stdio"}
 {"type":"agent.first_write","client":"claude","session":"s_…","canvas":"main","nodes":["…"]}
 {"type":"agent.registered","client":"claude","ok":true,"path":"/Users/me/.claude.json","changed":true}   // reply to agent.register; on failure ok:false, path:null, error
-{"type":"error","message":"…"}
+{"type":"notice","notice":Notice | {"key":"…","gone":true}}       // a held notice changed
+{"type":"canvas.reset","canvas":"main"}   // the file was replaced (restored backup): reload from scratch; the host then closes the socket
+{"type":"pong","t":…}                     // answer to ping
+{"type":"error","message":"…","scope":"blocked"|"sync"|"notice"?}   // blocked: a write to a canvas that can't be written (a notice explains)
 ```
+`Notice = {key, level: "ongoing"|"error"|"ok"|"info", text, actions: [{id, label}], copy?}`:
+held conditions (`save` failing, `refused:<canvas>` collapse guard, `load:<canvas>` failed to
+load, `readonly[:<canvas>]` newer format, `project.json` rebuilt, `crash` from the last run).
+`ongoing` lines stay until the host clears them (often as an `ok` "saved to disk").
+`protocol` is the sync protocol version; a UI built for another one shows `ui out of date`.
 `SessionInfo = {id, agentName, actor, kind: "human"|"agent", color, presence: {status, canvas?, cursor?: [x,y], viewport?: [x,y,w,h], last_activity}, chat, agent, parent?, label, state, client?}`
 - `chat`: the chat the session works for (`c_…` for the runtime's agents, `ext:<client>-<n>` for external agents), else null. `color` is then the chat's color.
 - `agent`: the runtime's subagent label (`generator-2`, set via the runtime's `session.agent`) or the actor id; `parent`: its parent agent.
@@ -118,7 +127,13 @@ for the connection's canvas; presence events are global.
 {"type":"revoke_claim","node":"881s9r"}                                // human override
 {"type":"selection","nodes":["881s9r"]}                                 // the user's selection (get_selection, placement)
 {"type":"agent.register","client":"claude"|"codex"|"cursor"|"gemini"|"opencode"}  // → agent.registered
+{"type":"ping","t":…}                                                   // heartbeat → pong
+{"type":"view","camera":{"x":…,"y":…,"zoom":…}}                          // remembered for hello.view
+{"type":"notice.action","key":"load:main","action":"restore"|"fresh"|"save-anyway"|"dismiss"}
 ```
+Heartbeat: the UI pings after 10 s without traffic and reconnects when no answer comes within
+5 s (a half-open socket); the host sends WebSocket pings every 15 s and drops a client silent
+for 45 s.
 `agent.register` writes the fal-os MCP server into that client's own config (same code as
 `falos-host register`): format-preserving, atomic, idempotent, refuses files it can't parse
 (e.g. JSONC with comments), new files 0600. Paths: `~/.claude.json`, `~/.codex/config.toml`,
@@ -150,7 +165,15 @@ written by the `ops` actor; their asset lineage records the requesting actor.
 ## Stdio relay
 `falos-host mcp` is a stdio MCP server that relays to the running host's `/mcp` (URL and token
 from `~/.fal-os/host.json`), adding `X-Falos-From: stdio`. For clients that prefer stdio:
-`{"command": "falos-host", "args": ["mcp"]}`. Logs go to stderr.
+`{"command": "falos-host", "args": ["mcp"]}`. Logs go to stderr. While fal OS isn't running it
+answers `initialize` / `tools/list` from `$FALOS_HOME/mcp-manifest.json` (written by every
+host start); tool calls then return a tool error: "fal OS isn't running: tell the user to open
+it, then retry; don't try to launch it". The next request after the app starts connects.
+
+Every tool result starts with a `{"project","canvas","version"}` text block. Calls have a
+deadline (90 s; 300 s for export / package / app writes / imports / get_context / inspect;
+`timeoutSecs` + 30 s for calls that wait; none for `inbox` / `await_batch`). Writes to a canvas
+that failed to load or is read-only are refused with "… retry shortly".
 
 ## Request headers (MCP)
 - `X-Falos-Chat: c_…`: sent by the agent runtime on its agents' connections; sessions created

@@ -65,7 +65,7 @@ async fn call_raw(c: &Client, tool: &'static str, args: Json) -> CallToolResult 
 fn text(r: &CallToolResult) -> String {
     r.content
         .iter()
-        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .filter_map(|c| c.as_text().map(|t| t.text.clone())).filter(|t| !t.starts_with("{\"project\""))
         .collect::<Vec<_>>()
         .join("\n")
 }

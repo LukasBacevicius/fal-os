@@ -102,6 +102,12 @@ async fn main() -> Result<()> {
         .init();
     match Cli::parse().cmd {
         Cmd::Serve { workspace, project, port, runtime, no_runtime } => {
+            // Crash reports in $FALOS_HOME/logs; the next start announces unseen ones once.
+            falos_host::diag::install_panic_hook("host");
+            falos_host::diag::load_crash_notice();
+            if std::env::var_os("FALOS_TEST_PANIC").is_some() {
+                panic!("FALOS_TEST_PANIC: a deliberate panic to check crash reports");
+            }
             let token = server::load_or_create_token()?;
             let space = match project {
                 Some(p) => Workspace::single(Host::open(&p, HostOptions::default())?),
@@ -134,6 +140,12 @@ async fn main() -> Result<()> {
                 workspace: space.root().map(|r| r.display().to_string()),
             }
             .save()?;
+            // What the stdio relay answers while fal OS isn't running.
+            let manifest = falos_host::mcp::manifest_path();
+            match falos_host::mcp::write_manifest(&space, &manifest) {
+                Ok(()) => tracing::info!("mcp manifest: {}", manifest.display()),
+                Err(e) => tracing::warn!("writing the mcp manifest failed: {e:#}"),
+            }
             tracing::info!(
                 "serving {} — MCP {} · workspace ws://127.0.0.1:{port}/workspace · sync ws://127.0.0.1:{port}/sync/<project> · token in {}",
                 space.root().unwrap_or(default.dir()).display(),

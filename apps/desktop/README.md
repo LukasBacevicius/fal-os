@@ -33,6 +33,10 @@ Env overrides:
 - `FALOS_KEYCHAIN_SERVICE`: Keychain service name.
 - `FALOS_NO_KEYCHAIN=1`: file fallback only.
 - `FALOS_NO_SIDECAR=1`: don't start the host.
+- `FALOS_HOST_BIN=<falos-host>`: a checkout build starts and supervises that host (no agent runtime), e.g. to test restarts with `FALOS_PORT` / `FALOS_PROJECTS` / `FALOS_HOME` of your own.
+- `FALOS_TEST_PANIC_APP=1`: panic at start (checks the crash report path).
+
+The packaged host is supervised: restarted when it dies (≤ 3 times in 10 minutes), then the UI shows `host stopped · [restart] [copy report] [open logs]`. Logs live in `$FALOS_HOME/logs` (`host.log` rotated 5 × 5 MB, `app.log`, `setup.log`, `crash-*.txt`); "View Logs" in the app menu opens it.
 
 ## Bench / probe env vars
 - `FALOS_URL=http://127.0.0.1:8789/?bench` loads any URL. `tauri://localhost/?bench` also works with `custom-protocol`.

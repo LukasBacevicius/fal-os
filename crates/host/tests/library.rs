@@ -293,7 +293,7 @@ async fn library_end_to_end() {
         let c = &c;
         async move {
             let r = c.call_tool(CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone())).await.unwrap();
-            let t: String = r.content.iter().filter_map(|x| x.as_text().map(|t| t.text.clone())).collect();
+            let t: String = r.content.iter().filter_map(|x| x.as_text().map(|t| t.text.clone())).filter(|t| !t.starts_with("{\"project\"")).collect();
             assert_ne!(r.is_error, Some(true), "{tool}: {t}");
             t
         }

@@ -238,6 +238,49 @@ capable.
   - Under 500 MB RSS for that scene on the native shell.
 - **One authority:** the host (local or a cloud room). Files and snapshots are projections of it; no dual sync lanes.
 
+## Reliability
+P0 safety nets (background: [Brilliant b102](research/brilliant-b102.md#7-recommendations-for-fal-os),
+[Paper 0.5.15](research/paper-0515.md#7-recommendations-for-fal-os)).
+
+- **Durable saves** (`crates/doc` `write_durable`, `crates/host/src/persist.rs`): temp file →
+  fsync (`F_FULLFSYNC`) → rename → fsync of the folder. A backup ring per canvas,
+  `canvases/.bak/<id>.<ms>.loro`: the newest slot follows the last good save, a new slot every
+  10 min, 5 kept. A failed autosave keeps the canvas dirty and retries (1 → 30 s) under a held
+  `not saved to disk yet · retrying` notice. A save that loses >80 % of the nodes without
+  matching deletes is refused (the file stays; `[save anyway]`).
+- **Degrade per canvas.** A canvas that fails to load never blocks the project and is never
+  saved over: `couldn't open <canvas>, the file is untouched · [restore backup]` (the broken
+  file is kept as `<id>.loro.broken-<ms>`); writes to it are refused. A damaged
+  `project.json` is rebuilt from the canvas files (original kept as `project.json.broken-<ms>`).
+- **Format versions.** `format` in `project.json` and the canvas `meta`. Older files are copied
+  to `<project>/.archive/` before migrating; newer ones open read-only, saving paused, with a
+  notice. MCP writes are refused there too.
+- **Host supervisor** (desktop `sidecar.rs`): a host that dies is restarted (≤ 3 in 10 min,
+  crash report `logs/crash-<ms>-host-exit.txt`), then the card
+  `host stopped · [restart] [copy report] [open logs]`. The UI reconnects by itself, and after
+  a reconnect sends everything the host's snapshot lacks, so edits a dead host never saved
+  aren't lost.
+- **Sync** (`apps/web/src/sync.ts`, `crates/host/src/sync.rs`): ping/pong heartbeat, connect
+  timeout, `reconnecting…` only past 1 s, a circuit breaker after 10 failed reconnects
+  (`host unreachable · [retry]`), `hostVersion` + `protocol` in `hello` (`ui out of date ·
+  [reload]`). Host keepalive pings drop silent clients after 45 s.
+- **Notices, not one toast** (`store.ts` `notify`): successes fade (~3 s), failures stay until
+  `[×]`, an ongoing condition is one keyed line updated in place that ends as `back in sync`.
+  `toast()` routes into it. Cards (`showCard`) for things that stopped.
+- **Webview and GPU.** A WKWebView content process that dies is reloaded with `#recovered`;
+  camera and selection come back from the host (`hello.view`). A lost WebGPU device keeps the
+  last frame with `restoring canvas…`, the app is recreated on a new device (scene, camera,
+  selection kept); after 3 recoveries in 30 min a card. A boot watchdog (`boot.ts`) shows
+  `stuck <step> · [retry]` when the engine, the host or the project doesn't come up in time.
+- **MCP**: the stdio relay lists the tools from `$FALOS_HOME/mcp-manifest.json` while fal OS is
+  down and tool calls say "tell the user to open it"; every call has a deadline (not the
+  long-polls); results start with `{project, canvas, version}`.
+- **Diagnostics** (`crates/host/src/diag.rs`, desktop `main.rs`): panic hooks write
+  `$FALOS_HOME/logs/crash-<ms>-<host|desktop>.txt` (backtrace, version, host.log tail); the
+  next start shows `fal OS stopped unexpectedly last time · [copy report]` once. `host.log`
+  rotates (5 × 5 MB; setup.log and app.log on open). "View Logs" in the app menu and `[≡]`.
+  `FALOS_TEST_PANIC` / `FALOS_TEST_PANIC_APP` and `CanvasApp.loseDevice()` exercise the paths.
+
 ## Decision 1: shell
 | Option | How | Pros | Cons |
 |---|---|---|---|

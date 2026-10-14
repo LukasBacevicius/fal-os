@@ -12,6 +12,7 @@ import { worldRects } from './geometry';
 import { loadScene, saveCamera } from './projects';
 import { prepare, syncLineage, watchDeliverables } from './out';
 import { addPlaceholder, fileGhost, finishPlaceholder, frameRect, gridLayout, importProgress, trackImport } from './dnd';
+import { deviceLost } from './gpu';
 
 export const CANVAS_ID = 'main';
 
@@ -61,11 +62,17 @@ export function attach(app: CanvasApp) {
       case 'hover':
         setState({ hoverNode: payload.node });
         break;
+      case 'device_lost':
+        void deviceLost(String(payload?.reason ?? ''));
+        break;
       case 'camera': {
         setState({ camera: payload });
         // Per-project camera memory (only once the project's own scene is in).
         const sync = hostSync();
-        if (sync?.connected) saveCamera(sync.key, payload);
+        if (sync?.connected) {
+          saveCamera(sync.key, payload);
+          sync.sendView(payload);
+        }
         else if (!sync && getState().conn === 'local') saveCamera(CANVAS_ID, payload);
         break;
       }

@@ -15,15 +15,25 @@
 //! SIGTERMs the group (the host then stops the runtime's group), and a crashed app leaves
 //! nothing behind (the host notices it was reparented and exits; the runtime follows its host).
 //!
+//! Supervision: when the host exits unexpectedly (crash, kill -9), a crash report goes to
+//! `$FALOS_HOME/logs/crash-<ms>-host-exit.txt` and the host is started again, at most 3 times in
+//! 10 minutes; then the web UI shows `host stopped · [restart] [copy report] [open logs]`
+//! (`falos:host` events, `host_status`). The UI's sync reconnects to the new host by itself.
+//! The host's output goes through a rotating `logs/host.log` (5 × 5 MB).
+//!
+//! Dev: `FALOS_HOST_BIN=<falos-host>` makes a checkout build start (and supervise) that host
+//! too, without the agent runtime (`--no-runtime`).
+//!
 //! No macOS permission prompts on the way (docs/PACKAGING.md §2.5.1): the fal key lives in
 //! `$FALOS_HOME/fal.env` (0600), not the Keychain, whose "wants to use your confidential
 //! information" dialog an ad-hoc build would trigger again after every update; every child runs
 //! with its cwd in `$FALOS_HOME`, never in a protected folder.
 
-use std::collections::HashMap;
-use std::io::Read;
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -41,6 +51,121 @@ pub struct Sidecar {
     host: Mutex<Option<Child>>,
     setup: Mutex<Option<Child>>,
     tasks: Mutex<HashMap<String, Arc<Mutex<Task>>>>,
+    /// `FALOS_HOST_BIN` (a checkout build that starts its own host, without the runtime).
+    dev_host: bool,
+    /// The app, once it runs: the supervisor tells the web UI about the host through it.
+    app: OnceLock<tauri::AppHandle>,
+    /// Quitting: an exit of the host is expected.
+    stopping: AtomicBool,
+    /// Unexpected host exits (for the 3-in-10-minutes limit) and the state the UI shows.
+    sup: Mutex<Supervision>,
+    /// `logs/host.log`, rotated, and its last lines (for reports).
+    host_log: Arc<Mutex<RotatingLog>>,
+}
+
+/// At most this many automatic restarts within [`RESTART_WINDOW`].
+const MAX_RESTARTS: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Default)]
+struct Supervision {
+    exits: VecDeque<Instant>,
+    /// `{state: running|restarting|stopped, reason?, restarts}` for the UI.
+    state: Json,
+    report: Option<PathBuf>,
+}
+
+/// Log rotation: `<name>` + `<name>.1` … `.4`, 5 MB each.
+pub const LOG_MAX: u64 = 5 * 1024 * 1024;
+pub const LOG_KEEP: usize = 5;
+
+/// Shift `<path>.N` up by one (dropping the oldest) and move `<path>` to `<path>.1`.
+pub fn rotate(path: &Path) {
+    let n = |i: usize| PathBuf::from(format!("{}.{i}", path.display()));
+    let _ = std::fs::remove_file(n(LOG_KEEP - 1));
+    for i in (1..LOG_KEEP - 1).rev() {
+        let _ = std::fs::rename(n(i), n(i + 1));
+    }
+    let _ = std::fs::rename(path, n(1));
+}
+
+/// Rotate `path` first when it's over [`LOG_MAX`] (logs opened per run, like setup.log).
+pub fn rotate_if_big(path: &Path) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX) {
+        rotate(path);
+    }
+}
+
+/// An append-only log file that rotates itself at [`LOG_MAX`], keeping its last 200 lines.
+pub struct RotatingLog {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    size: u64,
+    pub tail: VecDeque<String>,
+}
+
+impl RotatingLog {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, file: None, size: 0, tail: VecDeque::new() }
+    }
+
+    pub fn line(&mut self, line: &str) {
+        self.tail.push_back(line.to_string());
+        if self.tail.len() > 200 {
+            self.tail.pop_front();
+        }
+        if self.file.is_none() {
+            if let Some(d) = self.path.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            rotate_if_big(&self.path);
+            self.file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path).ok();
+            self.size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        }
+        let n = line.len() as u64 + 1;
+        if self.size + n > LOG_MAX {
+            self.file = None;
+            rotate(&self.path);
+            self.file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path).ok();
+            self.size = 0;
+        }
+        if let Some(f) = self.file.as_mut() {
+            let _ = writeln!(f, "{line}");
+            self.size += n;
+        }
+    }
+}
+
+/// A crash report in `$FALOS_HOME/logs/crash-<ms>-<component>.txt` (the host reads unseen ones
+/// on its next start and shows "fal OS stopped unexpectedly last time · [copy report]").
+pub fn write_crash_report(home: &Path, component: &str, body: &str, log_tail: &str) -> Option<PathBuf> {
+    let dir = home.join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let path = dir.join(format!("crash-{ms}-{component}.txt"));
+    let mut text = format!(
+        "fal OS crash report\ncomponent: {component}\nversion: {}\npid: {}\nos: {} {}\n\n{body}\n",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    if !log_tail.is_empty() {
+        text.push_str("\n--- last lines of host.log ---\n");
+        text.push_str(log_tail);
+        text.push('\n');
+    }
+    std::fs::write(&path, text).ok()?;
+    Some(path)
+}
+
+/// The last `n` lines of a file.
+pub fn file_tail(path: &Path, n: usize) -> String {
+    let Ok(bytes) = std::fs::read(path) else { return String::new() };
+    let start = bytes.len().saturating_sub(256 * 1024);
+    let text = String::from_utf8_lossy(&bytes[start..]);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 pub fn falos_home() -> PathBuf {
@@ -137,13 +262,35 @@ impl Sidecar {
             .map(|d| d.join("../Resources"))
             .filter(|r| r.join("runtime/dist/main.mjs").exists() && r.join("node/bin/node").exists())
             .filter(|_| std::env::var_os("FALOS_NO_SIDECAR").is_none());
-        let host_bin = exe_dir.map(|d| d.join("falos-host")).filter(|b| b.exists());
-        Self::with_layout(resources, host_bin, falos_home())
+        let dev = std::env::var_os("FALOS_HOST_BIN").map(PathBuf::from).filter(|b| b.exists());
+        let host_bin = dev.clone().or_else(|| exe_dir.map(|d| d.join("falos-host")).filter(|b| b.exists()));
+        let mut s = Self::with_layout(resources, host_bin, falos_home());
+        s.dev_host = dev.is_some();
+        s
     }
 
     fn with_layout(resources: Option<PathBuf>, host_bin: Option<PathBuf>, home: PathBuf) -> Self {
         let (path_env, host, setup, tasks) = Default::default();
-        Self { resources, host_bin, home, path_env, host, setup, tasks }
+        let host_log = Arc::new(Mutex::new(RotatingLog::new(home.join("logs/host.log"))));
+        Self {
+            resources,
+            host_bin,
+            home,
+            path_env,
+            host,
+            setup,
+            tasks,
+            dev_host: false,
+            app: OnceLock::new(),
+            stopping: AtomicBool::new(false),
+            sup: Mutex::new(Supervision { state: json!({"state": "running", "restarts": 0}), ..Default::default() }),
+            host_log,
+        }
+    }
+
+    /// Whether this app starts (and supervises) the host itself.
+    pub fn spawns_host(&self) -> bool {
+        self.host_bin.is_some() && (self.resources.is_some() || self.dev_host)
     }
 
     /// Bundled Node first (agents run `npx remotion …` / `node …` with a known-good Node 22),
@@ -201,6 +348,7 @@ impl Sidecar {
     fn log_file(&self, name: &str) -> Stdio {
         let dir = self.home.join("logs");
         let _ = std::fs::create_dir_all(&dir);
+        rotate_if_big(&dir.join(name));
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -211,7 +359,10 @@ impl Sidecar {
 
     /// Start the host (no-op when not packaged or already running).
     pub fn start(&self) -> Result<(), String> {
-        let (Some(r), Some(bin)) = (&self.resources, &self.host_bin) else { return Ok(()) };
+        if !self.spawns_host() {
+            return Ok(());
+        }
+        let Some(bin) = &self.host_bin else { return Ok(()) };
         let mut slot = self.host.lock().unwrap();
         if let Some(c) = slot.as_mut()
             && matches!(c.try_wait(), Ok(None))
@@ -219,9 +370,18 @@ impl Sidecar {
             return Ok(());
         }
         std::fs::create_dir_all(&self.home).map_err(|e| e.to_string())?;
-        strip_quarantine(&r.join("../.."));
         let mut cmd = Command::new(bin);
-        cmd.arg("serve").arg("--runtime").arg(r.join("runtime"));
+        cmd.arg("serve");
+        match &self.resources {
+            Some(r) => {
+                strip_quarantine(&r.join("../.."));
+                cmd.arg("--runtime").arg(r.join("runtime"));
+            }
+            // Dev host (`FALOS_HOST_BIN`): no bundled runtime.
+            None => {
+                cmd.arg("--no-runtime").env("FALOS_HOME", &self.home).current_dir(&self.home);
+            }
+        }
         // A different projects folder than ~/fal-os-projects (tests, or several installs).
         if let Some(w) = std::env::var_os("FALOS_PROJECTS") {
             cmd.arg("--workspace").arg(w);
@@ -234,16 +394,132 @@ impl Sidecar {
         self.env(&mut cmd);
         cmd.env("FALOS_EXIT_WITH_PARENT", "1")
             .stdin(Stdio::null())
-            .stdout(self.log_file("host.log"))
-            .stderr(self.log_file("host.log"));
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-        let child = cmd.spawn().map_err(|e| format!("could not start falos-host: {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| format!("could not start falos-host: {e}"))?;
+        // Its output goes through the rotating host.log.
+        for out in [child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>), child.stderr.take().map(|e| Box::new(e) as _)]
+            .into_iter()
+            .flatten()
+        {
+            let log = self.host_log.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(out).split(b'\n').map_while(Result::ok) {
+                    let text = strip_ansi(&String::from_utf8_lossy(&line));
+                    log.lock().unwrap().line(text.trim_end());
+                }
+            });
+        }
         *slot = Some(child);
         Ok(())
     }
 
+    /// Watch the host: an unexpected exit is reported (crash report) and restarted, at most
+    /// [`MAX_RESTARTS`] times in [`RESTART_WINDOW`]; then the UI shows "host stopped". Call once.
+    pub fn supervise(self: &Arc<Self>, app: tauri::AppHandle) {
+        if self.app.set(app).is_err() || !self.spawns_host() {
+            return;
+        }
+        let me = self.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let exited = {
+                    let mut slot = me.host.lock().unwrap();
+                    match slot.as_mut().map(|c| c.try_wait()) {
+                        Some(Ok(Some(status))) => {
+                            slot.take();
+                            Some(status)
+                        }
+                        _ => None,
+                    }
+                };
+                let Some(status) = exited else { continue };
+                if me.stopping.load(Ordering::SeqCst) {
+                    return;
+                }
+                me.on_host_exit(status);
+            }
+        });
+    }
+
+    fn on_host_exit(&self, status: std::process::ExitStatus) {
+        use std::os::unix::process::ExitStatusExt;
+        let reason = match (status.code(), status.signal()) {
+            (_, Some(sig)) => format!("killed by signal {sig}"),
+            (Some(code), _) => format!("exited with code {code}"),
+            _ => "exited".to_string(),
+        };
+        std::thread::sleep(Duration::from_millis(200)); // the last lines of output
+        let tail: String = self.host_log.lock().unwrap().tail.iter().cloned().collect::<Vec<_>>().join("\n");
+        let report = write_crash_report(&self.home, "host-exit", &format!("the host {reason}"), &tail);
+        self.app_log(&format!("host {reason}"));
+        let restarts = {
+            let mut sup = self.sup.lock().unwrap();
+            sup.report = report;
+            while sup.exits.front().is_some_and(|t| t.elapsed() > RESTART_WINDOW) {
+                sup.exits.pop_front();
+            }
+            sup.exits.push_back(Instant::now());
+            sup.exits.len()
+        };
+        if restarts > MAX_RESTARTS {
+            self.app_log(&format!("host stopped: {reason} ({MAX_RESTARTS} restarts in 10 minutes)"));
+            self.set_host_state(json!({"state": "stopped", "reason": reason, "restarts": restarts - 1}));
+            return;
+        }
+        self.set_host_state(json!({"state": "restarting", "reason": reason, "restarts": restarts}));
+        std::thread::sleep(Duration::from_millis(500 * (1 << (restarts - 1).min(3))));
+        match self.start() {
+            Ok(()) => {
+                self.app_log(&format!("host restarted ({restarts} of {MAX_RESTARTS})"));
+                self.set_host_state(json!({"state": "running", "reason": reason, "restarts": restarts}));
+            }
+            Err(e) => self.set_host_state(json!({"state": "stopped", "reason": e, "restarts": restarts})),
+        }
+    }
+
+    fn set_host_state(&self, state: Json) {
+        self.sup.lock().unwrap().state = state.clone();
+        if let Some(app) = self.app.get() {
+            crate::web_event(app, "falos:host", &state);
+        }
+    }
+
+    /// `{state, reason?, restarts}` of the host this app runs (for the UI on load).
+    pub fn host_status(&self) -> Json {
+        let mut s = self.sup.lock().unwrap().state.clone();
+        s["supervised"] = json!(self.spawns_host());
+        s
+    }
+
+    /// The text behind [copy report]: the host state and the last lines of its log.
+    pub fn host_report(&self) -> String {
+        let sup = self.sup.lock().unwrap();
+        let report = sup.report.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        let tail: String = self.host_log.lock().unwrap().tail.iter().cloned().collect::<Vec<_>>().join("\n");
+        report.unwrap_or_else(|| format!("fal OS host report\nversion: {}\nstate: {}\n\n--- last lines of host.log ---\n{tail}\n", env!("CARGO_PKG_VERSION"), sup.state))
+    }
+
+    pub fn logs_dir(&self) -> PathBuf {
+        self.home.join("logs")
+    }
+
+    /// One line in `logs/app.log` (the shell's own events: host exits, webview reloads).
+    pub fn app_log(&self, msg: &str) {
+        let path = self.logs_dir().join("app.log");
+        let _ = std::fs::create_dir_all(self.logs_dir());
+        rotate_if_big(&path);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+            let _ = writeln!(f, "{ms} {msg}");
+        }
+    }
+
     /// SIGTERM the host's process group, wait up to 5 s, then SIGKILL.
     pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
         let tasks: Vec<String> = self.tasks.lock().unwrap().keys().cloned().collect();
         for name in tasks {
             self.cancel_task(&name);
@@ -266,7 +542,10 @@ impl Sidecar {
         }
     }
 
+    /// Restart the host on purpose ([restart], a new key, an install): resets the crash-loop
+    /// limit.
     pub fn restart(&self) -> Result<(), String> {
+        self.sup.lock().unwrap().exits.clear();
         if let Some(mut c) = self.host.lock().unwrap().take() {
             let _ = Command::new("kill").args(["-TERM", &format!("-{}", c.id())]).status();
             let start = Instant::now();
@@ -276,7 +555,11 @@ impl Sidecar {
             let _ = c.kill();
             let _ = c.wait();
         }
-        self.start()
+        self.start()?;
+        if self.spawns_host() {
+            self.set_host_state(json!({"state": "running", "restarts": 0}));
+        }
+        Ok(())
     }
 
     fn host_pid(&self) -> Option<u32> {
@@ -293,7 +576,7 @@ impl Sidecar {
             let v: Option<Json> = std::fs::read(self.home.join("host.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok());
-            let ours = match (self.packaged(), self.host_pid(), &v) {
+            let ours = match (self.spawns_host(), self.host_pid(), &v) {
                 (false, _, _) => true,
                 (true, Some(pid), Some(v)) => v["pid"].as_u64() == Some(pid as u64),
                 _ => false,
@@ -301,7 +584,7 @@ impl Sidecar {
             if ours && let Some(v) = v {
                 return Some(json!({ "port": v.get("port")?, "token": v.get("token")?, "project": v.get("project") }));
             }
-            if !self.packaged() || start.elapsed() > Duration::from_secs(20) {
+            if !self.spawns_host() || start.elapsed() > Duration::from_secs(20) {
                 return None;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -420,6 +703,7 @@ impl Sidecar {
         std::fs::create_dir_all(self.home.join("logs")).map_err(|e| e.to_string())?;
         let mut child = cmd.spawn().map_err(|e| format!("{name}: {e}"))?;
         let state = Arc::new(Mutex::new(Task { running: true, pid: child.id(), ..Task::default() }));
+        rotate_if_big(&self.home.join("logs/setup.log"));
         let log = Arc::new(Mutex::new(
             std::fs::OpenOptions::new().create(true).append(true).open(self.home.join("logs/setup.log")).ok(),
         ));
@@ -511,7 +795,6 @@ struct Task {
 }
 
 fn pump(mut out: Box<dyn Read + Send>, state: &Mutex<Task>, log: &Mutex<Option<std::fs::File>>, name: &str) {
-    use std::io::Write;
     let mut buf = [0u8; 4096];
     let mut line = Vec::new();
     let push = |raw: &[u8]| {
@@ -672,7 +955,6 @@ fn strip_quarantine(bundle: &Path) {
 }
 
 fn write_private(path: &Path, text: &str) -> Result<(), String> {
-    use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
@@ -692,6 +974,26 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// host.log rotates at 5 MB and keeps 5 files.
+    #[test]
+    fn logs_rotate() {
+        let root = std::env::temp_dir().join(format!("falos-rot-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut log = RotatingLog::new(root.join("host.log"));
+        let line = "x".repeat(1023);
+        for _ in 0..(LOG_MAX as usize / 1024) * 7 {
+            log.line(&line);
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["host.log", "host.log.1", "host.log.2", "host.log.3", "host.log.4"]);
+        for n in &names {
+            assert!(std::fs::metadata(root.join(n)).unwrap().len() <= LOG_MAX);
+        }
+        assert_eq!(log.tail.len(), 200);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn strips_ansi() {

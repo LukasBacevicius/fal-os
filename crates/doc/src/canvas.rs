@@ -243,6 +243,7 @@ impl Canvas {
         let meta = doc.get_map(META);
         meta.insert("id", id).unwrap();
         meta.insert("name", name).unwrap();
+        meta.insert("format", crate::FORMAT as i64).unwrap();
         doc.get_map(PEERS)
             .insert(&doc.peer_id().to_string(), "system")
             .unwrap();
@@ -268,6 +269,39 @@ impl Canvas {
 
     pub fn name(&self) -> String {
         get_str(&self.doc.get_map(META), "name").unwrap_or_default()
+    }
+
+    /// The canvas's on-disk format (`meta.format`; 0 = from before formats existed).
+    pub fn format(&self) -> u32 {
+        match self.doc.get_map(META).get("format") {
+            Some(ValueOrContainer::Value(LoroValue::I64(n))) => n.clamp(0, u32::MAX as i64) as u32,
+            Some(ValueOrContainer::Value(LoroValue::Double(n))) => n.max(0.0) as u32,
+            _ => 0,
+        }
+    }
+
+    /// Stamp `meta.format` (the last step of a migration), as a system change.
+    pub fn set_format(&mut self, format: u32) -> Result<()> {
+        self.doc.get_map(META).insert("format", format as i64)?;
+        self.doc
+            .get_map(PEERS)
+            .insert(&self.doc.peer_id().to_string(), "system")?;
+        self.doc.commit_with(CommitOptions::new().commit_msg("system"));
+        Ok(())
+    }
+
+    /// Number of nodes (cheap: no projection).
+    pub fn node_count(&self) -> usize {
+        let tree = self.tree();
+        let mut stack = vec![TreeParentId::Root];
+        let mut n = 0;
+        while let Some(p) = stack.pop() {
+            for c in tree.children(p).unwrap_or_default() {
+                n += 1;
+                stack.push(TreeParentId::Node(c));
+            }
+        }
+        n
     }
 
     /// The authoritative replica, for subscriptions and rendering.

@@ -161,6 +161,14 @@ pub enum Event {
         canvas: String,
         nodes: Vec<String>,
     },
+    /// A held notice changed (see [`Host::set_notice`]): `{key, level, text, actions, copy?}`,
+    /// or `{key, gone: true}`.
+    #[serde(rename = "notice")]
+    Notice { notice: serde_json::Value },
+    /// The canvas on disk was replaced (restored from a backup, started fresh): clients load
+    /// it again from scratch instead of merging.
+    #[serde(rename = "canvas.reset")]
+    CanvasReset { canvas: String },
 }
 
 impl Event {
@@ -175,12 +183,14 @@ impl Event {
             | Event::ChatList { canvas, .. }
             | Event::ChatDeleted { canvas, .. }
             | Event::Batch { canvas, .. }
+            | Event::CanvasReset { canvas, .. }
             | Event::Activity { canvas, .. } => Some(canvas),
             Event::Presence { .. }
             | Event::SessionClosed { .. }
             | Event::ActivityClear { .. }
             | Event::AgentConnected { .. }
             | Event::App { .. }
+            | Event::Notice { .. }
             | Event::AgentFirstWrite { .. } => None,
         }
     }
@@ -308,7 +318,16 @@ pub struct ClaimOutcome {
 struct Open {
     canvas: Canvas,
     dirty: bool,
+    /// Nodes in the file on disk (last load or save): the collapse guard's baseline.
+    saved_nodes: usize,
+    /// Nodes removed by mutations since the last save (explains a drop in the count).
+    deleted: usize,
+    /// "save anyway": the next save skips the collapse guard.
+    force: bool,
 }
+
+/// Saves stopped by the guard or failing, per canvas (for notices).
+const SAVE_KEY: &str = "save";
 
 pub struct HostOptions {
     pub fal_queue_url: String,
@@ -376,6 +395,15 @@ pub struct Host {
     /// Last time a human client showed activity here (ms): connect, selection, focus. The
     /// most recent connected project is the one "open in fal OS" for agent binding.
     pub human_seen: std::sync::atomic::AtomicI64,
+    /// Canvases that failed to load: id → why. Their files are never written; writes are refused.
+    failed: Mutex<HashMap<String, String>>,
+    /// Read-only because a newer fal OS wrote it: `""` = the whole project, else a canvas id.
+    read_only: Mutex<HashMap<String, String>>,
+    /// Held notices for the UI, by key (see [`Host::set_notice`]).
+    notices: Mutex<BTreeMap<String, serde_json::Value>>,
+    /// Each human actor's last camera and selection per canvas, so a reloaded webview comes
+    /// back where it was: (canvas, actor) → `{camera, selection}`.
+    views: Mutex<HashMap<(String, String), serde_json::Value>>,
 }
 
 fn slug(s: &str) -> String {
@@ -411,18 +439,55 @@ impl Host {
     ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let dir = dir.canonicalize()?;
-        let mut project = if dir.join("project.json").exists() {
-            Project::load(&dir).context("loading project.json")?
+        let folder = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "project".into());
+        let mut notices = BTreeMap::new();
+        let mut read_only = HashMap::new();
+        let pj = dir.join("project.json");
+        let mut project = if pj.exists() {
+            match Project::load(&dir) {
+                Ok(p) => p,
+                // A damaged project.json: keep it aside and rebuild it from the canvas files,
+                // so everything else in the project still opens.
+                Err(e) => {
+                    let name = std::fs::read(&pj)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                        .and_then(|v| v["name"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| folder.clone());
+                    let kept = crate::persist::set_aside(&pj).context("loading project.json")?;
+                    let p = crate::persist::rebuild_project(&dir, &slug(&folder), &name);
+                    p.save(&dir)?;
+                    tracing::error!("project.json in {} was damaged ({e}); rebuilt from the canvas files, original kept as {}", dir.display(), kept.display());
+                    let kept = kept.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    notices.insert(
+                        "project.json".to_string(),
+                        notice_json("project.json", "error", &format!("project.json was damaged: rebuilt from the canvas files (the original is kept as {kept})"), &[("dismiss", "dismiss")], None),
+                    );
+                    p
+                }
+            }
         } else {
-            let name = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "project".into());
-            let p = Project::new(&slug(&name), &name);
+            let p = Project::new(&slug(&folder), &folder);
             p.save(&dir)?;
             p
         };
-        if project.canvases.is_empty() {
+        if project.format > falos_doc::FORMAT {
+            let why = format!("made by a newer fal OS (format {} > {}): read-only here, saving paused · update fal OS to edit it", project.format, falos_doc::FORMAT);
+            tracing::warn!("{}: {why}", dir.display());
+            notices.insert("readonly".to_string(), notice_json("readonly", "ongoing", &why, &[], None));
+            read_only.insert(String::new(), why);
+        } else if project.format < falos_doc::FORMAT {
+            // Migrate: keep the original first.
+            if pj.is_file() {
+                crate::persist::archive(&dir, &pj, project.format)?;
+            }
+            project.format = falos_doc::FORMAT;
+            project.save(&dir)?;
+        }
+        if project.canvases.is_empty() && read_only.is_empty() {
             project.save_canvas(&dir, &Canvas::new("main", "Main"))?;
         }
         let (events, _) = broadcast::channel(1024);
@@ -454,6 +519,10 @@ impl Host {
             inbox_wake: Notify::new(),
             inbox_orphans: Mutex::default(),
             human_seen: Default::default(),
+            failed: Mutex::default(),
+            read_only: Mutex::new(read_only),
+            notices: Mutex::new(notices),
+            views: Mutex::default(),
         }))
     }
 
@@ -469,6 +538,9 @@ impl Host {
     pub fn update_project(&self, f: impl FnOnce(&mut Project)) -> Result<()> {
         if self.closed.is_cancelled() {
             bail!("project `{}` is closed", self.id);
+        }
+        if let Some(why) = self.read_only.lock().unwrap().get("") {
+            bail!("project `{}` is {why}", self.id);
         }
         let mut p = self.project.lock().unwrap();
         f(&mut p);
@@ -562,6 +634,9 @@ impl Host {
         if let Ok(id) = self.resolve_canvas(name) {
             return Ok(id);
         }
+        if let Some(why) = self.read_only.lock().unwrap().get("") {
+            bail!("project `{}` is {why}", self.id);
+        }
         let mut id = slug(name);
         let mut p = self.project.lock().unwrap();
         if p.canvases.iter().any(|c| c.id == id) {
@@ -577,13 +652,229 @@ impl Host {
         if let Some(o) = map.get(&id) {
             return Ok(o.clone());
         }
-        let canvas = self.project.lock().unwrap().open_canvas(&self.dir, &id)?;
+        if let Some(why) = self.failed.lock().unwrap().get(&id) {
+            bail!("canvas `{id}` couldn't be opened ({why}); its file is untouched");
+        }
+        let (mut canvas, bytes) = match self.load_canvas_file(&id) {
+            Ok(c) => c,
+            Err(e) => {
+                let why = format!("{e:#}");
+                tracing::error!("canvas `{id}` of {} failed to load: {why}", self.id);
+                self.failed.lock().unwrap().insert(id.clone(), why.clone());
+                let n = crate::persist::backups(&self.dir, &id).len();
+                let actions: &[(&str, &str)] = if n > 0 { &[("restore", "restore backup")] } else { &[("fresh", "start fresh")] };
+                let name = self.canvas_name(&id);
+                self.set_notice(&format!("load:{id}"), "ongoing", &format!("couldn't open {name}, the file is untouched{}", if n > 0 { "" } else { " · no backup yet" }), actions, None);
+                bail!("canvas `{id}` couldn't be opened ({why}); its file is untouched");
+            }
+        };
+        let format = canvas.format();
+        let mut dirty = false;
+        if format > falos_doc::FORMAT {
+            let why = format!("made by a newer fal OS (format {format} > {}): read-only here, saving paused · update fal OS to edit it", falos_doc::FORMAT);
+            self.read_only.lock().unwrap().insert(id.clone(), why.clone());
+            self.set_notice(&format!("readonly:{id}"), "ongoing", &format!("{}: {why}", self.canvas_name(&id)), &[], None);
+        } else if !self.is_read_only(&id) {
+            // A first good copy for the backup ring as soon as a canvas loads.
+            if crate::persist::backups(&self.dir, &id).is_empty() {
+                let _ = crate::persist::write_backup(&self.dir, &id, &bytes);
+            }
+            if format < falos_doc::FORMAT {
+                // Migrate in memory; the original is archived before the first save.
+                let file = falos_doc::canvas_path(&self.dir, &id)?;
+                crate::persist::archive(&self.dir, &file, format)?;
+                canvas.set_format(falos_doc::FORMAT)?;
+                dirty = true;
+            }
+        }
+        let saved_nodes = canvas.node_count();
         let o = Arc::new(Mutex::new(Open {
             canvas,
-            dirty: false,
+            dirty,
+            saved_nodes,
+            deleted: 0,
+            force: false,
         }));
         map.insert(id, o.clone());
+        if dirty {
+            self.save_needed.notify_one();
+        }
         Ok(o)
+    }
+
+    /// Tests only: swap an open canvas's in-memory doc behind the host's back (no mutation
+    /// bookkeeping), the way a bug that resets a doc would. The collapse guard must catch it.
+    #[doc(hidden)]
+    pub fn replace_canvas_unchecked(&self, id: &str, canvas: Canvas) -> Result<()> {
+        let o = self.open_canvas(id)?;
+        let mut o = o.lock().unwrap();
+        o.canvas = canvas;
+        o.dirty = true;
+        Ok(())
+    }
+
+    fn load_canvas_file(&self, id: &str) -> Result<(Canvas, Vec<u8>)> {
+        let path = falos_doc::canvas_path(&self.dir, id)?;
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let canvas = Canvas::from_snapshot(&bytes).with_context(|| format!("{} is not a readable canvas", path.display()))?;
+        Ok((canvas, bytes))
+    }
+
+    fn canvas_name(&self, id: &str) -> String {
+        self.project
+            .lock()
+            .unwrap()
+            .canvases
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    fn is_read_only(&self, canvas: &str) -> bool {
+        let ro = self.read_only.lock().unwrap();
+        ro.contains_key("") || ro.contains_key(canvas)
+    }
+
+    /// Why writes to `canvas` are refused right now (failed to load, read-only), if they are.
+    pub fn write_block(&self, canvas: &str) -> Option<String> {
+        let id = self.resolve_canvas(canvas).unwrap_or_else(|_| canvas.to_string());
+        if let Some(why) = self.failed.lock().unwrap().get(&id) {
+            return Some(format!("canvas `{id}` isn't loaded ({why}); the user can restore a backup in fal OS: retry shortly"));
+        }
+        let ro = self.read_only.lock().unwrap();
+        ro.get("").or_else(|| ro.get(&id)).map(|why| format!("canvas `{id}` is {why}"))
+    }
+
+    /// Whether `canvas` failed to load (its file is kept untouched).
+    pub fn load_failed(&self, canvas: &str) -> bool {
+        self.failed.lock().unwrap().contains_key(canvas)
+    }
+
+    // ---- notices --------------------------------------------------------------------------
+
+    /// Raise or update a held notice for the UI. `level`: `ongoing` (one keyed line, not
+    /// dismissable while active), `error` (stays until dismissed), `ok` / `info` (fade).
+    /// `actions`: `(id, label)` pairs the UI sends back as `notice.action`.
+    pub fn set_notice(&self, key: &str, level: &str, text: &str, actions: &[(&str, &str)], copy: Option<String>) {
+        let n = notice_json(key, level, text, actions, copy);
+        let changed = {
+            let mut m = self.notices.lock().unwrap();
+            let changed = m.get(key) != Some(&n);
+            m.insert(key.to_string(), n.clone());
+            changed
+        };
+        if changed {
+            self.emit(Event::Notice { notice: n });
+        }
+    }
+
+    /// Drop a held notice; `resolved` turns it into a short success line ("back in sync").
+    pub fn clear_notice(&self, key: &str, resolved: Option<&str>) {
+        if self.notices.lock().unwrap().remove(key).is_none() {
+            return;
+        }
+        let n = match resolved {
+            Some(t) => notice_json(key, "ok", t, &[], None),
+            None => serde_json::json!({"key": key, "gone": true}),
+        };
+        self.emit(Event::Notice { notice: n });
+    }
+
+    /// The held notices, for a client that connects.
+    pub fn notices(&self) -> Vec<serde_json::Value> {
+        self.notices.lock().unwrap().values().cloned().collect()
+    }
+
+    /// A notice button: `restore` / `fresh` (a canvas that failed to load), `save-anyway`
+    /// (a refused save), `dismiss`.
+    pub fn notice_action(&self, key: &str, action: &str) -> Result<()> {
+        match (action, key.split_once(':')) {
+            ("restore", Some(("load", id))) => self.restore_backup(id),
+            ("fresh", Some(("load", id))) => self.start_fresh(id),
+            ("save-anyway", Some(("refused", id))) => {
+                let o = self.canvases.lock().unwrap().get(id).cloned().ok_or_else(|| anyhow!("canvas `{id}` isn't open"))?;
+                o.lock().unwrap().force = true;
+                self.save_needed.notify_one();
+                Ok(())
+            }
+            ("dismiss", _) => {
+                let level = self.notices.lock().unwrap().get(key).map(|n| n["level"].as_str().unwrap_or("").to_string());
+                if level.as_deref() == Some("ongoing") {
+                    bail!("that notice stays until the problem is solved");
+                }
+                self.clear_notice(key, None);
+                Ok(())
+            }
+            _ => bail!("unknown notice action `{action}` for `{key}`"),
+        }
+    }
+
+    /// Replace a canvas that failed to load with its newest backup that loads. The broken file
+    /// is kept next to it (`<id>.loro.broken-<ms>`), byte for byte.
+    pub fn restore_backup(&self, id: &str) -> Result<()> {
+        let file = falos_doc::canvas_path(&self.dir, id)?;
+        let mut chosen = None;
+        for (_, path) in crate::persist::backups(&self.dir, id) {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            if Canvas::from_snapshot(&bytes).is_ok() {
+                // The newest slot is rewritten on every save: its age is its mtime.
+                let ms = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_millis() as i64);
+                chosen = Some((ms, bytes));
+                break;
+            }
+        }
+        let (ms, bytes) = chosen.ok_or_else(|| anyhow!("no readable backup of canvas `{id}`"))?;
+        if file.exists() {
+            crate::persist::set_aside(&file)?;
+        }
+        falos_doc::write_durable(&file, &bytes)?;
+        self.failed.lock().unwrap().remove(id);
+        let mins = ((now_ms() - ms) / 60_000).max(0);
+        let age = if mins < 1 { "under a minute old".to_string() } else { format!("{mins} min old") };
+        tracing::info!("canvas `{id}` of {} restored from the backup saved at {ms}", self.id);
+        self.clear_notice(&format!("load:{id}"), Some(&format!("restored {} from the last good copy ({age})", self.canvas_name(id))));
+        self.emit(Event::CanvasReset { canvas: id.to_string() });
+        Ok(())
+    }
+
+    /// Start a canvas that failed to load (and has no backup) empty; the broken file is kept
+    /// next to it.
+    pub fn start_fresh(&self, id: &str) -> Result<()> {
+        if !self.load_failed(id) {
+            bail!("canvas `{id}` loaded fine");
+        }
+        let file = falos_doc::canvas_path(&self.dir, id)?;
+        if file.exists() {
+            crate::persist::set_aside(&file)?;
+        }
+        let name = self.canvas_name(id);
+        self.project.lock().unwrap().save_canvas(&self.dir, &Canvas::new(id, &name))?;
+        self.failed.lock().unwrap().remove(id);
+        self.clear_notice(&format!("load:{id}"), Some(&format!("{name} started fresh (the old file is kept)")));
+        self.emit(Event::CanvasReset { canvas: id.to_string() });
+        Ok(())
+    }
+
+    /// Remember a human actor's camera / selection on a canvas (see `views`).
+    pub fn remember_view(&self, canvas: &str, actor: &str, camera: Option<serde_json::Value>, selection: Option<Vec<String>>) {
+        let mut views = self.views.lock().unwrap();
+        let v = views.entry((canvas.to_string(), actor.to_string())).or_insert_with(|| serde_json::json!({}));
+        if let Some(c) = camera {
+            v["camera"] = c;
+        }
+        if let Some(s) = selection {
+            v["selection"] = serde_json::json!(s);
+        }
+    }
+
+    pub fn view(&self, canvas: &str, actor: &str) -> Option<serde_json::Value> {
+        self.views.lock().unwrap().get(&(canvas.to_string(), actor.to_string())).cloned()
     }
 
     /// Read-only access to a canvas.
@@ -603,6 +894,9 @@ impl Host {
         f: impl FnOnce(&mut Canvas) -> falos_doc::Result<T>,
     ) -> Result<T> {
         let id = self.resolve_canvas(canvas)?;
+        if let Some(why) = self.write_block(&id) {
+            bail!("{why}");
+        }
         let o = self.open_canvas(&id)?;
         let (out, event, assigned, created_ids, touched_ids, comments) = {
             let mut o = o.lock().unwrap();
@@ -615,6 +909,8 @@ impl Host {
                 return Ok(out);
             }
             o.dirty = true;
+            let gone = before_nodes.iter().filter(|n| o.canvas.node(n).is_none()).count();
+            o.deleted += gone;
             let bytes = o.canvas.export_updates(&before_vv)?;
             let changes = o.canvas.changes_since(&before_version).unwrap_or_default();
             let mut touched: Vec<String> = changes
@@ -679,26 +975,71 @@ impl Host {
         })?
     }
 
-    /// Write every dirty canvas to disk (atomic, via `Project::save_canvas`).
+    /// Write every dirty canvas to disk (durable: temp → fsync → rename → fsync dir). Before
+    /// a canvas file is replaced, it goes into the backup ring when the newest backup is older
+    /// than [`crate::persist::backup_every`]. Canvases that failed to load or are read-only are
+    /// never written. A save that would drop most of the nodes without matching deletes is
+    /// refused (the file on disk is kept) with a notice. Tries every canvas; returns the first
+    /// error.
     pub fn flush(&self) -> Result<()> {
-        if self.closed.is_cancelled() {
+        if self.closed.is_cancelled() || self.read_only.lock().unwrap().contains_key("") {
             return Ok(());
         }
-        let open: Vec<_> = self.canvases.lock().unwrap().values().cloned().collect();
-        for o in open {
+        let open: Vec<(String, Arc<Mutex<Open>>)> = self.canvases.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut first_err = None;
+        for (id, o) in open {
             let mut o = o.lock().unwrap();
-            if o.dirty {
-                self.project
-                    .lock()
-                    .unwrap()
-                    .save_canvas(&self.dir, &o.canvas)?;
-                o.dirty = false;
+            if !o.dirty || self.is_read_only(&id) || self.load_failed(&id) {
+                continue;
+            }
+            let now = o.canvas.node_count();
+            let refused_key = format!("refused:{id}");
+            if !o.force && crate::persist::collapse_refused(o.saved_nodes, now, o.deleted) {
+                let msg = format!(
+                    "didn't save {}: {} of {} nodes vanished at once without deletes; the last good file is kept",
+                    self.canvas_name(&id),
+                    o.saved_nodes - now,
+                    o.saved_nodes
+                );
+                tracing::error!("{}: {msg}", self.id);
+                self.set_notice(&refused_key, "ongoing", &msg, &[("save-anyway", "save anyway")], None);
+                continue;
+            }
+            let r = (|| -> Result<()> {
+                let bytes = o.canvas.export_snapshot()?;
+                let file = falos_doc::canvas_path(&self.dir, &id)?;
+                falos_doc::write_durable(&file, &bytes)?;
+                self.project.lock().unwrap().record_canvas(&self.dir, &o.canvas)?;
+                // A failed backup never fails the save itself.
+                if let Err(e) = crate::persist::track_save(&self.dir, &id, &bytes, crate::persist::backup_every()) {
+                    tracing::warn!("backup of canvas `{id}` failed: {e:#}");
+                }
+                Ok(())
+            })();
+            match r {
+                Ok(()) => {
+                    o.dirty = false;
+                    o.saved_nodes = now;
+                    o.deleted = 0;
+                    o.force = false;
+                    self.clear_notice(&refused_key, Some("saved"));
+                }
+                Err(e) => {
+                    let e = e.context(format!("saving canvas `{id}`"));
+                    first_err.get_or_insert(e);
+                }
             }
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
-    /// Debounced autosave loop; run it on the runtime for the host's lifetime.
+    /// Debounced autosave loop; run it on the runtime for the host's lifetime. A failed save
+    /// keeps the canvas dirty and retries with backoff (1 → 2 → 4 … 30 s) under a held
+    /// "not saved to disk yet · retrying" notice, which turns into "saved to disk" once a
+    /// retry succeeds.
     pub async fn autosave(self: Arc<Self>) {
         loop {
             tokio::select! {
@@ -706,8 +1047,25 @@ impl Host {
                 _ = self.closed.cancelled() => return,
             }
             tokio::time::sleep(AUTOSAVE_DEBOUNCE).await;
-            if let Err(e) = self.flush() {
-                tracing::error!("autosave failed: {e:#}");
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                let h = self.clone();
+                let r = tokio::task::spawn_blocking(move || h.flush()).await.unwrap_or_else(|e| Err(anyhow!("save task: {e}")));
+                match r {
+                    Ok(()) => {
+                        self.clear_notice(SAVE_KEY, Some("saved to disk"));
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("autosave failed (retrying in {}s): {e:#}", backoff.as_secs());
+                        self.set_notice(SAVE_KEY, "ongoing", &format!("not saved to disk yet · retrying ({})", short_error(&e)), &[], None);
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = self.closed.cancelled() => return,
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                }
             }
         }
     }
@@ -1003,6 +1361,22 @@ impl Host {
             .unwrap()
             .insert((session.into(), request.into()), (Instant::now(), result));
     }
+}
+
+/// One notice as the UI gets it.
+fn notice_json(key: &str, level: &str, text: &str, actions: &[(&str, &str)], copy: Option<String>) -> serde_json::Value {
+    let actions: Vec<serde_json::Value> = actions.iter().map(|(id, label)| serde_json::json!({"id": id, "label": label})).collect();
+    let mut n = serde_json::json!({"key": key, "level": level, "text": text, "actions": actions});
+    if let Some(c) = copy {
+        n["copy"] = c.into();
+    }
+    n
+}
+
+/// The innermost cause of an error, short (e.g. "Permission denied (os error 13)").
+fn short_error(e: &anyhow::Error) -> String {
+    let s = e.root_cause().to_string();
+    s.chars().take(80).collect()
 }
 
 /// Thread messages `actor` added between two snapshots: `(annotation, node, text, assignee)`.
