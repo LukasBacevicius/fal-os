@@ -145,14 +145,16 @@ function Composer({ running, readOnly, question, agent, queued }: {
 
   const removeChip = (i: number) => setState((s) => ({ chat: { ...s.chat, chips: s.chat.chips.filter((_, j) => j !== i) } }));
   const ext = !!chat.active && isExternal(chat.active);
+  // One line: a long chat title would wrap the placeholder over three.
+  const short = (t: string) => (t.length > 14 ? `${t.slice(0, 13).trimEnd()}…` : t);
   const placeholder = readOnly
     ? 'external agent · read-only'
     : agent
       ? `message ${agent}…`
       : ext
-        ? `message ${chatTitle(chat, chat.active!)} · it reads this between steps…`
+        ? `message ${short(chatTitle(chat, chat.active!))} · read between steps…`
         : chat.active
-          ? running ? 'steer: ⏎ queue · ⌘⏎ send now…' : `message ${chatTitle(chat, chat.active)}…`
+          ? running ? 'steer: ⏎ queue · ⌘⏎ now…' : `message ${short(chatTitle(chat, chat.active))}`
           : 'start a chat…';
   const mod = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'ctrl+';
   const unattached = selection.filter((id) => !chat.chips.some((c) => c.kind === 'node' && c.node === id)).length;
