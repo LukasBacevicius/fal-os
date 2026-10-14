@@ -13,6 +13,11 @@
 //! ⌘Q / tray "quit" really quits (confirming when runs are active). `--hidden` (open at login)
 //! starts with the window hidden.
 //!
+//! Reliability (docs/ARCHITECTURE.md "Reliability"): the host is supervised (`sidecar.rs`); a
+//! WKWebView content process that dies is reloaded with `#recovered` (the UI restores its camera
+//! and selection from the host); a panic writes `logs/crash-<ms>-desktop.txt`; "View Logs" in the
+//! app menu opens `$FALOS_HOME/logs`.
+//!
 //! "Out" commands (docs/ASSETS-V1.md §7): `drag_out`, `copy_files`, `copy_image`,
 //! `open_with_list`, `open_with`, `reveal`, `materialize` (see `out.rs`).
 
@@ -102,6 +107,52 @@ fn install_extras(side: Side) -> Result<(), String> {
 #[tauri::command(async)]
 fn restart_host(side: Side) -> Result<(), String> {
     side.restart()
+}
+
+/// `{state: running|restarting|stopped, reason?, restarts, supervised}` of the host.
+#[tauri::command]
+fn host_status(side: Side) -> serde_json::Value {
+    side.host_status()
+}
+
+/// The text behind [copy report] on the "host stopped" card.
+#[tauri::command(async)]
+fn host_report(side: Side) -> String {
+    side.host_report()
+}
+
+/// Open `$FALOS_HOME/logs` in Finder.
+#[tauri::command(async)]
+fn open_logs(side: Side) -> Result<(), String> {
+    open_logs_dir(&side)
+}
+
+fn open_logs_dir(side: &Sidecar) -> Result<(), String> {
+    let dir = side.logs_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::process::Command::new("open").arg(&dir).status().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// A panic in the shell: `logs/crash-<ms>-desktop.txt` (shown once on the next start).
+fn install_panic_hook(home: PathBuf) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".into());
+        let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let bt = std::backtrace::Backtrace::force_capture();
+        let tail = sidecar::file_tail(&home.join("logs/host.log"), 200);
+        let body = format!("panic: {msg}\nat: {loc}\nthread: {}\n\nbacktrace:\n{bt}", std::thread::current().name().unwrap_or("?"));
+        if let Some(p) = sidecar::write_crash_report(&home, "desktop", &body, &tail) {
+            eprintln!("fal OS: crash report written to {}", p.display());
+        }
+        default(info);
+    }));
 }
 
 /// Setup screen tasks with streamed output: `claude-install`, `claude-login`, `ffmpeg`,
@@ -275,6 +326,7 @@ fn app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         if n > 0 {
             sub.remove_at(n - 1)?;
         }
+        sub.append(&MenuItem::with_id(app, "app:logs", "View Logs", true, None::<&str>)?)?;
         sub.append(&MenuItem::with_id(app, "app:quit", "Quit fal-os", true, Some("CmdOrCtrl+Q"))?)?;
     }
     Ok(menu)
@@ -282,8 +334,33 @@ fn app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 fn main() {
     let side = Arc::new(Sidecar::new());
+    install_panic_hook(side.home.clone());
     let hidden = std::env::args().any(|a| a == "--hidden");
+    let terminated = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<std::time::Instant>::new()));
+    let side_for_webview = side.clone();
     tauri::Builder::default()
+        // WKWebView's web content process died (memory pressure, a WebKit crash): reload the
+        // page. `#recovered` makes the UI restore its camera and selection from the host. Three
+        // in a minute stop the loop (the page stays as WebKit left it).
+        .on_web_content_process_terminate(move |webview| {
+            let mut t = terminated.lock().unwrap();
+            while t.front().is_some_and(|x| x.elapsed() > std::time::Duration::from_secs(60)) {
+                t.pop_front();
+            }
+            t.push_back(std::time::Instant::now());
+            let n = t.len();
+            side_for_webview.app_log(&format!("web content process terminated ({n} in the last minute)"));
+            if n > 3 {
+                side_for_webview.app_log("not reloading again: 3 web content crashes within a minute");
+                return;
+            }
+            if let Ok(mut url) = webview.url() {
+                url.set_fragment(Some("recovered"));
+                let _ = webview.navigate(url);
+            } else {
+                let _ = webview.reload();
+            }
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -295,6 +372,9 @@ fn main() {
         .menu(app_menu)
         .on_menu_event(|app, e| match e.id().as_ref() {
             "app:quit" => request_quit(app),
+            "app:logs" => {
+                let _ = open_logs_dir(app.state::<Arc<Sidecar>>().inner());
+            }
             id => tray::on_menu(app, id),
         })
         .on_window_event(|w, e| {
@@ -322,6 +402,9 @@ fn main() {
             check_fal_key,
             install_extras,
             restart_host,
+            host_status,
+            host_report,
+            open_logs,
             setup_run,
             setup_task,
             setup_cancel,
@@ -333,10 +416,13 @@ fn main() {
         .setup(move |app| {
             // Packaged app: start the host (and through it the agent runtime) off the main thread.
             let s = app.state::<Arc<Sidecar>>().inner().clone();
+            let handle = app.handle().clone();
             std::thread::spawn(move || {
                 if let Err(e) = s.start() {
                     eprintln!("fal-os: {e}");
                 }
+                // Restart the host when it dies (crash-loop limited), tell the UI.
+                s.supervise(handle);
             });
             let url = match std::env::var("FALOS_URL") {
                 Ok(u) => WebviewUrl::External(u.parse()?),
