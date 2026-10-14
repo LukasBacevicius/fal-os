@@ -168,15 +168,20 @@ export function emptySpot(want = 220): [number, number] {
 
 /** A native file picker (the click path for importing and attaching files). */
 export function pickFiles(onFiles: (files: File[]) => void) {
+  // A picker left over from a cancel the browser didn't report.
+  document.querySelectorAll('input[data-falos-picker]').forEach((el) => el.remove());
   const input = document.createElement('input');
   input.type = 'file';
   input.multiple = true;
   input.style.display = 'none';
+  input.dataset.falosPicker = '';
   input.onchange = () => {
     const files = Array.from(input.files ?? []);
     input.remove();
     if (files.length) onFiles(files);
   };
+  // Cancelled: nothing stays behind in the DOM.
+  input.addEventListener('cancel', () => input.remove());
   document.body.appendChild(input);
   input.click();
 }
