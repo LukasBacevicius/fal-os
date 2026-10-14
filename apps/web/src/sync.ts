@@ -8,7 +8,7 @@
 import { setUpload } from './dnd';
 import { discoverHost, explicitHost, type HostInfo } from './host';
 import { getState, setState, toast } from './store';
-import type { CanvasApp } from './wasm';
+import { blankSnapshot, type CanvasApp } from './wasm';
 import type { NodeView, Presence } from './types';
 import { applyEvent, applyHistory, applyList, emptyChat, removeChat, selectChat, type ChatState, type Chip } from './chat';
 import { bootProject, loadScene, rememberProject, saveCamera, touchProject } from './projects';
@@ -674,7 +674,9 @@ export function switchProject(project: string): boolean {
   app.setPresence([]);
   app.setClaims([]);
   app.setHighlight([]);
-  const cached = snapshots.get(project);
+  // The project's last scene from this session, else an empty canvas until the host
+  // answers: never the previous project's nodes under the new name.
+  const cached = snapshots.get(project) ?? blankSnapshot();
   if (cached) {
     try {
       loadScene(app, cached, project);

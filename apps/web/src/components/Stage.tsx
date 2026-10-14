@@ -58,6 +58,9 @@ export function Stage() {
   const app = useStore((s) => s.app);
   const error = useStore((s) => s.error);
   const loading = useStore((s) => s.loading);
+  // While a project's canvas is on its way the stage stays calm and empty (no hint that
+  // vanishes a moment later).
+  const conn = useStore((s) => s.conn);
   const empty = useStore((s) => s.nodes.length === 0);
   const layers = useStore((s) => s.outlineOpen ?? s.nodes.length > 0);
   const library = useStore((s) => s.library);
@@ -319,7 +322,7 @@ export function Stage() {
       <Guard name="audio"><AudioLayer /></Guard>
       <Guard name="presence"><PresenceLayer /></Guard>
       <Guard name="selection-prompt"><SelectionPrompt /></Guard>
-      {!loading && !error && empty && (
+      {!loading && !error && empty && conn !== 'connecting' && (
         <div className="empty faint">
           <div>
             drop files or press N · ? for keys
