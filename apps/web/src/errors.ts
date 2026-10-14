@@ -38,6 +38,7 @@ const RULES: Rule[] = [
     next: { kind: 'copy', label: 'run claude auth login', text: 'claude auth login' },
     wall: 'claude-login',
   },
+  { test: /no agent runtime is connected/i, text: 'agent runtime not running · the message waits for it', next: null },
   { test: /agent runtime (disconnected|not connected|exited|stopped)|runtime (is )?down/i, text: 'agent runtime stopped', next: { kind: 'continue', label: 'continue when it is back' }, transient: true, wall: 'runtime' },
   { test: /interrupted: its job stopped/i, text: 'interrupted by a host restart', next: { kind: 'rerun', label: 'rerun it' } },
   { test: /\b429\b|rate.?limit|too many requests/i, text: 'rate limited', next: { kind: 'continue', label: 'retry in a minute' }, transient: true },

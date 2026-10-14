@@ -1560,6 +1560,12 @@ impl CanvasApp {
         dispatch(&self.app);
     }
 
+    /// The snap guides shown right now (world `[[x0, y0], [x1, y1], ticks]`), for checks.
+    pub fn guides(&self) -> JsValue {
+        let a = self.app.borrow();
+        to_js(&json!(a.ix.guides().iter().map(|l| json!([l.a, l.b, l.ticks])).collect::<Vec<_>>()))
+    }
+
     #[wasm_bindgen(js_name = setTool)]
     pub fn set_tool(&self, tool: &str) {
         let mut a = self.app.borrow_mut();
