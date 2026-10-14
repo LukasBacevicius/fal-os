@@ -16,6 +16,18 @@ use crate::host::{Event, Host};
 
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
+/// Sync protocol version, sent in `hello`. A web UI built for another version shows
+/// "ui out of date · [reload]" instead of failing in odd ways. Bump on breaking changes.
+pub const PROTOCOL: u32 = 2;
+
+/// The host's version, sent in `hello`.
+pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// WebSocket keepalive: a ping this often; a client silent for [`IDLE_DROP`] is gone (a
+/// half-open socket, a frozen tab) and its session closes.
+const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
+const IDLE_DROP: std::time::Duration = std::time::Duration::from_secs(45);
+
 #[derive(Deserialize)]
 pub struct SyncQuery {
     /// Actor id of the human at this client (default `human`).
@@ -44,6 +56,16 @@ enum ClientMsg {
     /// The window showing this project got focus: it's the project "open in fal OS" that
     /// external agents bind to.
     Focus {},
+    /// Heartbeat: answered with `pong` right away (the client reconnects when none comes).
+    Ping {
+        #[serde(default)]
+        t: serde_json::Value,
+    },
+    /// The user's camera, remembered for a reloaded webview (`hello.view`).
+    View { camera: serde_json::Value },
+    /// A button on a held notice (`restore`, `fresh`, `save-anyway`, `dismiss`).
+    #[serde(rename = "notice.action")]
+    NoticeAction { key: String, action: String },
 }
 
 /// `{"type":"agent.register","client":"claude"|"codex"|"cursor"|"gemini"|"opencode"}`:
@@ -112,8 +134,21 @@ async fn send_json(socket: &mut WebSocket, v: impl serde::Serialize) -> bool {
 async fn send_snapshot(host: &Host, canvas: &str, socket: &mut WebSocket) -> bool {
     match host.snapshot(canvas) {
         Ok((_, bytes, _)) => socket.send(Message::Binary(bytes.into())).await.is_ok(),
+        // A canvas that failed to load: an empty stand-in, so the UI comes up and shows the
+        // notice (with [restore backup]); writes to it are refused.
+        Err(_) if host.load_failed(canvas) => {
+            let bytes = falos_doc::Canvas::new(canvas, canvas).export_snapshot().unwrap_or_default();
+            socket.send(Message::Binary(bytes.into())).await.is_ok()
+        }
         Err(_) => false,
     }
+}
+
+/// Every notice a client should see on connect: the project's held ones and app-wide ones.
+fn all_notices(host: &Host) -> Vec<serde_json::Value> {
+    let mut v = crate::diag::global_notices();
+    v.extend(host.notices());
+    v
 }
 
 async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocket) {
@@ -134,6 +169,10 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
         .read(&canvas, |c| c.version().to_string())
         .unwrap_or_default();
     let hello = json!({
+        "hostVersion": HOST_VERSION,
+        "protocol": PROTOCOL,
+        "notices": all_notices(&host),
+        "view": host.view(&canvas, &actor),
         "type": "hello",
         "canvas": canvas,
         "version": version,
@@ -152,8 +191,20 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
         host.close_session(&info.id);
         return;
     }
+    let mut keepalive = tokio::time::interval(KEEPALIVE);
+    keepalive.tick().await;
+    let mut last_rx = std::time::Instant::now();
     loop {
         tokio::select! {
+            _ = keepalive.tick() => {
+                if last_rx.elapsed() > IDLE_DROP {
+                    tracing::info!("sync client {} on {} went silent; closing", info.id, host.id);
+                    break;
+                }
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             // The project was deleted (moved to the trash).
             _ = host.closed.cancelled() => {
                 let _ = send_json(&mut socket, json!({"type": "error", "message": "this project was deleted"})).await;
@@ -164,6 +215,12 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                 Ok(e) => {
                     if e.canvas().is_some_and(|c| c != canvas) {
                         continue;
+                    }
+                    // A restored canvas: tell the client to load it from scratch, then hang up.
+                    if let Event::CanvasReset { .. } = &e {
+                        let _ = send_json(&mut socket, &e).await;
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
                     }
                     if let Event::Doc { bytes, origin, .. } = &e
                         && *origin != Some(conn)
@@ -183,10 +240,14 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                 }
                 Err(RecvError::Closed) => break,
             },
-            msg = socket.recv() => match msg {
+            msg = socket.recv() => { if msg.is_some() { last_rx = std::time::Instant::now(); } match msg {
                 Some(Ok(Message::Binary(b))) => {
+                    let blocked = host.write_block(&canvas);
                     if let Err(e) = host.mutate(&canvas, &actor, Some(conn), |c| c.import(&b)) {
-                        let _ = send_json(&mut socket, json!({"type": "error", "message": format!("{e:#}")})).await;
+                        // Blocked writes (canvas not loaded, read-only) are explained by a held
+                        // notice already: no error line per edit.
+                        let scope = if blocked.is_some() { "blocked" } else { "sync" };
+                        let _ = send_json(&mut socket, json!({"type": "error", "scope": scope, "message": format!("{e:#}")})).await;
                     }
                 }
                 Some(Ok(Message::Text(t))) if t.contains("agent.register") && serde_json::from_str::<serde_json::Value>(&t).is_ok_and(|m| m["type"] == "agent.register") => {
@@ -213,6 +274,25 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                 }
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<ClientMsg>(&t) {
                     Ok(ClientMsg::Focus {}) => seen(&host),
+                    Ok(ClientMsg::Ping { t }) => {
+                        if !send_json(&mut socket, json!({"type": "pong", "t": t})).await {
+                            break;
+                        }
+                    }
+                    Ok(ClientMsg::View { camera }) => host.remember_view(&canvas, &actor, Some(camera), None),
+                    Ok(ClientMsg::NoticeAction { key, action }) => {
+                        let r = if action == "dismiss" && crate::diag::dismiss(&key) {
+                            let _ = send_json(&mut socket, json!({"type": "notice", "notice": {"key": key, "gone": true}})).await;
+                            Ok(())
+                        } else {
+                            let h = host.clone();
+                            let (k, a) = (key.clone(), action.clone());
+                            tokio::task::spawn_blocking(move || h.notice_action(&k, &a)).await.unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")))
+                        };
+                        if let Err(e) = r {
+                            let _ = send_json(&mut socket, json!({"type": "error", "scope": "notice", "key": key, "message": format!("{e:#}")})).await;
+                        }
+                    }
                     Ok(ClientMsg::Presence { cursor, viewport, status }) => {
                         if cursor.is_some() {
                             seen(&host);
@@ -228,14 +308,17 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                     Ok(ClientMsg::RevokeClaim { node }) => {
                         let _ = host.revoke_claim(&canvas, &node, &actor);
                     }
-                    Ok(ClientMsg::Selection { nodes }) => host.set_selection(&info.id, nodes),
+                    Ok(ClientMsg::Selection { nodes }) => {
+                        host.remember_view(&canvas, &actor, None, Some(nodes.clone()));
+                        host.set_selection(&info.id, nodes)
+                    }
                     Err(e) => {
                         let _ = send_json(&mut socket, json!({"type": "error", "message": e.to_string()})).await;
                     }
                 },
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
-            },
+            }},
         }
     }
     host.close_session(&info.id);

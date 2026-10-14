@@ -58,6 +58,84 @@ tokio::task_local! {
     static CALL_META: CallMeta;
 }
 
+/// Every tool call gets a deadline, so a wedged call never hangs an agent forever.
+const TOOL_DEADLINE: Duration = Duration::from_secs(90);
+/// Tools that legitimately take minutes (renders, packages, app checks, imports).
+const HEAVY_DEADLINE: Duration = Duration::from_secs(300);
+const HEAVY: &[&str] = &["export", "package", "write_app_files", "create_app", "collect_assets", "import_file", "get_context", "inspect"];
+/// Long-polls: they wait on purpose (bounded by their own `waitSecs` / `timeoutSecs`).
+const LONG_POLL: &[&str] = &["inbox", "await_batch"];
+/// Not read-only, but fine while a canvas can't be written (they don't write it).
+const WRITE_GATE_EXEMPT: &[&str] = &[
+    "session", "inbox", "report", "set_status", "finish_working", "claim", "release", "chat_new", "chat_send", "chat_stop",
+    "create_project", "list_projects", "get_knowledge", "await_batch",
+];
+
+/// The deadline of one call: none for long-polls; calls that wait for their own result
+/// (`wait: true` / `timeoutSecs`) get that time plus a margin.
+fn deadline(tool: &str, args: &Json) -> Option<Duration> {
+    if LONG_POLL.contains(&tool) {
+        return None;
+    }
+    if args["wait"] == true || args["timeoutSecs"].is_u64() {
+        let secs = args["timeoutSecs"].as_u64().unwrap_or(300).min(1800);
+        return Some(Duration::from_secs(secs + 30));
+    }
+    Some(if HEAVY.contains(&tool) { HEAVY_DEADLINE } else { TOOL_DEADLINE })
+}
+
+/// Names of the tools annotated read-only.
+fn read_only_tools(router: &ToolRouter<CanvasMcp>) -> &'static std::collections::HashSet<String> {
+    static RO: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+    RO.get_or_init(|| {
+        router
+            .list_all()
+            .into_iter()
+            .filter(|t| t.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true))
+            .map(|t| t.name.to_string())
+            .collect()
+    })
+}
+
+/// The `{project, canvas, version}` line every tool result starts with, so an agent notices
+/// when it is bound to the wrong project.
+fn header_line(host: &Host, args: &Json) -> String {
+    let canvas = args["canvas"]
+        .as_str()
+        .filter(|c| !c.is_empty())
+        .and_then(|c| host.resolve_canvas(c).ok())
+        .or_else(|| {
+            let sid = args["sessionId"].as_str()?;
+            host.with_sessions(|ss| ss.get(sid).and_then(|s| s.presence.canvas.clone()))
+        })
+        .or_else(|| host.project().canvases.first().map(|c| c.id.clone()))
+        .unwrap_or_else(|| "main".into());
+    let version = if host.load_failed(&canvas) { None } else { host.read(&canvas, |c| c.version().to_string()).ok() };
+    json!({"project": host.id, "canvas": canvas, "version": version}).to_string()
+}
+
+/// The manifest file the stdio relay reads (`$FALOS_HOME/mcp-manifest.json`).
+pub fn manifest_path() -> std::path::PathBuf {
+    crate::server::home_dir().join("mcp-manifest.json")
+}
+
+/// Write `path` (normally [`manifest_path`]): what `initialize` and `tools/list` answer, so
+/// the stdio relay can list the tools while fal OS isn't running (see `relay.rs`). Written on
+/// every host start.
+pub fn write_manifest(ws: &Arc<crate::workspace::Workspace>, path: &std::path::Path) -> Result<()> {
+    let mcp = CanvasMcp::new(ws.clone())?;
+    let info = serde_json::to_value(mcp.get_info())?;
+    let tools = serde_json::to_value(mcp.tool_router.list_all())?;
+    let manifest = json!({
+        "hostVersion": crate::sync::HOST_VERSION,
+        "written": crate::host::now_ms(),
+        "initialize": info,
+        "tools": tools,
+    });
+    falos_doc::write_durable(path, &serde_json::to_vec_pretty(&manifest)?)?;
+    Ok(())
+}
+
 /// The current tool call's [`CallMeta`] (default outside a call).
 pub fn call_meta() -> CallMeta {
     CALL_META.try_with(Clone::clone).unwrap_or_default()
@@ -1379,6 +1457,21 @@ impl CanvasMcp {
     }
 }
 
+/// Prefix a tool result with the `{project, canvas, version}` line (its own first text block),
+/// unless it already starts with one.
+fn with_header(r: CallToolResponse, host: &Host, args: &Json) -> CallToolResponse {
+    match r {
+        CallToolResponse::Complete(mut res) => {
+            let has = res.content.first().and_then(|c| c.as_text()).is_some_and(|t| t.text.starts_with("{\"project\""));
+            if !has {
+                res.content.insert(0, ContentBlock::text(header_line(host, args)));
+            }
+            CallToolResponse::Complete(res)
+        }
+        other => other,
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for CanvasMcp {
     fn get_info(&self) -> ServerConfig {
@@ -1423,12 +1516,39 @@ impl ServerHandler for CanvasMcp {
             ws: self.ws.clone(),
             tool_router: self.tool_router.clone(),
         };
+        // Writes while the canvas can't be written (failed to load, read-only): refuse with
+        // what to do, instead of an error from deep inside.
+        if !read_only_tools(&self.tool_router).contains(&name) && !WRITE_GATE_EXEMPT.contains(&name.as_str()) {
+            let canvas = args["canvas"].as_str().filter(|c| !c.is_empty()).map(str::to_string).or_else(|| {
+                let sid = args["sessionId"].as_str()?;
+                host.with_sessions(|ss| ss.get(sid).and_then(|s| s.presence.canvas.clone()))
+            });
+            let canvas = canvas.or_else(|| host.project().canvases.first().map(|c| c.id.clone())).unwrap_or_else(|| "main".into());
+            if let Some(why) = host.write_block(&canvas) {
+                let text = format!("error: not written: {why}");
+                return Ok(CallToolResult::error(vec![ContentBlock::text(header_line(&host, &args)), ContentBlock::text(text)]).into());
+            }
+        }
         let ext = crate::transcript::ext_start(&host, &name, &args);
         let tcc = ToolCallContext::new(&target, request, context);
-        let res = CALL_META.scope(meta, target.tool_router.call(tcc)).await;
+        let call = CALL_META.scope(meta, target.tool_router.call(tcc));
+        let res = match deadline(&name, &args) {
+            None => call.await,
+            Some(d) => match tokio::time::timeout(d, call).await {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::warn!("tool `{name}` hit its {}s deadline", d.as_secs());
+                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "error: `{name}` didn't finish within {}s. It may still complete in the background: check with `read` (or `list_ops` / `await_batch` for jobs) before retrying.",
+                        d.as_secs()
+                    ))])
+                    .into())
+                }
+            },
+        };
         if let Some(ext) = ext {
             crate::transcript::ext_end(&host, ext, &name, &args, &res);
         }
-        res
+        res.map(|r| with_header(r, &host, &args))
     }
 }

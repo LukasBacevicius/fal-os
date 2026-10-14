@@ -58,7 +58,7 @@ async fn client_as(port: u16, name: &str, chat: Option<&str>) -> Client {
 }
 
 fn text(r: &CallToolResult) -> String {
-    r.content.iter().filter_map(|c| c.as_text().map(|t| t.text.clone())).collect::<Vec<_>>().join("\n")
+    r.content.iter().filter_map(|c| c.as_text().map(|t| t.text.clone())).filter(|t| !t.starts_with("{\"project\"")).collect::<Vec<_>>().join("\n")
 }
 
 async fn call(c: &Client, tool: &'static str, args: Json) -> Json {
@@ -582,7 +582,11 @@ async fn stdio_relay_reaches_the_host() {
     stdin.write_all(line(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "session", "arguments": {"agentName": "Gemini"}}})).as_bytes()).await.unwrap();
     let res: Json = serde_json::from_str(&tokio::time::timeout(Duration::from_secs(10), out.next_line()).await.unwrap().unwrap().unwrap()).unwrap();
     assert_eq!(res["id"], 2);
-    assert!(res["result"]["content"][0]["text"].as_str().unwrap().contains("ext:gemini-1"), "{res}");
+    // First block: the `{project, canvas, version}` header; then the result.
+    let header: Json = serde_json::from_str(res["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!((header["project"].as_str(), header["canvas"].as_str()), (Some("proj"), Some("main")), "{res}");
+    assert!(header["version"].is_string(), "{res}");
+    assert!(res["result"]["content"][1]["text"].as_str().unwrap().contains("ext:gemini-1"), "{res}");
     let conn = loop {
         let e = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
         if let falos_host::Event::AgentConnected { client, transport, .. } = e {
@@ -592,4 +596,94 @@ async fn stdio_relay_reaches_the_host() {
     assert_eq!(conn, ("gemini".to_string(), "stdio".to_string()));
     drop(stdin);
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+/// fal OS not running: the relay answers `initialize` and `tools/list` from the manifest the
+/// host wrote on its last start, and a tool call says to ask the user to open fal OS.
+#[tokio::test]
+async fn stdio_relay_lists_tools_while_fal_os_is_down() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let env = start("http://127.0.0.1:1", None).await;
+    let home = env.dir.path().join("falos-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let ws = falos_host::workspace::Workspace::single(env.host.clone());
+    falos_host::mcp::write_manifest(&ws, &home.join("mcp-manifest.json")).unwrap();
+    // host.json points at a port nobody listens on (the app quit or crashed).
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::fs::write(
+        home.join("host.json"),
+        json!({"port": dead, "url": server::mcp_url(dead), "token": TOKEN, "pid": 1, "project": "x"}).to_string(),
+    )
+    .unwrap();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_falos-host"))
+        .arg("mcp")
+        .env("FALOS_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap()).lines();
+    let line = |v: Json| format!("{v}\n");
+    let mut next = async || -> Json {
+        serde_json::from_str(&tokio::time::timeout(Duration::from_secs(15), out.next_line()).await.unwrap().unwrap().unwrap()).unwrap()
+    };
+    stdin.write_all(line(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "claude-code", "version": "1"}}})).as_bytes()).await.unwrap();
+    let init = next().await;
+    assert_eq!(init["id"], 1);
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18", "{init}");
+    assert!(init["result"]["capabilities"]["tools"].is_object(), "{init}");
+    stdin.write_all(line(json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).as_bytes()).await.unwrap();
+    stdin.write_all(line(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).as_bytes()).await.unwrap();
+    let list = next().await;
+    let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.contains(&"session") && names.contains(&"edit") && names.len() > 20, "{names:?}");
+    stdin.write_all(line(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "session", "arguments": {"agentName": "Claude"}}})).as_bytes()).await.unwrap();
+    let call = next().await;
+    assert_eq!(call["result"]["isError"], true, "{call}");
+    let text = call["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("isn't running") && text.contains("tell the user to open it") && text.contains("don't try to launch it"), "{text}");
+
+    // fal OS starts (host.json now points at the live host): the next call goes through.
+    std::fs::write(
+        home.join("host.json"),
+        json!({"port": env.port, "url": server::mcp_url(env.port), "token": TOKEN, "pid": 1, "project": "x"}).to_string(),
+    )
+    .unwrap();
+    stdin.write_all(line(json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "session", "arguments": {"agentName": "Claude"}}})).as_bytes()).await.unwrap();
+    let live = next().await;
+    assert_eq!(live["result"]["isError"], false, "{live}");
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+/// A canvas that failed to load: the project still serves, writes are refused with "retry
+/// shortly", reads say what's wrong, and every result starts with the header line.
+#[tokio::test]
+async fn writes_to_an_unloaded_canvas_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    {
+        let h = Host::open(&proj, HostOptions { fal_session: false, home: Some(dir.path().join("home")), ..Default::default() }).unwrap();
+        h.flush().unwrap();
+    }
+    std::fs::write(proj.join("canvases/main.loro"), b"garbage").unwrap();
+    let host = Host::open(&proj, HostOptions { fal_session: false, home: Some(dir.path().join("home")), ..Default::default() }).unwrap();
+    let running = server::serve(host.clone(), 0, TOKEN).await.unwrap();
+    let c = client_as(running.addr.port(), "claude-code", None).await;
+    let raw = |tool: &'static str, args: Json| {
+        let c = &c;
+        async move { c.call_tool(CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone())).await.unwrap() }
+    };
+    let s = raw("session", json!({"agentName": "Claude"})).await;
+    let sid_text = s.content[1].as_text().unwrap().text.clone();
+    let sid = serde_json::from_str::<Json>(&sid_text).map(|v| v["sessionId"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
+    let e = raw("edit", json!({"sessionId": sid, "canvas": "main", "text": "note \"x\" text(\"y\")"})).await;
+    assert_eq!(e.is_error, Some(true));
+    let header = e.content[0].as_text().unwrap().text.clone();
+    assert!(header.starts_with("{\"project\":\"proj\",\"canvas\":\"main\""), "{header}");
+    let msg = e.content[1].as_text().unwrap().text.clone();
+    assert!(msg.contains("isn't loaded") && msg.contains("retry shortly"), "{msg}");
 }
