@@ -228,8 +228,10 @@ const THEMES = {
 };
 const theme = (spec) => THEMES[spec.theme] || THEMES.dark;
 
-function cardCanvas(spec, minH) {
-  const W = 768;
+// `perUnit`: raster px per world unit at least (audio: its waveform and name stay sharp when
+// zoomed in; other cards keep 768 px).
+function cardCanvas(spec, minH, perUnit = 0) {
+  const W = Math.min(2048, Math.max(768, Math.round((Number(spec.w) || 320) * perUnit)));
   const H = Math.max(minH, Math.min(2048, Math.round(W / Math.max(0.2, spec.aspect || 1.5))));
   const c = canvas(W, H), g = c.getContext('2d');
   const k = W / Math.max(40, Number(spec.w) || 320);
@@ -299,7 +301,7 @@ async function cardSource(spec) {
     } catch (e) { /* fall back to the plain card */ }
   }
   const th = theme(spec);
-  const { c, g, W, H, k } = cardCanvas(spec, 64);
+  const { c, g, W, H, k } = cardCanvas(spec, 64, spec.kind === 'audio' ? 3 : 0);
   g.fillStyle = th.panel; g.fillRect(0, 0, W, H);
   const pad = 10 * k, fs = 12 * k;
   g.textBaseline = 'alphabetic'; g.font = `400 ${fs}px ${MONO}`;
