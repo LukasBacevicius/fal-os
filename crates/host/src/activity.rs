@@ -118,6 +118,16 @@ impl Host {
     /// Once a second: expire working sets, idle presence, ext chats.
     pub(crate) fn sweep(&self) {
         let now = now_ms();
+        let grace = crate::host::ORPHAN_GRACE.as_millis() as i64;
+        let gone: Vec<String> = self.with_sessions(|ss| {
+            ss.values()
+                .filter(|s| s.orphaned_at.is_some() && now - s.presence.last_activity >= grace)
+                .map(|s| s.id.clone())
+                .collect()
+        });
+        for id in gone {
+            self.close_session(&id);
+        }
         let ttl = ACTIVITY_TTL.as_millis() as i64;
         let idle = IDLE_AFTER.as_millis() as i64;
         let (clears, presences) = self.with_sessions(|ss| {

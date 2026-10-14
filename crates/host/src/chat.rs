@@ -721,7 +721,7 @@ impl ChatHub {
     /// A session of an external tab ended (its MCP connection closed): detached once no other
     /// session of that agent is attached.
     pub fn ext_session_closed(&self, host: &Host, chat: &str) {
-        let others = host.with_sessions(|ss| ss.values().any(|s| s.chat.as_deref() == Some(chat)));
+        let others = host.with_sessions(|ss| ss.values().any(|s| s.chat.as_deref() == Some(chat) && s.orphaned_at.is_none()));
         let detached = self.state_of(host, chat).as_deref() == Some("detached");
         if !others && !detached {
             self.with_chats(host, |chats| {

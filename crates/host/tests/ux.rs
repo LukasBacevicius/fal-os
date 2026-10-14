@@ -760,3 +760,26 @@ async fn writes_to_an_unloaded_canvas_are_refused() {
     let msg = e.content[1].as_text().unwrap().text.clone();
     assert!(msg.contains("isn't loaded") && msg.contains("retry shortly"), "{msg}");
 }
+
+/// Stateless MCP clients (protocol 2026-07+, e.g. current Claude Code) open one short
+/// connection per request: a fal-os session must outlive the connection that created it.
+#[tokio::test]
+async fn session_outlives_its_mcp_connection() {
+    let env = start("http://127.0.0.1:1", None).await;
+    let stateless = |port| async move {
+        let cfg = StreamableHttpClientTransportConfig::with_uri(server::mcp_url(port)).auth_header(TOKEN);
+        ClientConfig::new(ClientCapabilities::default(), Implementation::new("claude-code", "1.0"))
+            .with_protocol_version(rmcp::model::ProtocolVersion::V_2026_07_28)
+            .serve(StreamableHttpClientTransport::from_config(cfg))
+            .await
+            .unwrap()
+    };
+    let c = stateless(env.port).await;
+    let s = call(&c, "session", json!({"agentName": "Claude Code", "canvas": "main"})).await;
+    let sid = s["sessionId"].as_str().unwrap().to_string();
+    c.cancel().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let c2 = stateless(env.port).await;
+    let r = call(&c2, "read", json!({"sessionId": sid, "canvas": "main"})).await;
+    assert!(r.to_string().contains("canvas"), "{r}");
+}

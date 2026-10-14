@@ -265,7 +265,14 @@ pub struct Session {
     pub peer: Option<rmcp::Peer<rmcp::RoleServer>>,
     /// How `session` chose the project (`folder …`, `open in fal OS`, …).
     pub bound_by: Option<String>,
+    /// When the MCP connection that opened this session went away (ms). Stateless MCP
+    /// clients (protocol 2026-07+) use one short connection per request, so a session
+    /// outlives its connection and closes only after `ORPHAN_GRACE` without calls.
+    pub orphaned_at: Option<i64>,
 }
+
+/// How long a session whose MCP connection closed stays usable without calls.
+pub const ORPHAN_GRACE: Duration = Duration::from_secs(10 * 60);
 
 impl Session {
     pub fn agent_label(&self) -> String {
@@ -1128,6 +1135,7 @@ impl Host {
             inbox: vec![],
             peer: None,
             bound_by: None,
+            orphaned_at: None,
         };
         let info = s.info();
         sessions.insert(s.id.clone(), s);
@@ -1136,6 +1144,18 @@ impl Host {
             session: info.clone(),
         });
         info
+    }
+
+    /// The session's MCP connection closed: keep it for `ORPHAN_GRACE` (the next call
+    /// re-adopts it), then the sweep closes it.
+    pub fn orphan_session(&self, id: &str, detach_now: bool) {
+        let chat = self.sessions.lock().unwrap().get_mut(id).and_then(|s| {
+            s.orphaned_at = Some(now_ms());
+            s.chat.clone()
+        });
+        if let Some(chat) = chat.filter(|c| detach_now && c.starts_with("ext:")) {
+            self.chat.ext_session_closed(self, &chat);
+        }
     }
 
     pub fn close_session(&self, id: &str) {
@@ -1195,6 +1215,7 @@ impl Host {
             )
         })?;
         s.presence.last_activity = now_ms();
+        s.orphaned_at = None;
         Ok(f(s))
     }
 

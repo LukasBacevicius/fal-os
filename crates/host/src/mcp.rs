@@ -43,6 +43,9 @@ pub struct Conn {
     sessions: std::sync::Mutex<Vec<(std::sync::Weak<Host>, String)>>,
     /// The project this connection created last: its next `session` binds there.
     pub(crate) created: std::sync::Mutex<Option<String>>,
+    /// Stateless client (MCP protocol 2026-07 or newer): one short connection per request,
+    /// so its closing says nothing about the agent; its sessions are orphaned, not closed.
+    pub(crate) stateless: std::sync::atomic::AtomicBool,
 }
 
 impl Conn {
@@ -55,7 +58,9 @@ impl Drop for Conn {
     fn drop(&mut self) {
         for (host, id) in std::mem::take(&mut *self.sessions.lock().unwrap()) {
             if let Some(h) = host.upgrade() {
-                h.close_session(&id);
+                // Never close here: a session outlives its connection (stateless clients
+                // reconnect per request). A stateful client's tab shows detached at once.
+                h.orphan_session(&id, !self.stateless.load(std::sync::atomic::Ordering::Relaxed));
             }
         }
     }
@@ -1523,6 +1528,10 @@ impl ServerHandler for CanvasMcp {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        // No `initialize` on this connection, or a 2026-07+ client: stateless.
+        if context.peer.peer_info().is_none_or(|i| i.protocol_version.to_string().as_str() >= "2026-07-28") {
+            self.conn.stateless.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut meta = CallMeta {
             client_name: context.peer.peer_info().map(|i| i.client_info.name.clone()),
             chat: header(&context, "x-falos-chat"),
