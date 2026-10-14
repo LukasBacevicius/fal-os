@@ -49,7 +49,7 @@ lists these too.
 | Keys | Action |
 |---|---|
 | ⌘I | Focus the chat input (everywhere) |
-| ⏎ | Send; while the chat runs the message is queued. ⇧⏎ inserts a new line |
+| ⏎ | Send; while the chat runs the message is queued. ⇧⏎ inserts a new line. When something blocks it (the host is reconnecting, the agent runtime is down, the fal key or a login is missing, no credits) the message is **held** above the input and goes out by itself when that clears; `[send now]` / `[cancel]` (back into the input) |
 | Esc | In the input: stop the run if one is running, otherwise leave the input |
 | `@` / `#` | In the input: mention a node / another chat |
 | ⌫ | In an empty input: remove the last chip |
@@ -69,11 +69,12 @@ lists these too.
 | V | Select tool |
 | H, or hold Space | Pan |
 | N, or double-click empty canvas | New note at the cursor, in edit mode |
-| ⏎ or double-click | Edit the selected note or text. On a video, open the focus view; on other media, zoom to it |
+| ⏎ or double-click | Edit the selected note or text. On a video, open the focus view; on other media, zoom to it. On a frame or group, ⏎ selects its children |
+| ⇧⏎ | Select the parent frame or group of the selection |
 | Tab / ⇧Tab | Select the next or previous node in reading order (rows top to bottom, left to right) |
 | ⌘A | Select all |
-| Esc | Deselect |
-| ⌘D | Duplicate |
+| Esc | Step out, one level per press: leave a note being edited → cancel a move or resize (the selection stays) → leave the entered group → select the parent frame or group → deselect |
+| ⌘D | Duplicate (24 px down-right). Move the copy and press ⌘D again: the next copy repeats that offset (⌘D, move, ⌘D ⌘D lays out a row or a column) |
 | ⌘G | Group the selection. A group always hugs its children |
 | ⌘] / ⌘[ | Bring forward / send backward (z-order among siblings) |
 | ⌘⌥G | Frame the selection (a titled frame with padding) |
@@ -82,8 +83,11 @@ lists these too.
 | ⌘-click | Select inside groups directly |
 | ⌘C / ⌘V | Copy or paste nodes. A Figma selection (⌘C in Figma) pastes as real layers: frames, groups, editable text, images (downloaded by the host) and vector art (rendered to images), one undo step. Pasting images (also Figma's Copy as PNG) or files creates media nodes, uploaded to the host like a drop; pasting text creates a note |
 | ⌫ / Delete | Delete |
-| Arrows / ⇧Arrows | Nudge 1 px / 10 px |
-| ⌘Z / ⌘⇧Z | Undo / redo your own changes (agents' changes are theirs; revert an agent turn with `[revert]` in the chat) |
+| Arrows / ⇧Arrows | Nudge 1 px / 10 px. For a moment (~850 ms) guides show what the nudged node lines up with |
+| ⌘Z / ⌘⇧Z | Undo / redo your own changes, and put back the selection that went with each step (agents' changes are theirs; revert an agent turn with `[revert]` in the chat) |
+| Drag | Snaps to other nodes' edges and centres and to equal spacing in a row or column, within 4 px on screen; thin 1 px guides show what it snapped to. Hold ⌘ (Ctrl) to move freely; ⇧ locks the move to one axis. The drag starts after 3 px, or after 1 px once the press has been held still for ½ s (precise micro-moves) |
+| Drag an edge or a handle | Resize. Edges grab along their whole length; the moving edges snap like a move. Nodes smaller than 16 px on screen have no handles, so they always drag. Space moves the box mid-resize; ⇧ toggles the aspect lock (media keep their aspect by default) |
+| ⌥ (hover) | With a selection: the distances to the hovered node, or the insets when one is inside the other |
 | ⇧1 / ⇧2 | Fit all / zoom to the selection |
 | ⌘0 / ⌘+ / ⌘− | Zoom to 100% / zoom in / zoom out |
 | Drop files | Import at the pointer as a tidy grid. Sized ghosts preview where they land; over a frame it highlights and the files go into it (scaled to fit). Placeholder tiles (pixel dots, a progress line) hold the spot until the media is in; a 1px line under a node shows its upload to the host |
@@ -145,3 +149,10 @@ top-left show where it came from (`↓` import with a dot when uploaded to fal, 
 - ⌘+, ⌘− and ⌘0 are taken over on the canvas, so they zoom the canvas rather than the page.
 - ⌘L, ⌘D and ⌘G are taken only while the canvas has focus (not while you type),
   so the browser's own address bar, bookmark and find shortcuts stay reachable from inputs.
+
+## Keyboard layouts
+`/ ? [ ] \` match their character, and also the key where a US keyboard has them (`e.code`)
+when the layout puts a character there that isn't a shortcut itself. On a German keyboard
+⌘ü works as ⌘[ and `#` as `\`, and ⇧7 (`/`) still opens the ask prompt; `-` (where US has
+`/`) stays zoom out and ⌘+ (where US has `]`) stays zoom in, so bring forward is ⌘K there.
+Letters and the zoom keys always go by their character.

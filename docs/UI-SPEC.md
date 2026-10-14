@@ -8,7 +8,9 @@
   - CSS variables: `--bg #0a0a0a`, `--panel #0f0f0f`, `--line #262626`, `--text #e6e6e6`, `--dim #8a8a8a`, `--faint #4a4a4a`.
   - Provide a light variant through the same variables (`[data-theme=light]`: white background, black text). Dark is the default.
   - **No accent colors, gradients, shadows, glows, blur, or rounded "pill" chips.** Corners are 0–2px; borders are 1px `--line`.
-- **Selection** is a 1px white outline with small square handles: white fill, black border.
+- **Selection** is a 1px white outline with small square handles: white fill, black border. Nodes under 16px on screen get no handles.
+- **Guides** (snapping while dragging or resizing, and ~850ms after a nudge) are 1px `--dim` lines drawn by the engine; an equal gap is a 1px line with 6px end ticks. **⌥ distances** are the same lines in `--text` with a tiny mono number on `--bg` beside them. Nothing else: no colored guides, no badges, no fills.
+- **Progress** appears only when an operation is slow (>400ms: paste, import, project switch, export): one `ongoing` line (`pasting…`) that ends in a brief done line, never a done line over an error (`3 of 5 imported` instead).
 - **Motion** is only functional: 120ms fades. No bounces.
 
 ## Layout
@@ -33,6 +35,8 @@
   - The swarm strip above the input has one line per active subagent (`motion   rendering 0:07/0:15`). It appears only while agents run.
   - Context chips are bracketed text: `[img hero-2]`, `[spot hero-2 0.42,0.31]`, `[frame clip-1 @3.24s box]`, each with an `×`.
   - The input is a textarea with a `>` prompt. Enter sends, Shift+Enter adds a newline, Esc stops a run.
+  - **Errors** are one dim line: `! <cause> · [<next step>] [details]`, e.g. `! fal key missing · [open setup]`, `! out of credits · [open fal billing]`, `! Claude login expired · [run claude auth login]`; the raw message only behind `[details]`. A transient failure (dropped connection, busy upstream) continues once by itself and says `· retried once`.
+  - **Held:** a message blocked by a wall (host reconnecting, runtime down, key or login missing, no credits) waits above the input as `held · <why> · sends when …  [send now] [cancel]` and goes out by itself when the wall clears.
 - **Adding context:** select nodes and press ⌘L (or click "add to chat" in a tiny text button by the selection). Alt-click a spot on an image or video to add a spot chip; Alt-drag to add a region chip; on a video this uses the current playhead frame.
 
 ## Remove
@@ -48,7 +52,8 @@ A `generation` node renders as a dark tile (`#1a1a1c`) with **the fal mark as LE
 - Pause the animation during heavy gestures.
 - **Progress:** if known, the mark lights in reading order up to the progress, and a 1px bottom bar in `--dim` shows it too. Hovering shows `<model> · <elapsed> · <progress>` and the prompt snippet as tiny dim mono text.
 - **When it completes:** a 200ms crossfade from dots to the media.
-- **Failed:** the tile shows `failed` in dim mono text with a retry affordance. The text goes in the chat.
+- **Failed:** the tile shows `failed` in dim mono text with a retry affordance; hovering shows the cause as one plain line (`interrupted by a host restart · rerun it`). The text goes in the chat.
+- **Nothing lingers:** every agent marker (activity outline, cursor, claim, tab `*`, job progress, LED tile) has an owner and an expiry. A tile whose job is gone (host restart, crash) turns `failed` after 60s; the UI drops markers of sessions or jobs the host no longer has, on reconnect and every 2s (`apps/web/src/watchdog.ts`).
 
 ## Node rendering (agent content)
 - **frame:** a 1px `--line` outline with the title in dim mono above its top-left corner. No fill.

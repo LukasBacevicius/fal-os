@@ -174,3 +174,59 @@ picker cancel (#28; a `cancel` event, Chrome 113+ / Safari 16.4+).
    "quiet" from "gone" for HTTP clients that never close their MCP session.
 3. **Real-device paths not exercised here:** drag-out to Finder, the native clipboard, the
    live app iframe, and generation tiles.
+
+## P1 canvas feel and agent polish (follow-up)
+
+From the recommendations in `docs/research/paper-0515.md` (canvas interaction) and
+`docs/research/brilliant-b102.md` (§9–12). What changed:
+
+- **Snapping and guides** (`crates/client/src/snap.rs`, engine overlay): edges, centres and
+  equal spacing within 4 screen px (spacing 1.5×); resize snaps only the moving edges; ⌘/Ctrl
+  moves freely; 1 px `--dim` guides, gaps with end ticks; guides stay ~850 ms after a nudge;
+  ⌥ over another node shows distances (insets inside a frame). All in Rust; the only DOM work
+  is the ⌥ labels, written directly (no React render).
+- **Precision:** threshold 3 px, 1 px after a 500 ms hold; ⇧ axis lock; edges resize along their
+  length; no handles under 16 px on screen; Space moves the box mid-resize; Esc puts a resize
+  back and keeps the selection; ⌘D repeats the last offset.
+- **Undo and keys:** each undo step carries the selection before and after it (kept in step
+  with Loro's per-actor undo depth); the Esc ladder; ⏎ / ⇧⏎ walk children / parents (⏎ still
+  previews media); `/ ? [ ] \` also match the US physical key.
+- **Nothing lingers:** a host watchdog fails generating tiles with no live job after 60 s
+  (`interrupted … rerun it`, an `Event::Job` failed goes out); `hello` carries jobs in flight;
+  the UI watchdog (2 s) drops activity of gone sessions and past TTL, job progress of tiles that
+  stopped generating, claims on deleted nodes; a lost socket clears claims and activity; tabs
+  show no `*` while the host is unreachable.
+- **Progress and errors:** slow-only progress (paste, import, project switch, export), never a
+  done line over an error; one-sentence errors with one next step and `[details]`; one automatic
+  retry (a live transient run failure; fal submits that never reached fal, status/result polls);
+  held messages behind walls.
+
+**How it was checked:** `cargo test -p falos-client -p falos-doc -p falos-host` (new: snap math,
+drag/resize/Esc/Enter/nudge interaction tests, `tests/watchdog.rs`), `tsc -b`, vitest (new:
+`hotkeys`, `watchdog`, `errors`). In the browser against a temp host (port 7463, own
+`FALOS_HOME` and workspace, `--no-runtime`) and vite on 5193, media muted:
+
+- A real mouse drag of a note landed exactly aligned (0,250 from ~2 px off); ⌘Z put it back with
+  its selection. ⌫ on two notes, Esc, ⌘Z: both back and selected.
+- Mid-drag (driven through the wasm API) the equal-spacing and alignment guides drew; an edge
+  resize snapped to the neighbour's edge; Space mid-resize moved the box at its size.
+- Nudges showed the alignment guides for under a second; ⌥ over a node showed `140`, inside a
+  frame the four insets.
+- ⏎ on a frame → its children, Esc → the frame, Esc → nothing; ⏎ on a note edited it, Esc left
+  the editor, ⇧⏎ → the frame.
+- Synthetic German keys: ⌘ü (`BracketRight`) reordered, `-` on `Slash` zoomed out, ⇧7 `/`
+  opened the ask prompt.
+- ⌘D, move the copy 150 down, ⌘D ⌘D: a column at the same spacing.
+- A ghost session's activity, a stray job and a claim on a deleted node were swept within 2–7 s;
+  a generation node with no job turned `failed` after ~65 s and its hover read
+  `interrupted by a host restart · rerun it`.
+- Host killed: a sent message showed `held · host unreachable · sends when it is back`; on
+  restart it went out by itself within ~1.5 s. With the host SIGSTOPped a project switch showed
+  `opening audit two…` after 400 ms; it vanished when the host resumed.
+- Error lines rendered as `! fal key missing · [open setup] [details]` and so on; `[details]`
+  showed the raw text.
+
+**Not covered:** a real fal generation failing transiently (no key on the test host), real
+Claude/Codex login walls clearing through the desktop setup flow (web only here), and a real
+⇧/⌘ held mid-drag with the in-app browser's mouse (the logic is unit-tested; modifier changes
+re-evaluate the drag through `pointerMove`).
