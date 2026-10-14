@@ -153,6 +153,9 @@ fn parse_range(h: &str, len: u64) -> Result<Option<(u64, u64)>, ()> {
 pub struct AssetQuery {
     /// Project id or name (default: the default project; GET also looks in the others).
     project: Option<String>,
+    /// `HEAD …?probe=1`: the upload dedupe check. A missing asset answers 204 instead of 404
+    /// (an expected answer, not an error in the browser console).
+    probe: Option<String>,
 }
 
 /// The stored file for `hex`: in `project`, else the default project, else any project.
@@ -188,6 +191,9 @@ pub async fn get(
         );
     };
     let Some(path) = locate(&space, q.project.as_deref(), &hex) else {
+        if q.probe.is_some() && method == Method::HEAD {
+            return StatusCode::NO_CONTENT.into_response();
+        }
         return text(StatusCode::NOT_FOUND, "no such asset");
     };
     let mime = mime_of_ext(path.extension().and_then(|e| e.to_str()).unwrap_or(""));

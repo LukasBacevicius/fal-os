@@ -512,11 +512,12 @@ export class HostSync {
 
   // ---- assets ------------------------------------------------------------------------
 
-  private assetUrl(id: string, withToken = false) {
+  private assetUrl(id: string, withToken = false, probe = false) {
     const hex = id.replace(/^sha256:/, '');
     const q = new URLSearchParams();
     if (this.project) q.set('project', this.project);
     if (withToken) q.set('token', this.host.token);
+    if (probe) q.set('probe', '1');
     const qs = q.toString();
     return `${this.base('http')}/assets/${hex}${qs ? `?${qs}` : ''}`;
   }
@@ -533,8 +534,9 @@ export class HostSync {
     const blob = this.app.assetBlob(id);
     if (!blob) return;
     try {
-      const head = await fetch(this.assetUrl(id), { method: 'HEAD', headers: this.auth() });
-      if (head.ok) return;
+      // `probe`: a missing asset is a 204, not a red 404 in the console.
+      const head = await fetch(this.assetUrl(id, false, true), { method: 'HEAD', headers: this.auth() });
+      if (head.status === 200) return;
       // XHR for upload progress (a 1px bar under the node while it uploads).
       setUpload(id, 0);
       await new Promise<void>((resolve, reject) => {
