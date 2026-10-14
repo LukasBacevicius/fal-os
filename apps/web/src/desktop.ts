@@ -2,6 +2,8 @@
 // docs/ASSETS-V1.md §7). Without the shell (web build) `isDesktop()` is false and callers use
 // browser fallbacks (downloads, async clipboard).
 
+import { toast } from './store';
+
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<any>;
 
 const tauri = (): Invoke | null => {
@@ -40,18 +42,34 @@ const MIME: Record<string, string> = {
   flac: 'audio/flac', pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', json: 'application/json',
 };
 
+/** Protected folders already explained this session (macOS remembers the answer). */
+const warnedFolders = new Set<string>();
+
 /** Files on the system clipboard (Finder-copied files, or image data as a PNG), read natively:
  *  WKWebView's paste event doesn't reliably carry them. Empty on the web build. */
 export async function nativeClipboardFiles(): Promise<File[]> {
   if (!isDesktop()) return [];
   try {
-    const list = await invoke<{ path: string; name: string }[]>('clipboard_files');
-    return await Promise.all(list.map(async ({ path, name }) => {
-      const buf: ArrayBuffer = await invoke('read_clip_file', { path });
-      const ext = name.split('.').pop()?.toLowerCase() ?? '';
-      return new File([buf], name, { type: MIME[ext] ?? '' });
+    const list = await invoke<{ path: string; name: string; folder: string | null }[]>('clipboard_files');
+    // Reading a file pasted from Desktop, Documents, iCloud Drive… is when macOS asks for that
+    // folder (once): say why right before.
+    for (const f of new Set(list.map((l) => l.folder).filter((f): f is string => !!f))) {
+      if (warnedFolders.has(f)) continue;
+      warnedFolders.add(f);
+      toast(`macOS may ask once whether fal-os can open files in ${f.startsWith('a ') ? f : `your ${f} folder`}: you pasted a file from there`);
+    }
+    const files = await Promise.all(list.map(async ({ path, name }) => {
+      try {
+        const buf: ArrayBuffer = await invoke('read_clip_file', { path });
+        const ext = name.split('.').pop()?.toLowerCase() ?? '';
+        return new File([buf], name, { type: MIME[ext] ?? '' });
+      } catch {
+        return null; // a folder, gone, or access denied
+      }
     }));
+    return files.filter((f): f is File => !!f);
   } catch {
     return [];
   }
 }
+

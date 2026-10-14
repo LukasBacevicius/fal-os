@@ -21,8 +21,6 @@ tauri-plugin-autostart = "2"
 drag = "2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The fal key lives in the macOS Keychain (fallback: $FALOS_HOME/fal.env, 0600).
-keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -32,6 +30,9 @@ libc = "0.2"
 # Run-done / needs-you notifications with click-through (UNUserNotificationCenter).
 objc2-user-notifications = "0.3"
 block2 = "0.6"
+# Only to find (attributes, no prompt) and migrate a fal key an older build kept in the Keychain;
+# the key itself lives in $FALOS_HOME/fal.env (docs/PACKAGING.md §2.4).
+security-framework = "3"
 
 [features]
 # `cargo build --features custom-protocol` (what `cargo tauri build` does) serves

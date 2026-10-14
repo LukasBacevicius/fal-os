@@ -14,6 +14,11 @@
 //! The host runs in its own process group with `FALOS_EXIT_WITH_PARENT=1`; quitting the app
 //! SIGTERMs the group (the host then stops the runtime's group), and a crashed app leaves
 //! nothing behind (the host notices it was reparented and exits; the runtime follows its host).
+//!
+//! No macOS permission prompts on the way (docs/PACKAGING.md §2.5.1): the fal key lives in
+//! `$FALOS_HOME/fal.env` (0600), not the Keychain, whose "wants to use your confidential
+//! information" dialog an ad-hoc build would trigger again after every update; every child runs
+//! with its cwd in `$FALOS_HOME`, never in a protected folder.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -48,11 +53,17 @@ fn home() -> PathBuf {
 
 /// The user's login-shell PATH. Apps started from Finder get only `/usr/bin:/bin:/usr/sbin:/sbin`,
 /// which misses Homebrew (`ffmpeg`), `~/.local/bin` (`claude`), nvm/volta (`codex`), …
+///
+/// A login shell but not an interactive one (`.zprofile`, not `.zshrc`), started in the home folder:
+/// whatever an interactive rc file touches (dotfiles synced via iCloud Drive or Documents, prompt
+/// plugins scanning the cwd) would raise a macOS folder-access prompt in fal-os's name. Node
+/// managers that only `.zshrc` sets up are covered by the fixed dirs below.
 fn login_path() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut found = String::new();
     if let Ok(mut c) = Command::new(&shell)
-        .args(["-ilc", "printf '\\n__FALOS_PATH__%s__FALOS_PATH__\\n' \"$PATH\""])
+        .args(["-lc", "printf '\\n__FALOS_PATH__%s__FALOS_PATH__\\n' \"$PATH\""])
+        .current_dir(home())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -79,22 +90,43 @@ fn login_path() -> String {
     }
     let h = home();
     let mut dirs: Vec<String> = found.split(':').filter(|d| !d.is_empty()).map(String::from).collect();
+    // nvm's newest Node (where `npm i -g` puts claude / codex for nvm users).
+    let nvm = std::fs::read_dir(h.join(".nvm/versions/node"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join("bin"))
+        .filter(|b| b.is_dir())
+        .max_by_key(|b| node_version(b));
     for d in [
         "/opt/homebrew/bin".to_string(),
         "/usr/local/bin".into(),
         h.join(".local/bin").display().to_string(),
         h.join(".claude/local").display().to_string(),
         h.join(".volta/bin").display().to_string(),
+        h.join(".bun/bin").display().to_string(),
+        h.join(".npm-global/bin").display().to_string(),
+    ]
+    .into_iter()
+    .chain(nvm.map(|b| b.display().to_string()))
+    .chain([
         "/usr/bin".into(),
         "/bin".into(),
         "/usr/sbin".into(),
         "/sbin".into(),
-    ] {
+    ]) {
         if !dirs.contains(&d) {
             dirs.push(d);
         }
     }
     dirs.join(":")
+}
+
+/// `…/v22.11.0/bin` → (22, 11, 0) for picking nvm's newest.
+fn node_version(bin: &Path) -> (u32, u32, u32) {
+    let v = bin.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut it = v.trim_start_matches('v').split('.').map(|x| x.parse().unwrap_or(0));
+    (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
 }
 
 impl Sidecar {
@@ -147,9 +179,23 @@ impl Sidecar {
             .env("FALOS_SKILLS_DIR", self.home.join("skills"))
             // The runtime must never inherit a key from the app's own environment by accident.
             .env_remove("FAL_KEY");
-        if let Some(k) = keychain_get() {
+        // Children run in our home: a cwd inherited from wherever the app was started could be a
+        // protected folder (Desktop, Documents, a removable volume).
+        let _ = std::fs::create_dir_all(&self.home);
+        cmd.current_dir(&self.home);
+        if let Some(k) = self.stored_key() {
             cmd.env("FAL_KEY", k);
         }
+    }
+
+    /// The fal key from `$FALOS_HOME/fal.env` (the same file the host and the runtime read).
+    fn stored_key(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.home.join("fal.env")).ok()?;
+        text.lines().find_map(|l| {
+            let v = l.trim().trim_start_matches("export ").strip_prefix("FAL_KEY")?.trim_start().strip_prefix('=')?;
+            let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
+            (!v.is_empty()).then(|| v.to_string())
+        })
     }
 
     fn log_file(&self, name: &str) -> Stdio {
@@ -173,6 +219,7 @@ impl Sidecar {
             return Ok(());
         }
         std::fs::create_dir_all(&self.home).map_err(|e| e.to_string())?;
+        strip_quarantine(&r.join("../.."));
         let mut cmd = Command::new(bin);
         cmd.arg("serve").arg("--runtime").arg(r.join("runtime"));
         // A different projects folder than ~/fal-os-projects (tests, or several installs).
@@ -186,7 +233,6 @@ impl Sidecar {
         }
         self.env(&mut cmd);
         cmd.env("FALOS_EXIT_WITH_PARENT", "1")
-            .current_dir(&self.home)
             .stdin(Stdio::null())
             .stdout(self.log_file("host.log"))
             .stderr(self.log_file("host.log"));
@@ -283,13 +329,11 @@ impl Sidecar {
         }
         let mut v = self.node(&["doctor"], None).unwrap_or_else(|e| json!({ "error": e }));
         v["packaged"] = json!(true);
-        v["keySource"] = json!(if keychain_get().is_some() {
-            "keychain"
-        } else if v["falKey"] == json!(true) {
-            "file"
-        } else {
-            "none"
-        });
+        let file = self.stored_key().is_some();
+        v["keySource"] = json!(if file { "file" } else { "none" });
+        // A key an older build kept in the Keychain: offered as a one-click move (it costs one
+        // macOS prompt, explained on the setup screen). Found by its attributes only: no prompt.
+        v["keychainKey"] = json!(!file && keychain_has_key());
         v["home"] = json!(self.home.display().to_string());
         v["installing"] = json!(self.setup_running());
         v
@@ -313,8 +357,7 @@ impl Sidecar {
         let mut cmd = Command::new(r.join("node/bin/node"));
         cmd.arg(r.join("runtime/dist/setup.mjs")).arg("install");
         self.env(&mut cmd);
-        cmd.current_dir(&self.home)
-            .stdin(Stdio::null())
+        cmd.stdin(Stdio::null())
             .stdout(self.log_file("setup.log"))
             .stderr(self.log_file("setup.log"));
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
@@ -372,7 +415,7 @@ impl Sidecar {
         self.env(&mut cmd);
         // Installers and logins have no business with the fal key.
         cmd.env_remove("FAL_KEY");
-        cmd.current_dir(&self.home).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         std::fs::create_dir_all(self.home.join("logs")).map_err(|e| e.to_string())?;
         let mut child = cmd.spawn().map_err(|e| format!("{name}: {e}"))?;
@@ -426,33 +469,32 @@ impl Sidecar {
         }
     }
 
-    /// Store the fal key: Keychain first, else `$FALOS_HOME/fal.env` (0600). Restarts the host so
-    /// the runtime picks it up.
+    /// Store the fal key in `$FALOS_HOME/fal.env` (0600), not the Keychain: an ad-hoc signed build
+    /// has a new code signature after every update, and the Keychain would ask "fal-os wants to
+    /// use your confidential information" each time. Restarts the host so the runtime picks it up.
     pub fn save_key(&self, key: &str) -> Result<&'static str, String> {
         let key = key.trim();
         if key.is_empty() || key.contains(char::is_whitespace) || key.len() > 512 {
             return Err("that doesn't look like a fal key".into());
         }
-        let stored = match keychain_entry().and_then(|e| e.set_password(key).map_err(|e| e.to_string())) {
-            Ok(()) => {
-                // The Keychain wins; drop an older plain-text copy in our home.
-                let _ = std::fs::remove_file(self.home.join("fal.env"));
-                "keychain"
-            }
-            Err(_) => {
-                write_private(&self.home.join("fal.env"), &format!("FAL_KEY={key}\n"))?;
-                "file"
-            }
-        };
+        write_private(&self.home.join("fal.env"), &format!("FAL_KEY={key}\n"))?;
         self.restart()?;
-        Ok(stored)
+        Ok("file")
+    }
+
+    /// Move a key an older build stored in the Keychain into `fal.env`. Reading it is the one
+    /// Keychain prompt left, and only on this click. The Keychain copy stays (deleting it could
+    /// prompt again); [remove] deletes it.
+    pub fn migrate_key(&self) -> Result<&'static str, String> {
+        let key = keychain_read().ok_or("no fal key in the Keychain (or access was denied)")?;
+        self.save_key(&key)
     }
 
     pub fn forget_key(&self) -> Result<(), String> {
-        if let Ok(e) = keychain_entry() {
-            let _ = e.delete_credential();
-        }
         let _ = std::fs::remove_file(self.home.join("fal.env"));
+        if keychain_has_key() {
+            keychain_delete();
+        }
         self.restart()
     }
 }
@@ -545,16 +587,88 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-fn keychain_entry() -> Result<keyring::Entry, String> {
+/// The Keychain item older builds stored the key in (`ai.fal.os` / `FAL_KEY`), unless disabled
+/// (`FALOS_NO_KEYCHAIN`, tests next to an installed app).
+fn keychain_service() -> Option<String> {
     if std::env::var_os("FALOS_NO_KEYCHAIN").is_some() {
-        return Err("keychain disabled".into());
+        return None;
     }
-    let service = std::env::var("FALOS_KEYCHAIN_SERVICE").unwrap_or_else(|_| KEYCHAIN_SERVICE.into());
-    keyring::Entry::new(&service, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())
+    Some(std::env::var("FALOS_KEYCHAIN_SERVICE").unwrap_or_else(|_| KEYCHAIN_SERVICE.into()))
 }
 
-fn keychain_get() -> Option<String> {
-    keychain_entry().ok()?.get_password().ok().filter(|k| !k.trim().is_empty())
+/// Whether that item exists. Asks for its attributes only, never its secret, so macOS shows no
+/// access prompt.
+#[cfg(target_os = "macos")]
+fn keychain_has_key() -> bool {
+    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+    let Some(service) = keychain_service() else { return false };
+    ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .service(&service)
+        .account(KEYCHAIN_ACCOUNT)
+        .load_attributes(true)
+        .limit(Limit::Max(1))
+        .search()
+        .is_ok_and(|r| !r.is_empty())
+}
+
+/// The secret itself: macOS asks the user (once per signature) unless this build created it.
+#[cfg(target_os = "macos")]
+fn keychain_read() -> Option<String> {
+    let b = security_framework::passwords::get_generic_password(&keychain_service()?, KEYCHAIN_ACCOUNT).ok()?;
+    String::from_utf8(b).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_delete() {
+    if let Some(service) = keychain_service() {
+        let _ = security_framework::passwords::delete_generic_password(&service, KEYCHAIN_ACCOUNT);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_has_key() -> bool {
+    false
+}
+#[cfg(not(target_os = "macos"))]
+fn keychain_read() -> Option<String> {
+    None
+}
+#[cfg(not(target_os = "macos"))]
+fn keychain_delete() {}
+
+/// Drop `com.apple.quarantine` from our own bundle once the user has opened it (the xattr step,
+/// or "Open Anyway"): otherwise Gatekeeper may assess the nested `falos-host` and `node` on their
+/// own and block them with a second "can't be opened" dialog. A no-op when the bundle isn't ours
+/// to change (a translocated, read-only copy) or carries no quarantine.
+fn strip_quarantine(bundle: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        const NAME: &[u8] = b"com.apple.quarantine\0";
+        fn has(p: &Path) -> bool {
+            let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return false };
+            // SAFETY: valid C strings; a null buffer asks for the size only.
+            unsafe { libc::getxattr(c.as_ptr(), NAME.as_ptr().cast(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW) >= 0 }
+        }
+        fn walk(p: &Path) {
+            if let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) {
+                // SAFETY: valid C strings.
+                unsafe { libc::removexattr(c.as_ptr(), NAME.as_ptr().cast(), libc::XATTR_NOFOLLOW) };
+            }
+            if p.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+                for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
+                    walk(&e.path());
+                }
+            }
+        }
+        let Ok(bundle) = bundle.canonicalize() else { return };
+        if bundle.extension().is_some_and(|e| e == "app") && has(&bundle) {
+            walk(&bundle);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = bundle;
 }
 
 fn write_private(path: &Path, text: &str) -> Result<(), String> {
@@ -583,6 +697,55 @@ mod tests {
     fn strips_ansi() {
         assert_eq!(strip_ansi("\u{1b}[1;32mok\u{1b}[0m done"), "ok done");
         assert_eq!(strip_ansi("\u{1b}]8;;https://x\u{7}link\u{1b}]8;;\u{1b}\\ end"), "link end");
+    }
+
+    /// The key goes to `fal.env` (0600), never the Keychain, and children get it in their env.
+    #[test]
+    fn key_lives_in_a_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: tests in this module don't read the Keychain env vars concurrently.
+        unsafe { std::env::set_var("FALOS_NO_KEYCHAIN", "1") };
+        let root = std::env::temp_dir().join(format!("falos-key-test-{}", std::process::id()));
+        let side = Sidecar::with_layout(None, None, root.clone());
+        assert!(side.save_key("has space").is_err());
+        assert_eq!(side.save_key(" abc:def \n").unwrap(), "file");
+        let f = root.join("fal.env");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "FAL_KEY=abc:def\n");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(side.stored_key().as_deref(), Some("abc:def"));
+        assert!(!keychain_has_key());
+        assert!(side.migrate_key().is_err());
+        side.forget_key().unwrap();
+        assert!(side.stored_key().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Quarantine comes off the whole bundle once it's opened.
+    #[test]
+    fn strips_own_quarantine() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!("falos-q-test-{}", std::process::id()));
+        let app = root.join("x.app");
+        let bin = app.join("Contents/MacOS/bin");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+        std::fs::write(&bin, b"x").unwrap();
+        let q = |p: &Path, set: bool| {
+            let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+            let n = c"com.apple.quarantine";
+            let v = b"0081;00000000;Test;";
+            unsafe {
+                if set {
+                    libc::setxattr(c.as_ptr(), n.as_ptr(), v.as_ptr().cast(), v.len(), 0, 0) == 0
+                } else {
+                    libc::getxattr(c.as_ptr(), n.as_ptr(), std::ptr::null_mut(), 0, 0, 0) >= 0
+                }
+            }
+        };
+        assert!(q(&app, true) && q(&bin, true));
+        strip_quarantine(&app.join("Contents/Resources/../.."));
+        assert!(!q(&app, false) && !q(&bin, false));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A login task runs the tool found on the app's PATH with fixed args (no fal key in its

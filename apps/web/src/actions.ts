@@ -7,7 +7,7 @@ import { getState, toast } from './store';
 import { worldRects, type Rect } from './geometry';
 import { importFiles } from './controller';
 import { importFigma, isFigmaScene } from './figma';
-import { nativeClipboardFiles } from './desktop';
+import { invoke, isDesktop, nativeClipboardFiles } from './desktop';
 import type { NodeView } from './types';
 
 const ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -132,6 +132,9 @@ function dataImages(html: string): File[] {
 /** Images on the system clipboard through the async Clipboard API. Chrome hides an image
  *  from paste events when the clipboard also carries HTML (e.g. Figma's "Copy as PNG"). */
 async function asyncClipboardImages(): Promise<File[]> {
+  // Desktop: `nativeClipboardFiles` already covers image data, and WebKit's async read would
+  // show its "Paste" permission bubble.
+  if (isDesktop()) return [];
   try {
     const items = await navigator.clipboard?.read?.();
     const out: File[] = [];
@@ -343,7 +346,8 @@ export async function pasteFromClipboard(at: [number, number] | null) {
   }
   let text = '';
   try {
-    text = (await navigator.clipboard.readText()) ?? '';
+    // Desktop: natively, without WebKit's "Paste" permission bubble.
+    text = (isDesktop() ? await invoke<string>('clipboard_text') : await navigator.clipboard.readText()) ?? '';
   } catch {
     /* no permission */
   }

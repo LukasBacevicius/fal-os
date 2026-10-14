@@ -1,5 +1,6 @@
 //! Native notifications through UNUserNotificationCenter: macOS asks for permission on the
-//! first one (and the answer in System Settings → Notifications is respected from then on), and
+//! first one, never at launch (and the answer in System Settings → Notifications is respected
+//! from then on; `tray.rs` explains the prompt in the window right before it), and
 //! a click opens that chat. Silent (no sound). Only inside an `.app` bundle: the framework
 //! aborts in a bare `cargo run` binary, which gets no notifications.
 
@@ -111,6 +112,17 @@ mod mac {
 
 #[cfg(target_os = "macos")]
 pub use mac::{init, post};
+
+/// True exactly once per `$FALOS_HOME`: the first notification, which is when macOS asks for
+/// permission (never at launch). Callers explain the prompt in the window first.
+pub fn first_ask(home: &std::path::Path) -> bool {
+    let marker = home.join(".notifications-asked");
+    if marker.exists() {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(home);
+    std::fs::write(&marker, b"").is_ok()
+}
 
 #[cfg(not(target_os = "macos"))]
 pub fn init(_on_click: impl Fn(String, String) + Send + Sync + 'static) {}

@@ -1,9 +1,10 @@
 // Events from the desktop shell's menu bar item and notifications (apps/desktop/src-tauri
 // `tray.rs`, `notify.rs`), dispatched into the page as DOM events:
 // - `falos:open-chat` {project, chat}: switch to the project and show that chat;
-// - `falos:new-project`: create a project and focus its composer.
+// - `falos:new-project`: create a project and focus its composer;
+// - `falos:toast` {text}: a one-line note.
 
-import { getState } from './store';
+import { getState, toast } from './store';
 import { switchProject } from './sync';
 import { openChat } from './chatActions';
 import { createProject } from './projects';
@@ -30,4 +31,9 @@ export function installShellEvents() {
     if (typeof d.project === 'string' && typeof d.chat === 'string') openFromShell(d.project, d.chat);
   });
   window.addEventListener('falos:new-project', () => void createProject('untitled'));
+  // A one-line note from the shell (e.g. right before a macOS permission prompt).
+  window.addEventListener('falos:toast', (e) => {
+    const t = (e as CustomEvent).detail?.text;
+    if (typeof t === 'string') toast(t);
+  });
 }

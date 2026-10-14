@@ -77,6 +77,12 @@ fn save_fal_key(side: Side, key: String) -> Result<&'static str, String> {
     side.save_key(&key)
 }
 
+/// Move a key an older build kept in the Keychain into `fal.env` (one macOS prompt, on click).
+#[tauri::command(async)]
+fn migrate_fal_key(side: Side) -> Result<&'static str, String> {
+    side.migrate_key()
+}
+
 #[tauri::command(async)]
 fn forget_fal_key(side: Side) -> Result<(), String> {
     side.forget_key()
@@ -311,6 +317,7 @@ fn main() {
             reveal,
             setup_status,
             save_fal_key,
+            migrate_fal_key,
             forget_fal_key,
             check_fal_key,
             install_extras,

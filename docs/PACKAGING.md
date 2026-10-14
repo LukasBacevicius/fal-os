@@ -7,10 +7,11 @@ steps to sign and notarize the app later.
 
 **TL;DR**
 - **This week:** an ad-hoc signed, Apple Silicon only DMG built by `scripts/package-macos.sh`.
-  Share it in Slack or Drive. Colleagues drag it to /Applications, run one `xattr` command, and
-  follow the setup screen: paste a fal key, click install / sign in for Claude Code, ffmpeg and
-  the motion tools download by themselves. No Terminal, no Homebrew. The app uses their own
-  `claude` login. Colleague-facing steps: [INSTALL.md](INSTALL.md).
+  Share it in Slack or Drive. Colleagues drag it to /Applications, run one `xattr` command (or
+  click "Open Anyway"), and do two setup steps: paste a fal key, sign in to Claude. ffmpeg and the
+  motion tools download by themselves. No Terminal, no Homebrew, and no Keychain, folder,
+  clipboard or Accessibility prompts (§2.5.1). The app uses their own `claude` login.
+  Colleague-facing steps: [INSTALL.md](INSTALL.md).
 - **Later:** a fal Developer ID certificate and notarization. Build with `cargo tauri build`
   (`externalBin` + `resources`), add `tauri-plugin-updater` with a signed `latest.json` on an
   internal bucket, and optionally a private Homebrew cask.
@@ -53,7 +54,7 @@ These findings come from static inspection only; none of the bundles was execute
 | Option | Effort | Colleague experience | Verdict |
 |---|---|---|---|
 | **Ad-hoc signed DMG** (`codesign -s -`), shared on Slack or Drive | none (POC exists) | Drag to /Applications, then `xattr -dr com.apple.quarantine /Applications/fal-os.app` once per download (or right-click → Open → System Settings → "Open Anyway"). | **This week** |
-| **Developer ID + notarized DMG** | Apple Developer Program for fal (org), a Developer ID Application cert, and notarytool in CI | Double-click, no warnings. Keychain items survive updates because the code signature is stable. | **Next** |
+| **Developer ID + notarized DMG** | Apple Developer Program for fal (org), a Developer ID Application cert, and notarytool in CI | Double-click, no warnings. Keychain items survive updates because the code signature is stable, so the key could move back into the Keychain (§2.4). | **Next** |
 | TestFlight for Mac | needs a sandboxed App Store build | — | **No.** fal-os spawns arbitrary CLIs (`claude`, `node`, `ffmpeg`) and writes agent configs, which the sandbox forbids. |
 | Private Homebrew cask tap (`fal-ai/homebrew-tap`) | small, once we have stable DMG URLs | `brew install --cask fal-ai/tap/fal-os`. `brew upgrade` handles updates. For unsigned builds `--no-quarantine` skips the xattr step. A private repo needs `HOMEBREW_GITHUB_API_TOKEN`. | Nice later, on top of the notarized DMG |
 | **Hosted web (Vercel) + local helper** | medium | Still needs the host, runtime, Node and ffmpeg installed locally. The host must allow the Vercel origin (today it allows only loopback and `tauri://`). Chrome's Private Network Access prompts. Safari/WKWebView is stricter about `https` → `http://127.0.0.1`. | **No** as the main path: it doesn't remove the local install. Possibly later for a read-only viewer or share links. |
@@ -70,7 +71,7 @@ These findings come from static inspection only; none of the bundles was execute
   - CI writes `latest.json` (`version`, `notes`, `platforms.darwin-aarch64.{url, signature}`).
   - In the app: `tauri-plugin-updater` checks `endpoints: ["https://<internal-bucket>/fal-os/latest.json"]` at launch and shows "restart to update" in the UI (the Paper pattern).
   - GitHub Releases on a **private** repo don't work as an endpoint without shipping a token. Use a bucket that colleagues can reach instead: R2/GCS behind Cloudflare Access, or a public bucket with unguessable paths.
-  - The updater verifies the minisign signature itself, so it works with ad-hoc builds too. But with ad-hoc signing every update changes the code signature, so macOS asks again for Keychain access to the fal key. That is one more reason to get Developer ID first.
+  - The updater verifies the minisign signature itself, so it works with ad-hoc builds too. With ad-hoc signing every update changes the code signature; that's why the fal key is in a file, not the Keychain (§2.4).
 - **Sparkle:** proven (Atlas uses it). It needs a Swift/ObjC bridge in a Tauri app and its own EdDSA key and appcast. There is no advantage over the Tauri updater for us.
 
 ### 2.3 What to bundle and what to require
@@ -91,34 +92,52 @@ These findings come from static inspection only; none of the bundles was execute
 - The fal key is entered on the setup screen and checked before it is saved:
   - Queue API: an auth-only status lookup that spends nothing.
   - Agent API: `GET /agent/projects`, to detect whether the key has the AGENT preset.
-- It is stored in the **macOS Keychain** (service `ai.fal.os`, account `FAL_KEY`, via the `keyring` crate). The fallback is `~/.fal-os/fal.env` with mode 0600.
-- The app passes it in the environment to the host, which passes it to the runtime. It never goes into files we ship, logs, or argv.
+- It is stored in **`~/.fal-os/fal.env`** (`FAL_KEY=…`, mode 0600, written atomically), not the Keychain.
+  - **Why:** an ad-hoc signature changes with every build. A Keychain item's "Always Allow" is
+    bound to the signature, so every update (and every launch, when the key was read from
+    several processes) showed "fal-os wants to use your confidential information stored in
+    'ai.fal.os'". The file needs no prompt.
+  - **Trade-off:** the key is readable by any process running as the user (like `~/.aws/credentials`
+    or `~/.config/gh/hosts.yml`), and it's in Time Machine backups unless excluded. The Keychain
+    would add per-app ACLs and encryption at rest. It's a scoped fal key (AGENT preset) that the
+    user can revoke on fal.ai.
+  - **Migration:** builds before this kept the key in the Keychain (service `ai.fal.os`, account
+    `FAL_KEY`). The app finds that item by its attributes only (`SecItemCopyMatching` without
+    returning data, which needs no access and shows no prompt) and offers [use that key] on the
+    setup screen. That click reads the secret once (one Keychain prompt, explained on the line
+    above the button) and writes `fal.env`. The Keychain copy stays (deleting it could prompt
+    again); [remove] deletes both.
+  - **With Developer ID** the signature is stable and "Always Allow" sticks, so `save_key` could go
+    back to the Keychain (one function in `sidecar.rs`).
+- The app passes it in the environment to the host, which passes it to the runtime (both also read `fal.env` themselves). It never goes into files we ship, logs, or argv.
 - Nothing in the DMG is secret. Each install creates its own host token (`~/.fal-os/token`).
 - In packaged mode the runtime reads only `$FALOS_HOME`; it skips the dev fallback to `~/.fal-os`.
 
 ### 2.5 First-run onboarding (implemented)
-The setup screen opens at launch until the required parts are there: a fal key, Claude Code
-installed and signed in, and ffmpeg. It is also available from ⌘K → "setup…" (for example to
-change the key). Nothing on it needs Terminal or Homebrew.
-1. **fal key**: [open fal.ai/dashboard/keys] opens the keys page in the system browser. Paste
-   with ⌘V (the paste itself triggers the check) or [paste] (reads the clipboard only on that
-   click; nothing reads it unprompted). The key is validated (models + AGENT preset) and stored
-   in the Keychain. Once stored: [check] / [change] / [remove]; [change] saves a new key over the
-   old one after the same check.
-2. **Claude Code**: path + `loggedIn` + subscription. Not installed → [install] runs Anthropic's
-   official installer with streamed output. Not signed in → [sign in] runs `claude auth login`,
-   which opens the browser; the screen shows [open the sign-in page] when the CLI prints a URL,
-   and [cancel]. While anything required is missing, the screen polls `claude auth status --json`
-   every 3 s, so it turns green by itself after the browser sign-in.
-3. **Motion tools**: ffmpeg + per-part status (Remotion, browser, HyperFrames, skills), free disk.
-   Right after a key is saved, the ffmpeg download and the motion tools install start by
-   themselves in the background (progress inline; they keep going if the screen is closed).
-   [install] retries what's missing.
-4. **Codex (optional)**: [install] (bundled npm → `~/.fal-os/npm`) and [sign in] (`codex login`,
-   browser).
-5. **ready → [start →]**: when 1–3 (fal key, Claude, ffmpeg) are done, one button closes the
-   screen and opens a fresh project (the empty first project, else a new one), chat focused. The
-   motion tools may still be finishing in the background. Reopened from ⌘K it says [done].
+The setup screen opens at launch until two things are there: a fal key and a signed-in Claude
+Code. It is also available from ⌘K → "setup…" (for example to change the key). Nothing on it
+needs Terminal or Homebrew.
+1. **paste your fal key**: [open fal.ai/dashboard/keys] opens the keys page in the system
+   browser. Paste with ⌘V (the paste itself triggers the check) or [paste], which reads the
+   clipboard natively (`clipboard_text`, no WebKit "Paste" bubble) and only on that click. The
+   key is validated (models + AGENT preset) and saved to `~/.fal-os/fal.env` (§2.4). Once saved:
+   [check] / [change] / [remove]. A key from an older build's Keychain shows [use that key].
+2. **sign in to Claude**: one button. Claude Code missing → it runs Anthropic's official
+   installer (streamed output) and then `claude auth login`, which opens the browser; the screen
+   shows [open the sign-in page] when the CLI prints a URL, and [cancel]. While anything required
+   is missing, the screen polls `claude auth status --json` every 3 s, so it turns green by itself
+   after the browser sign-in.
+3. **ready → [start →]** closes the screen and opens a fresh project (the empty first project,
+   else a new one), chat focused. Reopened from ⌘K it says [done].
+
+Automatic: at launch (`maybeOpenSetup`, once per launch, with ≥ 3 GB free) the ffmpeg download
+and the motion tools install (Remotion, chrome-headless-shell, HyperFrames, skills; ~0.9 GB)
+start in the background, before the key is even pasted. One line shows their progress, or the
+failure with [retry].
+
+Collapsed under **[+] more**: motion tools details and [install] / [retry], Codex ([install] with
+the bundled npm into `~/.fal-os/npm`, [sign in] with `codex login`), connecting your own Claude /
+Codex (`DirectorConnect`), and "open at login".
 
 How it runs: the installs and sign-ins are a fixed list of tasks in the shell (`setup_run`,
 `setup_task`, `setup_cancel` in `sidecar.rs`; never an arbitrary command), each in its own process
@@ -129,6 +148,34 @@ install restarts the host, so the runtime sees the new `claude` / `ffmpeg` / `co
 
 The runtime's capability fixes point at "fal-os → Setup" when packaged (`FALOS_PACKAGED=1`),
 not at dev commands.
+
+### 2.5.1 macOS permission prompts, install → first generation
+
+Audited in code and in a packaged run (temp `FALOS_HOME` / `FALOS_PROJECTS` / `FALOS_PORT`,
+launched through LaunchServices so TCC attributes everything to the app, with a Finder-like env
+and cwd `/`): `tccd` logged only preflight checks for the app (ListenEvent from AppKit /
+WindowServer, Microphone and Camera from WebKit), which never prompt, and no request. `lsof`: the
+host listens on 127.0.0.1 only (sync/MCP and the app server), every child's cwd is `$FALOS_HOME`
+(the runtime's is its bundle dir), and nothing has a file open under a protected folder.
+
+| Prompt | Cause | Now |
+|---|---|---|
+| "fal-os" Not Opened / Apple could not verify (Gatekeeper) | ad-hoc signature + the browser's quarantine flag on the DMG | **Unavoidable** until Developer ID + notarization (§6): the `xattr` command or "Open Anyway", once per download. |
+| "falos-host" / "node" can't be opened | quarantine copied onto the nested executables, e.g. after "Open Anyway" instead of `xattr -dr` | **Fixed**: once the app runs, it removes `com.apple.quarantine` from its own bundle before spawning anything (`strip_quarantine`; no-op on a read-only translocated copy). |
+| "fal-os wants to use your confidential information stored in 'ai.fal.os'" (Keychain) | key in the Keychain + a new ad-hoc signature on every build; read on every host start and every setup-status poll | **Fixed**: key in `fal.env` (§2.4). **Deferred** for keys from older builds: one prompt on [use that key], explained on the line above it. |
+| "fal-os would like to access files in your Desktop / Documents / Downloads folder", iCloud Drive, removable volumes | `$SHELL -ilc` ran the user's interactive `.zshrc` in fal-os's name (dotfiles in iCloud/Documents, prompt plugins); children inherited the app's cwd (`/`, or a protected folder when started from a shell there): the setup helper (`doctor`, which runs `claude auth status`), the installers, the host restart path | **Fixed**: login PATH from `$SHELL -lc` (`.zprofile`, not `.zshrc`) run in `~`, plus fixed dirs (Homebrew, `~/.local/bin`, volta, bun, nvm's newest Node); every child runs in `$FALOS_HOME`. The library indexer, thumbnails and exports only touch the projects folder and `$FALOS_HOME`. Agents (Claude Code with `settingSources: []`, cwd = the chat's work dir; Codex `workspace-write`) get a prompt rule to stay out of protected folders unless the user gave a path there. |
+| same, for a file the user pastes | ⌘V of a file copied in Finder from such a folder (a paste carries no implied consent; a drop or the open panel does) | **Deferred**: `clipboard_files` lists paths without touching them and names the protected folder; the canvas toasts "macOS may ask once whether fal-os can open files in your Desktop folder…" right before `read_clip_file` (now off the main thread) reads it. |
+| Photos, Music, "data from other apps" | nothing reads the Photos library, Music, or other apps' containers. "connect" writes `~/.claude.json`, `~/.codex/config.toml` and `~/Library/Application Support/Claude/` (not a container) only on click | **None found** |
+| WebKit "Paste" bubble | Setup's [paste] and the canvas paste menu used `navigator.clipboard.readText()` / `read()` | **Fixed**: native `clipboard_text` / `clipboard_files` on the desktop; the async clipboard only in the web build. |
+| "fal-os" would like to send notifications | `UNUserNotificationCenter` | **Deferred** (and was already lazy): requested with the first notification ever (a run ends or asks a question while the window is in the background), never at launch. Right before it, the window shows a one-line toast saying why (`notify::first_ask`). |
+| "Background Items Added" | `tauri-plugin-autostart`'s LaunchAgent | **Deferred**: only when the user turns on "open at login" (off by default); the line under the toggle says so. |
+| Automation ("fal-os wants to control Finder") | none: Reveal uses `NSWorkspace.activateFileViewerSelectingURLs` (tauri-plugin-opener), "Open with" uses `/usr/bin/open` (Launch Services), drag-out and copy use the pasteboard; no `osascript` anywhere | **None** |
+| Accessibility, Input Monitoring, Screen Recording, Camera, Microphone | none requested (preflights only, see above); app iframes have `camera 'none'; microphone 'none'` | **None** |
+| Local network / "accept incoming network connections?" (firewall) | non-loopback binds | **None**: host, app server and the fal OAuth callback bind 127.0.0.1; `claude` / `codex` logins call back on loopback. |
+| Gatekeeper on ffmpeg, the Claude installer, chrome-headless-shell, Codex | downloaded by Node `fetch` / `curl` / npm, which set no quarantine flag (verified: ffmpeg gets only `com.apple.provenance`); ffmpeg is Developer ID signed + notarized, sha256-checked | **None**; nothing to strip. |
+
+Claude Code's own credentials are in the Keychain item the `claude` binary created, so reading
+them (`claude auth status`, the agents) prompts nobody.
 
 ### 2.6 Workspace, MCP registration, logs
 - Projects: `~/fal-os-projects` (per user). Settings, token, templates, skills and logs: `~/.fal-os`.
@@ -178,7 +225,7 @@ Remotion is what keeps it small.
 4. Updates: post a new DMG.
 
 ### Next (1–2 weeks)
-1. **Developer ID + notarization** (§6). It removes the xattr step and Keychain re-prompts, and makes the app look trustworthy.
+1. **Developer ID + notarization** (§6). It removes the xattr / "Open Anyway" step (the last prompt left at install, §2.5.1), lets the key move back to the Keychain, and makes the app look trustworthy.
 2. **Move the build to `cargo tauri build`:**
    - `bundle.externalBin: ["binaries/falos-host"]` (built as `falos-host-aarch64-apple-darwin`).
    - `bundle.resources` for `node/` and `runtime/`.
@@ -208,13 +255,13 @@ fal-os.app/Contents/
 ```
 
 **How it runs** (`apps/desktop/src-tauri/src/sidecar.rs`):
-- **Startup:** on launch (off the main thread) the app reads the login shell's PATH (`$SHELL -ilc`), plus Homebrew, `~/.local/bin` and volta, with the bundled Node first.
-- **Host start:** it starts `falos-host serve --runtime Resources/runtime` in its own process group. The env carries `FALOS_HOME`, `FALOS_PACKAGED=1`, `FALOS_NODE`, the template and skills dirs, `FAL_KEY` from the Keychain, and `FALOS_EXIT_WITH_PARENT=1`. Output goes to `~/.fal-os/logs/host.log`.
+- **Startup:** on launch (off the main thread) the app removes the quarantine flag from its own bundle (§2.5.1) and reads the login shell's PATH (`$SHELL -lc`, non-interactive, run in `~`), plus Homebrew, `~/.local/bin`, volta, bun and nvm's newest Node, with the bundled Node first.
+- **Host start:** it starts `falos-host serve --runtime Resources/runtime` in its own process group, with cwd `$FALOS_HOME` (like every child). The env carries `FALOS_HOME`, `FALOS_PACKAGED=1`, `FALOS_NODE`, the template and skills dirs, `FAL_KEY` from `fal.env`, and `FALOS_EXIT_WITH_PARENT=1`. Output goes to `~/.fal-os/logs/host.log`.
 - **Runtime start:** when `FALOS_NODE` is set and `dist/main.mjs` exists, the host starts the runtime as `node dist/main.mjs` (`crates/host/src/runtime.rs`).
 - **Port:** the host picks 7317 or the next free port and writes `host.json`. The `host_info` command waits until `host.json` is the one *its* child wrote (pid match), so the UI never connects to a stale port or to someone else's host.
 - **Quit:** (⌘Q or tray "quit", see below) `RunEvent::Exit` SIGTERMs the host's group (and the setup helper's), waits 5 s, then SIGKILLs. The host stops the runtime's group.
 - **Crash:** if the app dies, the host notices it was reparented and exits (`FALOS_EXIT_WITH_PARENT`), and the runtime follows its host (`FALOS_HOST_PID`).
-- **Setup commands:** `setup_status`, `check_fal_key`, `save_fal_key`, `forget_fal_key`, `install_extras` and `restart_host` call `node dist/setup.mjs doctor|check-key|install` or the Keychain. `setup_run` / `setup_task` / `setup_cancel` run the fixed install and sign-in tasks (§2.5).
+- **Setup commands:** `setup_status`, `check_fal_key`, `save_fal_key`, `migrate_fal_key`, `forget_fal_key`, `install_extras` and `restart_host` call `node dist/setup.mjs doctor|check-key|install` or write `fal.env`; only `migrate_fal_key` (on click) reads the Keychain. `setup_run` / `setup_task` / `setup_cancel` run the fixed install and sign-in tasks (§2.5).
 - **Dev:** `cargo run` from a checkout spawns nothing and finds your own `falos-host serve` as before.
 
 **Background layer** (`main.rs`, `tray.rs`, `notify.rs`):
@@ -223,8 +270,8 @@ fal-os.app/Contents/
 - **Quit:** the app menu's ⌘Q is our own item (the predefined one would terminate without asking), and so is the tray's "quit". When runs or generations are active, a native dialog asks first ("2 agent runs are active. quit anyway?"). Quitting then goes through `RunEvent::Exit`, which SIGTERMs the host's process group as before. (Logout and the Dock's own "Quit" still terminate directly.)
 - **Open at login** (Setup → "open at login", and in the tray; default off): `tauri-plugin-autostart` writes a LaunchAgent (`~/Library/LaunchAgents/fal-os.plist`) that starts the app with `--hidden`: no window, just the tray and the host.
 - **Menu bar item:** `icons/tray.png` / `tray-working.png` (36 px template images, drawn 18 pt by tray-icon; `generate.py` renders them: solid 2 px LED cells, mark only, plus one 3×3 LED block in the hole while agents work). The menu is rebuilt from `GET /api/status` (host `tray.rs`, polled every second; it reads in-memory state only): one line per active run (`● <project> · <chat> — <current step>` or `needs you: <question>`, which opens that chat), `12 generating · 3 queued`, the last 5 runs that ended since the host started (`✓ … — show`), then `open fal-os`, `new project`, `open at login`, `quit`. Rows with the same layout update in place, so an open menu stays put.
-- **Notifications** (UNUserNotificationCenter, silent): only when a run ends (done / error) or asks a question (`question` event: fal driver inputs and approvals), and only while the window is hidden or unfocused. Nothing per generation. macOS asks for permission on the first one; clicking opens the chat. They need the `.app` bundle (a bare `cargo run` binary gets none).
-- **Testing next to an installed app:** run the bundle's binary with `FALOS_HOME`, `FALOS_PROJECTS` and `FALOS_PORT` (a preferred port other than 7317, which installed agents' MCP configs point at) set to test values, and `FALOS_NO_KEYCHAIN=1`. Change the copy's `CFBundleIdentifier` (and re-sign ad hoc) so notification permission, LaunchServices and Reopen don't mix it up with `/Applications/fal-os.app`. "open at login" writes the same LaunchAgent name as the installed app.
+- **Notifications** (UNUserNotificationCenter, silent): only when a run ends (done / error) or asks a question (`question` event: fal driver inputs and approvals), and only while the window is hidden or unfocused. Nothing per generation. macOS asks for permission on the first one (never at launch), and the window shows a one-line toast right before; clicking opens the chat. They need the `.app` bundle (a bare `cargo run` binary gets none).
+- **Testing next to an installed app:** run the bundle's binary with `FALOS_HOME`, `FALOS_PROJECTS` and `FALOS_PORT` (a preferred port other than 7317, which installed agents' MCP configs point at) set to test values, and `FALOS_NO_KEYCHAIN=1` (no Keychain lookups at all). `open -n -g -j --env FALOS_HOME=… … fal-os.app --args --hidden` launches it through Launch Services, so TCC attributes requests to the app (`/usr/bin/log show --predicate 'process == "tccd"'` shows them) instead of to your terminal. Change the copy's `CFBundleIdentifier` (and re-sign ad hoc) so notification permission, LaunchServices and Reopen don't mix it up with `/Applications/fal-os.app`. "open at login" writes the same LaunchAgent name as the installed app.
 
 **Verified** (DMG installed into a temp "Applications" dir; launched with a Finder-like minimal env, `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and `FALOS_HOME`, `FALOS_PROJECTS` and the Keychain service all pointed at test locations):
 - `xattr -dr com.apple.quarantine` clears the quarantine set by a simulated browser download.
@@ -241,7 +288,7 @@ fal-os.app/Contents/
 - SIGKILL of the app → host logs "parent process gone; shutting down", and the runtime exits.
 
 **Not verified:**
-- Typing a real key into the setup screen and the Keychain write from the GUI. No GUI automation was run on the user's desktop, and no real key was used.
+- Typing a real key into the setup screen from the GUI, the Keychain migration with a real item, and a real first generation. No real key was used and the user's Keychain wasn't touched; the setup screen's flows (auto-download, native [paste], ready state) were checked against a mocked shell bridge.
 - The Remotion template install + `remotion browser ensure` (~700 MB, skipped for disk). It is the same code path as the HyperFrames install.
 
 ---
@@ -259,14 +306,14 @@ The short version for colleagues is [INSTALL.md](INSTALL.md).
    xattr -dr com.apple.quarantine /Applications/fal-os.app
    ```
    Without Terminal: open it once, dismiss the warning, then go to System Settings → Privacy & Security → "fal-os was blocked…" → **Open Anyway**.
-4. Open fal-os and follow the setup screen: open the keys page, paste your fal key (stored in your Keychain), click [install] and [sign in] for Claude Code. ffmpeg and the motion tools (~0.9 GB into `~/.fal-os`) download by themselves after the key is saved. When it says "ready", press [start →].
-   macOS may ask whether fal-os may use the "ai.fal.os" Keychain item. Click **Always Allow** (it asks again after each update until builds are notarized).
+4. Open fal-os. Two steps: paste your fal key (saved in `~/.fal-os/fal.env`), then **sign in** to Claude (installs Claude Code first if needed). ffmpeg and the motion tools (~0.9 GB into `~/.fal-os`) download by themselves in the background. When it says "ready", press [start →].
+   Later prompts, each only when needed and explained in the window first: notifications, "Background Items Added" (open at login), folder access for a file pasted from Desktop / Documents / Downloads, and a one-time Keychain prompt when moving a key from an older build (§2.5.1).
 5. Your projects live in `~/fal-os-projects`. To connect Claude Code or Codex to the canvas, use ⌘K → "connect agent".
 6. Problems? Send `~/.fal-os/logs/host.log` and `~/.fal-os/logs/setup.log`.
 
 **Update:** quit fal-os, replace the app with the new DMG's copy, and run the `xattr` command again.
-**Uninstall:** delete the app, `~/.fal-os` (settings, templates, logs) and, if you want, `~/fal-os-projects`.
-The Keychain item is "ai.fal.os" in Keychain Access.
+**Uninstall:** delete the app, `~/.fal-os` (key, settings, templates, logs) and, if you want, `~/fal-os-projects`.
+Older builds also left a Keychain item "ai.fal.os" (Keychain Access).
 
 ---
 
@@ -310,7 +357,8 @@ There is no signing identity on the build machine today (`security find-identity
 ---
 
 ## 7. Known gaps (POC)
-- Ad-hoc signature: Gatekeeper needs the `xattr` step, and the Keychain asks again after each update.
+- Ad-hoc signature: Gatekeeper needs the `xattr` / "Open Anyway" step. The fal key is in a 0600 file rather than the Keychain because of it (§2.4).
+- The non-interactive login shell misses PATH entries that only `.zshrc` sets (other than nvm's, which is added). Such a `claude` isn't found, and setup offers the official installer instead.
 - No auto-update; no single-instance guard. Two app instances start two hosts on different ports, and the last one owns `~/.fal-os/host.json`. The same applies if a colleague also runs a dev `falos-host serve` with the default `FALOS_HOME`.
 - MCP registration writes an HTTP URL with the current port (§2.6).
 - ffmpeg isn't bundled; it's a ~56 MB first-run download (§2.3). x86 Macs would need `brew install ffmpeg` (the download is arm64 only).

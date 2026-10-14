@@ -19,8 +19,13 @@ const FORMAT = `Canvas text format (fal-os MCP \`read\`/\`edit\`): one row per n
 - Positions are relative to the parent frame. Strings are JSON-quoted (\\n for newlines).
 - \`edit\` returns \`created\` ids (in row order). Keep ids; pass them to others.`;
 
+/** macOS asks the user for permission (in fal-os's name) the moment anything touches these. */
+const FOLDERS = `Folders: work only in the work dir, the project folder and paths the user gave you. Never list, search or browse the home folder, ~/Desktop, ~/Documents, ~/Downloads, iCloud Drive, ~/Pictures, ~/Movies, ~/Music, other apps' data (~/Library) or /Volumes: macOS would interrupt the user with a permission prompt. Open a file there only when the user gave its exact path.`;
+
 const PRESENCE = `Presence: first call fal-os \`session\` with your agentName and the canvas, keep the sessionId and pass it to every fal-os and swarm tool. Call \`set_status\` (short, present tense, with \`cursor\` near what you're working on, in canvas coordinates) whenever you start a new step, so humans see you work live. When you're done with a set of nodes, call \`finish_working\` (so their activity highlight ends), and clear your status (text "") when you finish.
-The user's current selection is their focus: \`get_selection\` shows it ("this", "these" usually mean the selection).`;
+The user's current selection is their focus: \`get_selection\` shows it ("this", "these" usually mean the selection).
+
+${FOLDERS}`;
 
 const BATCH = `Many outputs: when a request needs more than ~3 generations ("10 product shots", "variations", "200 images of pizza"), write ALL the prompts in ONE response as a variation matrix (subject × angle × light × setting/style, seed) and make ONE fal-os \`generate_batch\` call with explicit \`jobs\` (one per prompt). Same prompt N times → \`model\` + \`input\` + \`count\` (the host packs identical requests via \`num_images\`). It places every placeholder at once in a grid, submits every job at once and returns immediately — don't \`await_batch\` unless your very next step needs the results. NEVER call \`generate\` or \`fal_model\` in a loop. For "quick"/"fast" requests and drafts use a fast model (fal-ai/flux/schnell; fal-ai/flux/dev when product realism matters).`;
 

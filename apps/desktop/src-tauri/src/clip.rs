@@ -3,6 +3,11 @@
 //! shows a "Paste" bubble), so the web side asks here first: files copied in Finder come back
 //! as their paths, raw image data (screenshots, "Copy Image") is written to a temp PNG. The
 //! web then fetches the bytes with `read_clip_file`, which only serves paths handed out here.
+//!
+//! A file pasted from Desktop, Documents, Downloads, iCloud Drive or a removable volume is the
+//! one case where macOS asks for folder access (a paste, unlike a drop or the open panel, carries
+//! no implied consent). So listing never touches the files (no stat), each file names its
+//! protected `folder`, and the web says why before `read_clip_file` (off the main thread) reads it.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -14,28 +19,55 @@ static SERVED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 pub struct ClipFile {
     path: String,
     name: String,
+    /// The macOS-protected folder it's in (`Desktop`, `iCloud Drive`, …), if any.
+    folder: Option<&'static str>,
+}
+
+/// The privacy-protected location `p` is in: reading it makes macOS ask once per folder.
+pub fn protected_folder(p: &std::path::Path, home: &std::path::Path) -> Option<&'static str> {
+    if p.starts_with("/Volumes") {
+        return Some("a removable or network volume");
+    }
+    let rel = p.strip_prefix(home).ok()?;
+    [
+        ("Desktop", "Desktop"),
+        ("Documents", "Documents"),
+        ("Downloads", "Downloads"),
+        ("Library/Mobile Documents", "iCloud Drive"),
+        ("Library/CloudStorage", "cloud storage"),
+        ("Pictures/Photos Library.photoslibrary", "Photos"),
+    ]
+    .into_iter()
+    .find(|(dir, _)| rel.starts_with(dir))
+    .map(|(_, name)| name)
 }
 
 fn allow(p: &PathBuf) {
     SERVED.lock().unwrap().get_or_insert_with(HashSet::new).insert(p.clone());
 }
 
-/// Files on the clipboard: Finder-copied files first, else image data as a temp PNG.
+/// Files on the clipboard: Finder-copied files first, else image data as a temp PNG. Paths only:
+/// nothing here touches the files (a folder fails later, in `read_clip_file`).
 #[tauri::command]
 pub fn clipboard_files() -> Result<Vec<ClipFile>, String> {
     let paths = imp::read_files()?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     Ok(paths
         .into_iter()
-        .filter(|p| p.is_file())
         .map(|p| {
             allow(&p);
-            ClipFile { name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), path: p.to_string_lossy().into_owned() }
+            ClipFile {
+                name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                folder: protected_folder(&p, &home),
+                path: p.to_string_lossy().into_owned(),
+            }
         })
         .collect())
 }
 
-/// Bytes of a file previously returned by `clipboard_files`.
-#[tauri::command]
+/// Bytes of a file previously returned by `clipboard_files`. Off the main thread: a macOS
+/// folder-access prompt blocks the read until the user answers.
+#[tauri::command(async)]
 pub fn read_clip_file(path: String) -> Result<tauri::ipc::Response, String> {
     let p = PathBuf::from(&path);
     if !SERVED.lock().unwrap().as_ref().is_some_and(|s| s.contains(&p)) {
@@ -112,5 +144,22 @@ mod imp {
     }
     pub fn read_text() -> Result<String, String> {
         Ok(String::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::protected_folder;
+    use std::path::Path;
+
+    #[test]
+    fn names_protected_folders() {
+        let h = Path::new("/Users/a");
+        assert_eq!(protected_folder(Path::new("/Users/a/Desktop/x.png"), h), Some("Desktop"));
+        assert_eq!(protected_folder(Path::new("/Users/a/Library/Mobile Documents/com~apple~CloudDocs/x.png"), h), Some("iCloud Drive"));
+        assert_eq!(protected_folder(Path::new("/Volumes/SD/x.mov"), h), Some("a removable or network volume"));
+        assert_eq!(protected_folder(Path::new("/Users/a/fal-os-projects/p/x.png"), h), None);
+        assert_eq!(protected_folder(Path::new("/var/folders/x/falos-clip/pasted-1.png"), h), None);
+        assert_eq!(protected_folder(Path::new("/Users/a/DesktopX/x.png"), h), None);
     }
 }

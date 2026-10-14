@@ -12,7 +12,7 @@ function falosHome(): string {
 /** FAL_KEY from the environment, else `$FALOS_HOME/fal.env`, else `~/.fal-os/fal.env` (a `FAL_KEY=…` line). Never logged. */
 export function falKey(): string | undefined {
   if (env.FAL_KEY) return env.FAL_KEY.trim();
-  // The packaged app passes the key in the env (from the Keychain) and only ever uses its own FALOS_HOME.
+  // The packaged app passes the key in the env (from its $FALOS_HOME/fal.env) and only ever uses its own FALOS_HOME.
   const dirs = env.FALOS_PACKAGED ? [falosHome()] : [falosHome(), join(homedir(), ".fal-os")];
   for (const dir of dirs) {
     const p = join(dir, "fal.env");

@@ -269,6 +269,9 @@ fn icon(working: bool) -> Image<'static> {
     Image::from_bytes(if working { WORKING } else { IDLE }).expect("tray icon png")
 }
 
+/// Shown in the window right before macOS asks for notification permission.
+const NOTIFY_WHY: &str = "macOS will ask once whether fal-os may notify you when a run finishes or needs you while the window is in the background";
+
 /// Create the menu bar item and start the status poller.
 pub fn start(app: &AppHandle) -> tauri::Result<()> {
     let rows0 = rows(None, login_enabled(app));
@@ -289,6 +292,11 @@ pub fn start(app: &AppHandle) -> tauri::Result<()> {
             if let Some(s) = &s {
                 let notes = seen.diff(s);
                 if !notes.is_empty() && !window_in_front(&app) {
+                    // The first notification ever is also macOS's permission prompt: say why
+                    // in the window, in case it's visible behind another app.
+                    if crate::notify::first_ask(&crate::sidecar::falos_home()) {
+                        crate::web_event(&app, "falos:toast", &serde_json::json!({ "text": NOTIFY_WHY }));
+                    }
                     for n in notes {
                         crate::notify::post(&n.project, &n.chat, &n.title, &n.body);
                     }
