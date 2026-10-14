@@ -4,10 +4,17 @@
 // events. Also: agent presence (smoothed cursors that fade when idle), claims, job progress,
 // chat (docs/CHAT-PROTOCOL.md: chat.send / chat.stop out, chat.history / chat.event in), and
 // asset upload/download over /assets.
+//
+// Robustness: a heartbeat (`ping` → `pong`) catches half-open sockets, a connect timeout
+// catches a host that accepts but never answers, a circuit breaker stops after
+// BREAKER_ATTEMPTS failed reconnects with a plain `host unreachable · [retry]` card, and the
+// handshake's `protocol` is checked (`ui out of date · [reload]`). The host's held notices
+// (saves failing, a canvas that didn't load, …) arrive in `hello` and as `notice` frames.
 
 import { setUpload } from './dnd';
 import { discoverHost, explicitHost, type HostInfo } from './host';
-import { getState, setState, toast } from './store';
+import { clearNotices, dismissNotice, getState, hideCard, notify, resolveNotice, setState, showCard, toast } from './store';
+import { bootDone, bootSkip, bootStart } from './boot';
 import type { CanvasApp } from './wasm';
 import type { NodeView, Presence } from './types';
 import { applyEvent, applyHistory, applyList, emptyChat, removeChat, selectChat, type ChatState, type Chip } from './chat';
@@ -17,6 +24,37 @@ import { onAppEvent, setAppsBase } from './apps';
 
 /** A send that gets no chat event back within this time means no agent runtime is attached. */
 const RUNTIME_TIMEOUT_MS = 8_000;
+
+/** Sync protocol this UI speaks (crates/host/src/sync.rs `PROTOCOL`). */
+export const PROTOCOL = 2;
+/** Heartbeat: ping after this long without traffic; no answer within PONG_TIMEOUT_MS = dead. */
+const PING_IDLE_MS = 10_000;
+const PONG_TIMEOUT_MS = 5_000;
+const CONNECT_TIMEOUT_MS = 6_000;
+/** Failed reconnects in a row before the circuit breaker stops retrying. */
+const BREAKER_ATTEMPTS = 10;
+/** "reconnecting" shows only when it takes longer than this. */
+const RECONNECT_NOTICE_MS = 1_000;
+
+/** Whether a host's `hello.protocol` doesn't match this UI (an older host without one is fine). */
+export function protocolMismatch(hostProtocol: unknown): boolean {
+  return typeof hostProtocol === 'number' && hostProtocol !== PROTOCOL;
+}
+
+/** View to restore after the next first snapshot (GPU device recovery, a webview reload). */
+let pendingView: { camera?: { x: number; y: number; zoom: number }; selection?: string[] } | null = null;
+export function restoreViewOnBoot(v: typeof pendingView) {
+  pendingView = v;
+}
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    notify('copied');
+  } catch (e) {
+    toast(`copy failed: ${e}`);
+  }
+}
 
 export type ConnState = 'local' | 'connecting' | 'connected' | 'reconnecting';
 
@@ -82,6 +120,16 @@ export class HostSync {
   private presenceTimer = 0;
   private uploaded = new Set<string>();
   private requested = new Set<string>();
+  /** Last frame received (any kind) and the pending heartbeat ping. */
+  private lastRx = 0;
+  private pingAt = 0;
+  private hb = 0;
+  /** Failed connection attempts since the last good snapshot (circuit breaker). */
+  private failures = 0;
+  private noticeTimer = 0;
+  /** `hello.view`: this user's last camera + selection on the host. */
+  private view: { camera?: { x: number; y: number; zoom: number }; selection?: string[] } | null = null;
+  private viewTimer = 0;
 
   constructor(
     private app: CanvasApp,
@@ -107,7 +155,68 @@ export class HostSync {
       get connected() { return self.connected; },
     });
     window.addEventListener('focus', this.onFocus);
+    this.hb = window.setInterval(() => this.beat(), 2_500);
     this.connect();
+  }
+
+  /** Heartbeat: ping when the line has been quiet; no answer in time = a dead socket. */
+  private beat() {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    if (this.pingAt && this.lastRx < this.pingAt) {
+      if (now - this.pingAt > PONG_TIMEOUT_MS) this.dead(ws, `no pong in ${now - this.pingAt} ms`);
+      return;
+    }
+    if (now - this.lastRx > PING_IDLE_MS) {
+      this.pingAt = now;
+      ws.send(JSON.stringify({ type: 'ping', t: now }));
+    }
+  }
+
+  /** Give up on a socket that looks open but isn't (no close handshake to wait for). */
+  private dead(ws: WebSocket, why: string) {
+    if (this.ws !== ws) return;
+    console.warn(`sync: ${why}; reconnecting`);
+    ws.onclose = null;
+    ws.onmessage = null;
+    ws.onopen = null;
+    try {
+      ws.close();
+    } catch {
+      /* already gone */
+    }
+    this.lost(ws);
+  }
+
+  /** Retry now (the breaker card's [retry], or the desktop shell saying the host is back). */
+  retryNow() {
+    hideCard('host-down');
+    this.failures = 0;
+    this.retry = 0;
+    window.clearTimeout(this.timer);
+    if (!this.ws && !this.closed) void this.reconnect();
+  }
+
+  /** The user's camera, for the host to hand back after a webview reload (throttled). */
+  sendView(camera: { x: number; y: number; zoom: number }) {
+    window.clearTimeout(this.viewTimer);
+    this.viewTimer = window.setTimeout(() => this.sendJson({ type: 'view', camera: { x: camera.x, y: camera.y, zoom: camera.zoom } }), 500);
+  }
+
+  /** A notice the host holds (`hello.notices`, `notice` frames). */
+  private hostNotice(n: any) {
+    if (!n || typeof n.key !== 'string') return;
+    const key = `host:${n.key}`;
+    if (n.gone) return dismissNotice(key);
+    const actions = (Array.isArray(n.actions) ? n.actions : [])
+      .filter((a: any) => a?.id && a.id !== 'dismiss')
+      .map((a: any) => ({
+        label: String(a.label ?? a.id),
+        run: () => (a.id === 'copy' ? void copyText(String(n.copy ?? n.text)) : void this.sendJson({ type: 'notice.action', key: n.key, action: a.id })),
+      }));
+    const level = ['ok', 'info', 'error', 'ongoing'].includes(n.level) ? n.level : 'info';
+    notify(String(n.text ?? ''), { key, level, actions, onDismiss: () => this.sendJson({ type: 'notice.action', key: n.key, action: 'dismiss' }) });
   }
 
   private onFocus = () => this.focus();
@@ -116,6 +225,11 @@ export class HostSync {
     window.removeEventListener('focus', this.onFocus);
     this.closed = true;
     window.clearTimeout(this.timer);
+    window.clearInterval(this.hb);
+    window.clearTimeout(this.noticeTimer);
+    window.clearTimeout(this.viewTimer);
+    clearNotices('host:');
+    dismissNotice('conn');
     cancelAnimationFrame(this.anim);
     window.clearTimeout(this.timer2);
     this.ws?.close();
@@ -131,8 +245,19 @@ export class HostSync {
     const ws = new WebSocket(`${this.base('ws')}/sync/${encodeURIComponent(this.project ?? this.canvas)}?${q}`);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    this.lastRx = Date.now();
+    this.pingAt = 0;
+    // A host that accepts the connection but never answers (stopped, wedged).
+    const openTimer = window.setTimeout(() => {
+      if (ws.readyState === WebSocket.CONNECTING) this.dead(ws, 'connect timeout');
+    }, CONNECT_TIMEOUT_MS);
+    ws.onopen = () => {
+      window.clearTimeout(openTimer);
+      this.lastRx = Date.now();
+    };
     let gotSnapshot = false;
     ws.onmessage = (e) => {
+      this.lastRx = Date.now();
       if (typeof e.data === 'string') return this.onEvent(JSON.parse(e.data));
       const bytes = new Uint8Array(e.data as ArrayBuffer);
       if (!gotSnapshot) {
@@ -143,16 +268,38 @@ export class HostSync {
       }
     };
     ws.onclose = () => {
-      if (this.ws !== ws) return;
-      this.ws = null;
-      this.sessions.clear();
-      this.publishPresence();
-      if (this.closed) return;
-      setState({ conn: 'reconnecting' });
-      const delay = Math.min(10_000, 500 * 2 ** this.retry) * (0.75 + Math.random() * 0.5);
-      this.retry = Math.min(this.retry + 1, 6);
-      this.timer = window.setTimeout(() => this.reconnect(), delay);
+      window.clearTimeout(openTimer);
+      this.lost(ws);
     };
+  }
+
+  /** The socket is gone: back off and reconnect, with a "reconnecting" line past ~1 s and
+   *  the circuit breaker after BREAKER_ATTEMPTS failures in a row. */
+  private lost(ws: WebSocket) {
+    if (this.ws !== ws) return;
+    this.ws = null;
+    this.sessions.clear();
+    this.publishPresence();
+    if (this.closed) return;
+    setState({ conn: 'reconnecting' });
+    this.failures++;
+    if (this.bootstrapped && !this.noticeTimer && !getState().notices.some((n) => n.key === 'conn')) {
+      this.noticeTimer = window.setTimeout(() => {
+        this.noticeTimer = 0;
+        if (!this.connected && !this.closed && !getState().cards.some((c) => c.key === 'host-down')) notify('reconnecting to host…', { key: 'conn', level: 'ongoing' });
+      }, RECONNECT_NOTICE_MS);
+    }
+    if (this.failures >= BREAKER_ATTEMPTS) {
+      window.clearTimeout(this.noticeTimer);
+      this.noticeTimer = 0;
+      dismissNotice('conn');
+      // The desktop shell's "host stopped" card says more; don't replace it.
+      if (!getState().cards.some((c) => c.key === 'host-down')) showCard('host-down', 'host unreachable', [{ label: 'retry', run: () => this.retryNow() }]);
+      return;
+    }
+    const delay = Math.min(10_000, 500 * 2 ** this.retry) * (0.75 + Math.random() * 0.5);
+    this.retry = Math.min(this.retry + 1, 6);
+    this.timer = window.setTimeout(() => this.reconnect(), delay);
   }
 
   private async reconnect() {
@@ -171,11 +318,26 @@ export class HostSync {
         // camera comes back; a canvas opened for the first time fits its content.
         loadScene(this.app, bytes, this.key);
         this.bootstrapped = true;
+        // After a webview reload (#recovered) or a GPU device recovery: the camera and
+        // selection the user had (from the host, or handed over in memory).
+        const recovered = location.hash === '#recovered';
+        const v = pendingView ?? (recovered ? this.view : null);
+        pendingView = null;
+        if (recovered) history.replaceState(null, '', location.pathname + location.search);
+        if (v?.camera && Number.isFinite(v.camera.zoom)) this.app.setCamera(v.camera.x, v.camera.y, v.camera.zoom);
+        if (v?.selection?.length) this.app.setSelection(v.selection);
+        if (recovered) notify('reloaded after a webview crash · view restored', { key: 'webview', level: 'ok' });
+        bootDone('project');
       } else {
         // Resync after a reconnect: merge (CRDT), then offline edits flow out.
         this.app.importUpdates(bytes);
       }
       this.retry = 0;
+      this.failures = 0;
+      window.clearTimeout(this.noticeTimer);
+      this.noticeTimer = 0;
+      hideCard('host-down');
+      resolveNotice('conn');
       setState({ conn: 'connected', canvasName: this.app.canvasName(), camera: this.app.camera() });
       this.app.tick();
       this.syncAssets(getState().nodes);
@@ -188,6 +350,15 @@ export class HostSync {
   private onEvent(m: any) {
     switch (m.type) {
       case 'hello': {
+        if (protocolMismatch(m.protocol)) {
+          notify('ui out of date', { key: 'ui-version', level: 'ongoing', actions: [{ label: 'reload', run: () => location.reload() }] });
+          console.warn(`sync protocol ${PROTOCOL}, host speaks ${m.protocol} (host ${m.hostVersion})`);
+        } else dismissNotice('ui-version');
+        // The host's held notices replace ours; a fading success (e.g. "restored …" right
+        // before this reconnect) stays until it fades.
+        setState((s) => ({ notices: s.notices.filter((n) => !n.key.startsWith('host:') || n.level === 'ok' || n.level === 'info') }));
+        for (const n of Array.isArray(m.notices) ? m.notices : []) this.hostNotice(n);
+        this.view = m.view ?? null;
         this.me = m.session;
         this.sessions = new Map((m.sessions as SessionInfo[]).map((s) => [s.id, s]));
         this.onClaims(m.claims ?? []);
@@ -197,6 +368,15 @@ export class HostSync {
       }
       case 'app':
         onAppEvent(m);
+        break;
+      case 'pong':
+        break;
+      case 'notice':
+        this.hostNotice(m.notice);
+        break;
+      case 'canvas.reset':
+        // The canvas file was replaced (restored from a backup): load it from scratch.
+        this.bootstrapped = false;
         break;
       case 'chat.history':
         setState((s) => ({ chat: applyHistory(s.chat, m.chats ?? []) }));
@@ -257,6 +437,8 @@ export class HostSync {
         break;
       case 'error': {
         const msg = String(m.message ?? '');
+        // Edits to a canvas that can't be written: the held notice already says why.
+        if (m.scope === 'blocked') break;
         // A host without chat routing rejects chat frames: no agent runtime to talk to.
         if (/chat/i.test(msg)) {
           setState((s) => ({ chat: { ...s.chat, creating: false, runtime: s.chat.pending ? 'missing' : s.chat.runtime } }));
@@ -600,13 +782,17 @@ function startSync(s: HostSync) {
  *  last used or most recent), else the host's single canvas. Returns whether a host was
  *  found. */
 export async function connectHost(app: CanvasApp, canvas: string, actor: { id: string; name: string }): Promise<boolean> {
+  bootStart('host');
   const host = await discoverHost();
   if (!host) {
+    bootSkip('host');
     setState({ conn: 'local' });
     return false;
   }
+  bootDone('host');
   current?.stop();
   setState({ hostAddr: host.addr, conn: 'connecting' });
+  bootStart('project');
   const project = await bootProject(host);
   setState({ project });
   if (project) {

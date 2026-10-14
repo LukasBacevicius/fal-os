@@ -27,6 +27,9 @@ import { openFocus, pointerPressed } from '../video';
 import { openMenuAt } from './ContextMenu';
 import { dragOut, prepare } from '../out';
 import { isDesktop } from '../desktop';
+import { bootDone, bootStart } from '../boot';
+import { onRecreate } from '../gpu';
+import { restoreViewOnBoot } from '../sync';
 
 /** The local user. The host suffixes the actor id if several browsers connect. */
 const ME = { id: 'you', name: 'you' };
@@ -72,8 +75,10 @@ export function Stage() {
     el.height = initial[3];
     el.style.width = `${initial[2] / initial[4]}px`;
     el.style.height = `${initial[3] / initial[4]}px`;
+    bootStart('wasm');
     createCanvasApp(el, { actor: ME, canvas: { id: CANVAS_ID, name: CANVAS_ID } })
       .then(async (a) => {
+        bootDone('wasm');
         if (disposed) return;
         created = a;
         attach(a);
@@ -86,7 +91,29 @@ export function Stage() {
         setState({ loading: false });
         (window as any).falos = a; // handy for debugging and agents driving the page
       })
-      .catch((e) => setState({ error: String(e?.message ?? e), loading: false }));
+      .catch((e) => {
+        bootDone('wasm');
+        setState({ error: String(e?.message ?? e), loading: false });
+      });
+    // WebGPU device lost: a new app on a new device, same canvas element, same scene.
+    onRecreate(async ({ camera, selection, snapshot }) => {
+      const a = await createCanvasApp(el, { actor: ME, canvas: { id: CANVAS_ID, name: CANVAS_ID } });
+      if (disposed) return;
+      created = a;
+      attach(a);
+      a.setTheme(theme());
+      a.resizePx(...canvasSizes(wrap.current!));
+      setState({ app: a });
+      restoreViewOnBoot({ camera, selection });
+      const hosted = await connectHost(a, CANVAS_ID, ME);
+      if (!hosted && snapshot) {
+        a.loadSnapshot(snapshot, false);
+        a.setCamera(camera.x, camera.y, camera.zoom);
+        a.setSelection(selection);
+      }
+      a.start();
+      (window as any).falos = a;
+    });
     return () => {
       // Remounts (e.g. dev hot reload) get a fresh app; stop this one's render loop so two
       // GPU devices never present to the same canvas.

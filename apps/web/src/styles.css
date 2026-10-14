@@ -196,19 +196,58 @@ button, textarea, select, input { font: inherit; color: inherit; }
   pointer-events: none;
 }
 
-.toast {
+/* Notice stack (replaces the single toast): one-line notices, bottom centre, newest last. */
+.notices {
   position: fixed;
   left: 50%;
   bottom: 12px;
   transform: translateX(-50%);
   max-width: 70vw;
-  padding: 4px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  z-index: 10;
+  pointer-events: none;
+}
+.notice {
+  max-width: 70vw;
+  padding: 2px 10px;
   background: var(--panel);
   border: 1px solid var(--line);
-  color: var(--text);
-  z-index: 10;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: auto;
   animation: fade 120ms linear;
 }
+.notice-error, .notice-ongoing { color: var(--text); }
+.notice-action { margin-left: 1.5ch; }
+.notices .link.dim, .cards .link.dim { color: var(--dim); }
+.notices .link.faint { color: var(--faint); }
+/* Cards: something stopped and needs a decision; top centre, above the canvas. */
+.cards {
+  position: fixed;
+  left: 50%;
+  top: 30%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 30;
+}
+.card {
+  padding: 6px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--text);
+  max-width: 80vw;
+  animation: fade 120ms linear;
+}
+/* GPU device lost: the last frame stays, quietly. */
+.gpu-frame { position: absolute; left: 0; top: 0; pointer-events: none; }
+.gpu-note { position: absolute; right: 10px; top: 8px; color: var(--faint); pointer-events: none; }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
 .zoom-ctl { display: flex; gap: 0.8ch; pointer-events: auto; color: var(--faint); transition: color 120ms linear; }
@@ -682,7 +721,6 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .menu-sub .menu-row { color: var(--text); }
 .menu-sub .menu-row:hover { color: var(--bg); }
 .menu-sep { border-top: 1px solid var(--line); }
-.toast-action { margin-left: 1.5ch; }
 .grip { cursor: grab; }
 
 .export { background: var(--bg); border: 1px solid var(--line); width: min(460px, 92vw); padding: 6px 10px 8px; display: flex; flex-direction: column; gap: 3px; }
@@ -714,7 +752,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .layers-chips { display: flex; flex-wrap: wrap; gap: 0 1ch; padding: 2px 8px; border-bottom: 1px solid var(--line); font-size: 11px; }
 .props-roles { display: flex; flex-wrap: wrap; gap: 0 1ch; }
 .layers-chips .link.faint, .props-roles .link.faint { color: var(--faint); }
-.export .link.dim, .file-card .link.dim, .files .link.faint, .toast .link.dim { color: var(--dim); }
+.export .link.dim, .file-card .link.dim, .files .link.faint { color: var(--dim); }
 .props-chain { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .props-stale { color: var(--text); }
 

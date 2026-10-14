@@ -16,11 +16,10 @@ import { ExportPanel } from './components/ExportPanel';
 import { Setup, maybeOpenSetup } from './components/Setup';
 import { BrandSync } from './components/Mark';
 import { DragThumb } from './components/DropLayer';
+import { Cards, Notices } from './components/Notices';
 
 /** Canvas + chat. Nothing else unless something needs attention. */
 export function App() {
-  const toast = useStore((s) => s.toast);
-  const toastActions = useStore((s) => s.toastActions);
   const menu = useStore((s) => s.menu);
   const chatOpen = useStore((s) => s.chatOpen);
   const overlay = useStore((s) => s.overlay);
@@ -61,14 +60,8 @@ export function App() {
       <ActivitySync />
       <BrandSync />
       <DragThumb />
-      {toast && (
-        <div className="toast" role="status">
-          {toast}
-          {toastActions.map((a) => (
-            <button key={a.label} className="link dim toast-action" onClick={a.run}>[{a.label}]</button>
-          ))}
-        </div>
-      )}
+      <Cards />
+      <Notices />
     </div>
   );
 }

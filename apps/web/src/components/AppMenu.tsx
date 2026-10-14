@@ -4,7 +4,8 @@
 // clicks teach keys.
 
 import { useEffect, useRef, useState } from 'react';
-import { getState, setState, useStore } from '../store';
+import { getState, setState, toast, useStore } from '../store';
+import { invoke } from '../desktop';
 import { MOD, newChat, toggleChat, toggleOutline } from '../keys';
 import { continueInAgent, toggleHistory } from '../chatActions';
 import { openLibrary } from '../library';
@@ -47,6 +48,7 @@ function rows(): Row[] {
     { label: 'continue in Codex', hint: 'copy cmd', run: () => continueInAgent('codex') },
     { label: 'connect agent…', hint: 'mcp', run: () => setState({ overlay: 'connect' }) },
     ...(isDesk() ? [{ label: 'setup…', hint: 'app', run: () => setState({ overlay: 'setup' as const }) }] : []),
+    ...(isDesk() ? [{ label: 'view logs', hint: 'finder', run: () => void invoke('open_logs').catch((e) => toast(`open logs failed: ${e}`)) }] : []),
     { label: 'undo', hint: `${MOD}Z`, run: () => s.app?.undo(), sep: true },
     { label: 'redo', hint: `${MOD}⇧Z`, run: () => s.app?.redo() },
     { label: `theme: ${light ? 'light' : 'dark'}`, hint: light ? '→ dark' : '→ light', run: () => setTheme(light ? 'dark' : 'light', s.app), sep: true },
