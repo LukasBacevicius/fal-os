@@ -364,6 +364,10 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .tabs-bar { height: 28px; flex: none; display: flex; align-items: stretch; border-bottom: 1px solid var(--line); }
 .tabs { flex: 1; min-width: 0; display: flex; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
+/* More tabs past an edge: that edge fades out (the strip scrolls with the wheel). */
+.tabs.more-l { -webkit-mask-image: linear-gradient(to right, transparent, #000 20px); mask-image: linear-gradient(to right, transparent, #000 20px); }
+.tabs.more-r { -webkit-mask-image: linear-gradient(to left, transparent, #000 20px); mask-image: linear-gradient(to left, transparent, #000 20px); }
+.tabs.more-l.more-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 20px, #000 calc(100% - 20px), transparent); mask-image: linear-gradient(to right, transparent, #000 20px, #000 calc(100% - 20px), transparent); }
 .tab {
   flex: none; max-width: 132px; display: flex; align-items: center; padding: 0 8px 0 10px;
   color: var(--dim); white-space: nowrap; cursor: pointer; outline: none; border-right: 1px solid var(--line);

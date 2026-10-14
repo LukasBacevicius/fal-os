@@ -59,6 +59,21 @@ export function ChatTabs() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [drag, setDrag] = useState<{ id: string; over: string | null; after: boolean } | null>(null);
   const strip = useRef<HTMLDivElement>(null);
+  // Which edges have more tabs past them (shown as a fade).
+  const [more, setMore] = useState('');
+  const measure = () => {
+    const el = strip.current;
+    if (!el) return;
+    const m = `${el.scrollLeft > 1 ? ' more-l' : ''}${el.scrollLeft + el.clientWidth < el.scrollWidth - 1 ? ' more-r' : ''}`;
+    setMore((x) => (x === m ? x : m));
+  };
+  useEffect(() => {
+    const el = strip.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     const r = (e: Event) => setRenaming((e as CustomEvent).detail);
@@ -69,6 +84,7 @@ export function ChatTabs() {
   // Keep the active tab in view.
   useLayoutEffect(() => {
     strip.current?.querySelector<HTMLElement>('.tab.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    measure();
   }, [chat.active, list.length]);
 
   const drop = () => {
@@ -82,7 +98,7 @@ export function ChatTabs() {
 
   return (
     <div className="tabs-bar">
-      <div className="tabs" ref={strip} onWheel={(e) => { if (strip.current && Math.abs(e.deltaY) > Math.abs(e.deltaX)) strip.current.scrollLeft += e.deltaY; }}>
+      <div className={`tabs${more}`} ref={strip} onScroll={measure} onWheel={(e) => { if (strip.current && Math.abs(e.deltaY) > Math.abs(e.deltaX)) strip.current.scrollLeft += e.deltaY; }}>
         {list.map((id, i) => {
           const running = isRunning(chat, id);
           const on = id === chat.active && view === 'chat';
