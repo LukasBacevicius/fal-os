@@ -185,6 +185,8 @@ export function installKeys(): () => void {
     };
 
     if (k === (isMac ? 'Meta' : 'Control') && !getState().modHeld) setState({ modHeld: true });
+    // Esc with a context menu open closes the menu only (the selection stays).
+    if (k === 'Escape' && getState().menu) return done(), setState({ menu: null });
     // The canvas preview owns the keyboard.
     if (getState().preview) {
       if (previewKey(e)) done();
