@@ -1,11 +1,8 @@
 /target
-/web/pkg
 .DS_Store
-/web/bench-results.jsonl
 /apps/desktop/src-tauri/target
 /apps/desktop/src-tauri/gen
 /.claude/worktrees
-/web/media
 node_modules
 /apps/web/dist
 /apps/web/src/wasm/pkg
