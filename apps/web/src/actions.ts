@@ -7,6 +7,7 @@ import { getState, toast } from './store';
 import { worldRects, type Rect } from './geometry';
 import { importFiles } from './controller';
 import { importFigma, isFigmaScene } from './figma';
+import { nativeClipboardFiles } from './desktop';
 import type { NodeView } from './types';
 
 const ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -147,7 +148,7 @@ async function asyncClipboardImages(): Promise<File[]> {
 /** Paste, in priority order: a Figma scene (native import: frames, text, images, vectors),
  *  image data (files, `<img>` data URLs, or the async clipboard) as image nodes, our own
  *  copied nodes, and plain text as a note. Lands at the cursor (`at`) or the view center. */
-export async function paste(e: ClipboardEvent, at: [number, number] | null) {
+export async function paste(e: ClipboardEvent, at: [number, number] | null, opts: { native?: boolean } = {}) {
   const { app } = getState();
   if (!app) return;
   e.preventDefault();
@@ -169,6 +170,15 @@ export async function paste(e: ClipboardEvent, at: [number, number] | null) {
     if (v?.format === 'falos-nodes') clip = v;
   } catch {
     /* not ours */
+  }
+  // Desktop: Finder-copied files and screenshot/image data come from the native pasteboard
+  // (the web view only hands over the file name as text, or nothing).
+  if (!clip && opts.native !== false) {
+    const native = await nativeClipboardFiles();
+    if (native.length) {
+      await importFiles(native, at ?? undefined);
+      return;
+    }
   }
   if (!clip && !text && !html && lastClip) clip = lastClip;
   if (clip) {
@@ -325,7 +335,8 @@ export async function copySelection() {
 export async function pasteFromClipboard(at: [number, number] | null) {
   const { app } = getState();
   if (!app) return;
-  const files = await asyncClipboardImages();
+  const native = await nativeClipboardFiles();
+  const files = native.length ? native : await asyncClipboardImages();
   if (files.length) {
     await importFiles(files, at ?? undefined);
     return;
@@ -351,4 +362,31 @@ export function deleteSelection() {
 export function zoomBy(f: number) {
   const { app, camera } = getState();
   app?.zoomTo(Math.max(0.02, Math.min(64, camera.zoom * f)));
+}
+
+/** Non-file drops (an image dragged out of a browser, a link, text): read synchronously, then
+ *  image URLs are fetched into files and anything else goes through paste (Figma, notes). */
+export async function dropData(dt: DataTransfer, at: [number, number], parent: string | null) {
+  const html = dt.getData('text/html');
+  const uris = dt.getData('text/uri-list').split(/\r?\n/).filter((l) => l && !l.startsWith('#'));
+  const text = dt.getData('text/plain');
+  const src = /<img[^>]+src="([^"]+)"/i.exec(html)?.[1] ?? uris.find((u) => /\.(png|jpe?g|gif|webp|avif|svg)(\?|$)/i.test(u));
+  if (src) {
+    try {
+      const r = await fetch(src);
+      const b = await r.blob();
+      if (r.ok && /^(image|video|audio)\//.test(b.type)) {
+        const name = decodeURIComponent(new URL(src, location.href).pathname.split('/').pop() || 'dropped') || 'dropped';
+        await importFiles([new File([b], name, { type: b.type })], at, { parent });
+        return;
+      }
+    } catch {
+      /* cross-origin / offline: fall through to text */
+    }
+  }
+  const copy = new DataTransfer();
+  if (html) copy.setData('text/html', html);
+  if (text || uris[0]) copy.setData('text/plain', text || uris[0]);
+  if (!html && !text && !uris.length) return;
+  await paste(new ClipboardEvent('paste', { clipboardData: copy }), at, { native: false });
 }

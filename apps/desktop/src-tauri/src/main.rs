@@ -17,6 +17,7 @@
 //! `open_with_list`, `open_with`, `reveal`, `materialize` (see `out.rs`).
 
 mod brand;
+mod clip;
 mod notify;
 mod out;
 mod tray;
@@ -317,7 +318,10 @@ fn main() {
             setup_run,
             setup_task,
             setup_cancel,
-            set_working
+            set_working,
+            clip::clipboard_files,
+            clip::read_clip_file,
+            clip::clipboard_text
         ])
         .setup(move |app| {
             // Packaged app: start the host (and through it the agent runtime) off the main thread.
@@ -334,6 +338,9 @@ fn main() {
             let mut win = WebviewWindowBuilder::new(app, "main", url)
                 .title("fal-os")
                 .inner_size(1440.0, 900.0)
+                // Let drops reach the page as HTML5 drag events with File objects (Tauri's own
+                // handler would swallow them; the canvas does its own drop import).
+                .disable_drag_drop_handler()
                 .visible(!hidden);
             if let Ok(endpoint) = std::env::var("FALOS_PROBE") {
                 let endpoint = format!("{endpoint:?}"); // Debug-quoting yields a valid JS string literal

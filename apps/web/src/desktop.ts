@@ -32,3 +32,26 @@ export const desktop = {
   /** A folder picked with the native dialog (null = cancelled). */
   chooseFolder: () => invoke<string | null>('plugin:dialog|open', { options: { directory: true, multiple: false } }),
 };
+
+const MIME: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', heic: 'image/heic',
+  tif: 'image/tiff', tiff: 'image/tiff', svg: 'image/svg+xml', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+  m4v: 'video/x-m4v', mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aif: 'audio/aiff', aiff: 'audio/aiff',
+  flac: 'audio/flac', pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', json: 'application/json',
+};
+
+/** Files on the system clipboard (Finder-copied files, or image data as a PNG), read natively:
+ *  WKWebView's paste event doesn't reliably carry them. Empty on the web build. */
+export async function nativeClipboardFiles(): Promise<File[]> {
+  if (!isDesktop()) return [];
+  try {
+    const list = await invoke<{ path: string; name: string }[]>('clipboard_files');
+    return await Promise.all(list.map(async ({ path, name }) => {
+      const buf: ArrayBuffer = await invoke('read_clip_file', { path });
+      const ext = name.split('.').pop()?.toLowerCase() ?? '';
+      return new File([buf], name, { type: MIME[ext] ?? '' });
+    }));
+  } catch {
+    return [];
+  }
+}

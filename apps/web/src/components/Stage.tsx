@@ -1,3 +1,4 @@
+import { dropData } from '../actions';
 import { useEffect, useRef } from 'react';
 import { ASSET_MIME, libraryDrop } from '../library';
 import { dnd, endDrag, filesSession, startDrag } from '../dnd';
@@ -286,7 +287,7 @@ export function Stage() {
     endDrag();
     if (libraryDrop(e, canvas.current!.getBoundingClientRect(), frame)) return;
     const files = Array.from(e.dataTransfer.files);
-    if (!files.length) return;
+    if (!files.length) return void dropData(e.dataTransfer, p, frame);
     await importFiles(files, p, { parent: frame });
   };
 
@@ -297,10 +298,11 @@ export function Stage() {
       onDragOver={(e) => {
         const types = e.dataTransfer.types;
         const lib = types.includes(ASSET_MIME);
-        if (!lib && !types.includes('Files')) return;
+        const other = types.includes('text/uri-list') || types.includes('text/html') || types.includes('text/plain');
+        if (!lib && !types.includes('Files') && !other) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'copy';
-        if (!dnd().session) startDrag(lib ? { source: 'library', items: [{ w: 512, h: 512, kind: 'image' }] } : filesSession(e.dataTransfer));
+        if (!dnd().session && (lib || types.includes('Files'))) startDrag(lib ? { source: 'library', items: [{ w: 512, h: 512, kind: 'image' }] } : filesSession(e.dataTransfer));
         const p = local(e);
         dropOver(p, app?.frameAt(p[0], p[1]) ?? null);
       }}
