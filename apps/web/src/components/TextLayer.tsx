@@ -103,6 +103,9 @@ function Editor({ node }: { node: NodeView }) {
       onBlur={() => {
         commit();
         setState({ editing: null });
+        // A note left empty (N or double-click, then Esc) leaves no blank box behind.
+        const { app } = getState();
+        if (app && node.kind === 'note' && !ref.current!.value.trim() && getState().nodes.some((n) => n.id === node.id)) app.apply({ op: 'delete', id: node.id });
       }}
       onKeyDown={(e) => {
         if (e.key === 'Escape') {
