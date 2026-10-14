@@ -1,6 +1,6 @@
 // Chat actions shared by the panel, the tabs, the selection prompt, the palette and keys.
 
-import { getState, setState, toast } from './store';
+import { getState, setState, toast, type State } from './store';
 import { hostSync } from './sync';
 import { isExternal, selectChat, tabs, type Chip } from './chat';
 
@@ -86,9 +86,57 @@ export function continueInAgent(agent: 'claude' | 'codex', open = false): boolea
 
 export const DRIVERS = ['opus', 'fal', 'codex'] as const;
 
-/** ⌘. / the composer toggle: which agent drives the next message. */
-export function setDriver(d?: (typeof DRIVERS)[number]) {
-  const next = d ?? DRIVERS[(DRIVERS.indexOf(getState().driver) + 1) % DRIVERS.length];
+type Driver = (typeof DRIVERS)[number];
+
+/** The capability each driver needs (CHAT-PROTOCOL.md, Capabilities). */
+const NEEDS: Record<Driver, string> = { opus: 'claude', fal: 'fal-agent', codex: 'codex' };
+export const ROLE: Record<Driver, string> = { opus: 'claude director', fal: 'fal agent', codex: 'openai codex' };
+
+type Caps = { missing: { name: string; fix?: string }[] } | null;
+let memo: { threads: unknown; active: string | null; caps: Caps } | null = null;
+
+/** The latest `capabilities` event: the active chat's first, else any chat's (memoized on the
+ *  threads object, so store updates elsewhere cost nothing). */
+export function latestCaps(s: State): Caps {
+  const { threads, active } = s.chat;
+  if (memo && memo.threads === threads && memo.active === active) return memo.caps;
+  const caps = scanCaps(threads, active);
+  memo = { threads, active, caps };
+  return caps;
+}
+
+function scanCaps(threads: State['chat']['threads'], active: string | null): Caps {
+  const ids = active ? [active, ...Object.keys(threads).filter((id) => id !== active)] : Object.keys(threads);
+  for (const id of ids) {
+    const ev = threads[id]?.events;
+    if (!ev) continue;
+    for (let i = ev.length - 1; i >= 0; i--) {
+      const e = ev[i] as { kind: string; missing?: unknown };
+      if (e.kind === 'capabilities') {
+        const missing = (Array.isArray(e.missing) ? e.missing : []).map((m: any) =>
+          typeof m === 'string' ? { name: m } : { name: String(m?.name ?? ''), fix: m?.fix ? String(m.fix) : undefined });
+        return { missing };
+      }
+    }
+  }
+  return null;
+}
+
+/** Why a driver can't run right now (null = available or unknown). */
+export function reasonOf(caps: Caps, d: Driver): string | null {
+  const m = caps?.missing.find((x) => x.name === NEEDS[d]);
+  if (!m) return null;
+  return m.fix ? m.fix.replace(/`/g, '') : 'unavailable';
+}
+
+/** ⌘. / the composer toggle: which agent drives the next message. Cycling skips drivers
+ *  that can't run here (e.g. `fal` without a fal key); the picker can still choose them. */
+export function setDriver(d?: Driver) {
+  const s = getState();
+  const caps = latestCaps(s);
+  const at = DRIVERS.indexOf(s.driver);
+  const order = [1, 2].map((i) => DRIVERS[(at + i) % DRIVERS.length]);
+  const next = d ?? order.find((x) => !reasonOf(caps, x)) ?? order[0];
   try {
     localStorage.setItem('falos.driver', next);
   } catch {

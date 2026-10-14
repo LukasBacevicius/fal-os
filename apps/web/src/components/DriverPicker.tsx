@@ -1,50 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { useStore, type State } from '../store';
-import { DRIVERS, setDriver } from '../chatActions';
+import { useStore } from '../store';
+import { DRIVERS, latestCaps, reasonOf, ROLE, setDriver } from '../chatActions';
 import { MOD } from '../keys';
 
 type Driver = (typeof DRIVERS)[number];
-
-/** The capability each driver needs (CHAT-PROTOCOL.md, Capabilities). */
-const NEEDS: Record<Driver, string> = { opus: 'claude', fal: 'fal-agent', codex: 'codex' };
-const ROLE: Record<Driver, string> = { opus: 'claude director', fal: 'fal agent', codex: 'openai codex' };
-
-type Caps = { missing: { name: string; fix?: string }[] } | null;
-let memo: { threads: unknown; active: string | null; caps: Caps } | null = null;
-
-/** The latest `capabilities` event: the active chat's first, else any chat's (memoized on the
- *  threads object, so store updates elsewhere cost nothing). */
-function latestCaps(s: State): Caps {
-  const { threads, active } = s.chat;
-  if (memo && memo.threads === threads && memo.active === active) return memo.caps;
-  const caps = scanCaps(threads, active);
-  memo = { threads, active, caps };
-  return caps;
-}
-
-function scanCaps(threads: State['chat']['threads'], active: string | null): Caps {
-  const ids = active ? [active, ...Object.keys(threads).filter((id) => id !== active)] : Object.keys(threads);
-  for (const id of ids) {
-    const ev = threads[id]?.events;
-    if (!ev) continue;
-    for (let i = ev.length - 1; i >= 0; i--) {
-      const e = ev[i] as { kind: string; missing?: unknown };
-      if (e.kind === 'capabilities') {
-        const missing = (Array.isArray(e.missing) ? e.missing : []).map((m: any) =>
-          typeof m === 'string' ? { name: m } : { name: String(m?.name ?? ''), fix: m?.fix ? String(m.fix) : undefined });
-        return { missing };
-      }
-    }
-  }
-  return null;
-}
-
-/** Why a driver can't run right now (null = available or unknown). */
-function reasonOf(caps: Caps, d: Driver): string | null {
-  const m = caps?.missing.find((x) => x.name === NEEDS[d]);
-  if (!m) return null;
-  return m.fix ? m.fix.replace(/`/g, '') : 'unavailable';
-}
 
 /** The composer's driver dropdown: `opus ▾` opens a mono list of the drivers (upwards, the
  *  composer sits at the bottom). ↑/↓ move, ⏎ / space pick, esc / tab close, a first letter
