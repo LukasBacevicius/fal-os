@@ -120,6 +120,10 @@ export function chatColor(s: ChatState, chat: string | null | undefined): string
 
 export const isExternal = (chat: string) => chat.startsWith('ext:');
 
+/** The composer draft's key: the chat, or (no chat yet) a new chat of this project, so a
+ *  draft typed in one project's empty composer doesn't follow into another. */
+export const draftKey = (chat: string | null, project: string | null) => chat ?? `new:${project ?? ''}`;
+
 /** Host `chat.list`: replaces the metadata; unknown chats join the order (newest last). */
 export function applyList(s: ChatState, chats: ChatMeta[]): ChatState {
   const meta: Record<string, ChatMeta> = {};

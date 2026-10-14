@@ -308,7 +308,8 @@ const need = () => {
   return ws;
 };
 
-/** Creates a project and opens it: an empty canvas with the composer focused. */
+/** Creates a project and opens it: an empty canvas with the keyboard on it (the empty state
+ *  says "press N"; ⌘L / / reach the chat). */
 export async function createProject(name: string): Promise<string | null> {
   const w = need();
   if (!w) return null;
@@ -319,7 +320,10 @@ export async function createProject(name: string): Promise<string | null> {
   }
   switchProject(id);
   setState({ chatOpen: true, chatView: 'chat', subView: null });
-  requestAnimationFrame(() => window.dispatchEvent(new Event('falos:focus-chat')));
+  requestAnimationFrame(() => {
+    const el = document.activeElement as HTMLElement | null;
+    if (el && el !== document.body) el.blur();
+  });
   return id;
 }
 

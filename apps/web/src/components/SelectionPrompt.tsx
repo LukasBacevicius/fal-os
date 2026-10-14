@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { getState, setState, useStore } from '../store';
 import { worldRects } from '../geometry';
-import { addChips, chatTitle, isExternal, type Chip } from '../chat';
+import { addChips, chatTitle, draftKey, isExternal, type Chip } from '../chat';
 import { sendTo } from '../chatActions';
 import { MOD } from '../keys';
 import { Chips } from './Chips';
@@ -117,7 +117,7 @@ export function SelectionPrompt() {
     if (sendTo(to, v, chips)) done();
   };
   const toPanel = () => {
-    const target = current ?? '';
+    const target = draftKey(current, getState().project);
     setState((s) => ({
       chatOpen: true,
       chatView: 'chat',

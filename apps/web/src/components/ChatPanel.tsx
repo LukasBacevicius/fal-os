@@ -3,7 +3,7 @@ import { getState, setState, useStore } from '../store';
 import { hostSync } from '../sync';
 import { addSelectionToChat, attachFiles, emptySpot, pickFiles } from '../controller';
 import { ASSET_MIME, draggedShas, placeMany } from '../library';
-import { addChips, agentLine, chatColor, chatTitle, groupTurns, isExternal, slug, transcript, type Chip, type Transcript } from '../chat';
+import { addChips, agentLine, chatColor, chatTitle, draftKey, groupTurns, isExternal, slug, transcript, type Chip, type Transcript } from '../chat';
 import { sendChatMessage, setDriver, steerQueued, steerText } from '../chatActions';
 import { toast } from '../store';
 import { Chips } from './Chips';
@@ -42,12 +42,13 @@ function Composer({ running, readOnly, question, agent, queued }: {
   }, [chat.active, chatDriver]);
   const nodes = useStore((s) => s.nodes);
   const selection = useStore((s) => s.selection);
-  const draftKey = chat.active ?? '';
-  const text = useStore((s) => s.drafts[draftKey] ?? '');
+  const project = useStore((s) => s.project);
+  const key = draftKey(chat.active, project);
+  const text = useStore((s) => s.drafts[key] ?? '');
   const [caret, setCaret] = useState(0);
   const [pick, setPick] = useState(0);
   const input = useRef<HTMLTextAreaElement>(null);
-  const setText = (v: string) => setState((s) => ({ drafts: { ...s.drafts, [draftKey]: v } }));
+  const setText = (v: string) => setState((s) => ({ drafts: { ...s.drafts, [key]: v } }));
 
   useEffect(() => {
     const focus = () => input.current?.focus();
