@@ -4,7 +4,7 @@
 // transaction = one undo step, attributed to the local actor) or the camera API.
 
 import { getState, toast } from './store';
-import { worldRects, type Rect } from './geometry';
+import { duplicateOffset, worldRects, type Rect } from './geometry';
 import { importFiles } from './controller';
 import { importFigma, isFigmaScene } from './figma';
 import { invoke, isDesktop, nativeClipboardFiles } from './desktop';
@@ -92,9 +92,24 @@ export function restoreNodes(clip: Clip): string[] {
   return pasteClip(clip, [0, 0]);
 }
 
+/** The last ⌘D: the source's box and the copies. */
+let lastDup: { copies: string[]; from: Rect } | null = null;
+
+function boxOf(ids: string[]): Rect | null {
+  const rects = worldRects(getState().nodes);
+  const rs = ids.map((id) => rects.get(id)).filter((r): r is Rect => !!r);
+  if (!rs.length) return null;
+  const x = Math.min(...rs.map((r) => r[0])), y = Math.min(...rs.map((r) => r[1]));
+  return [x, y, Math.max(...rs.map((r) => r[0] + r[2])) - x, Math.max(...rs.map((r) => r[1] + r[3])) - y];
+}
+
 export function duplicate() {
-  const clip = clipOf(getState().selection);
-  if (clip) pasteClip(clip, [24, 24]);
+  const sel = getState().selection;
+  const clip = clipOf(sel);
+  if (!clip) return;
+  const from = boxOf(sel);
+  const copies = pasteClip(clip, duplicateOffset(sel, lastDup, from));
+  lastDup = copies.length && from ? { copies, from } : null;
 }
 
 /** ⌘C (copy event): the selected subtrees as JSON text on the clipboard. */

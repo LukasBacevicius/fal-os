@@ -17,6 +17,7 @@ import { openLibrary } from './library';
 import { openPreview, previewable, previewKey } from './preview';
 import { copyFiles, openExport } from './out';
 import { blurApp, focusApp, installAppMessages } from './apps';
+import { phys } from './hotkeys';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 export const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -148,12 +149,13 @@ export function toggleChat() {
   setState((s) => ({ chatOpen: !s.chatOpen }));
 }
 
-/** Enter on the canvas: edit a note, or zoom to the selected media. */
+/** Enter on the canvas: edit a note, open media, or zoom to it. Frames and groups fall
+ *  through to the engine, where ⏎ selects their children. */
 function enter(): boolean {
   const { app, selection, nodes } = getState();
   if (!app || selection.length !== 1) return false;
   const n = nodes.find((x) => x.id === selection[0]);
-  if (!n) return false;
+  if (!n || n.kind === 'frame' || n.kind === 'group') return false;
   if (n.kind === 'note' || n.kind === 'text') editNode(n.id);
   else if (n.kind === 'app') focusApp(n.id);
   else if (n.kind === 'video' && n.props.asset) openFocus(n.id);
@@ -171,6 +173,15 @@ function atCursor(): [number, number] {
   return pointer.at ?? [c.width / 2, c.height / 2];
 }
 
+/** A modifier went down or up without the pointer moving: the engine re-evaluates the drag
+ *  (⇧ axis lock, ⌘ no snapping) and the hover (⌥ distances) at the same spot. */
+function modifiers(e: KeyboardEvent) {
+  if (e.key !== 'Shift' && e.key !== 'Alt' && e.key !== 'Meta' && e.key !== 'Control') return;
+  const { app } = getState();
+  if (!app || !pointer.at) return;
+  app.pointerMove(pointer.at[0], pointer.at[1], e.shiftKey, e.altKey, isMac ? e.metaKey : e.ctrlKey);
+}
+
 // ---- the handler ---------------------------------------------------------------------------
 
 export function installKeys(): () => void {
@@ -185,6 +196,7 @@ export function installKeys(): () => void {
     };
 
     if (k === (isMac ? 'Meta' : 'Control') && !getState().modHeld) setState({ modHeld: true });
+    modifiers(e);
     // Esc with a context menu open closes the menu only (the selection stays).
     if (k === 'Escape' && getState().menu) return done(), setState({ menu: null });
     // The canvas preview owns the keyboard.
@@ -209,13 +221,13 @@ export function installKeys(): () => void {
     // Global (also while typing).
     if (mod && !e.shiftKey && (k === 'k' || k === 'K')) return done(), setState({ overlay: overlay === 'palette' ? null : 'palette' });
     if (mod && !e.shiftKey && !e.altKey && (k === 'o' || k === 'O')) return done(), openPicker();
-    if (mod && e.shiftKey && (k === '\\' || k === '|')) return done(), toggleOutline();
+    if (mod && e.shiftKey && (k === '\\' || k === '|' || phys(e, '|', 'Backslash'))) return done(), toggleOutline();
     if (mod && e.shiftKey && e.code === 'KeyA') return done(), openLibrary('panel');
     if (mod && e.shiftKey && e.code === 'KeyL') return done(), openLibrary('full');
-    if (mod && k === '\\') return done(), toggleChat();
+    if (mod && phys(e, '\\', 'Backslash')) return done(), toggleChat();
     if ((mod || ctrl) && !e.shiftKey && (k === 'n' || k === 'N')) return done(), newChat();
-    if ((mod || ctrl) && e.shiftKey && (k === '[' || k === '{')) return done(), switchChat('prev');
-    if ((mod || ctrl) && e.shiftKey && (k === ']' || k === '}')) return done(), switchChat('next');
+    if ((mod || ctrl) && e.shiftKey && (k === '{' || phys(e, '[', 'BracketLeft'))) return done(), switchChat('prev');
+    if ((mod || ctrl) && e.shiftKey && (k === '}' || phys(e, ']', 'BracketRight'))) return done(), switchChat('next');
     if ((mod || ctrl) && !e.shiftKey && !e.altKey && /^[1-9]$/.test(k)) return done(), switchChat(Number(k) - 1);
     if (mod && !e.shiftKey && (k === 'i' || k === 'I')) return done(), focusChat();
     if ((mod || ctrl) && !e.shiftKey && (k === 'y' || k === 'Y')) return done(), toggleHistory();
@@ -226,14 +238,14 @@ export function installKeys(): () => void {
 
     // Canvas.
     if (!app) return;
-    if (k === '?' || (k === '/' && e.shiftKey)) return done(), setState({ overlay: 'help' });
-    if (k === '/' && !mod) return done(), getState().selection.length ? openPrompt() : focusChat();
+    if (k === '?' || (e.shiftKey && phys(e, '?', 'Slash'))) return done(), setState({ overlay: 'help' });
+    if (!mod && (k === '/' || (!e.shiftKey && phys(e, '/', 'Slash')))) return done(), getState().selection.length ? openPrompt() : focusChat();
     if (mod && (k === 'l' || k === 'L')) return done(), addSelectionToChat();
     if (mod && (k === 'd' || k === 'D')) return done(), duplicate();
     if (mod && e.shiftKey && e.code === 'KeyE') return done(), openExport();
     if (mod && e.shiftKey && e.code === 'KeyC') return done(), void copyFiles();
     if (mod && e.code === 'KeyG') return done(), e.shiftKey ? ungroup() : e.altKey ? frameSelection() : groupIntoFrame();
-    if (mod && !e.shiftKey && (k === ']' || k === '[')) return done(), reorder(k === ']' ? 1 : -1);
+    if (mod && !e.shiftKey && (phys(e, ']', 'BracketRight') || phys(e, '[', 'BracketLeft'))) return done(), reorder(phys(e, ']', 'BracketRight') ? 1 : -1);
     if (mod && k === '0') return done(), app.zoomTo(1);
     if (mod && (k === '=' || k === '+')) return done(), zoomBy(1.25);
     if (mod && (k === '-' || k === '_')) return done(), zoomBy(0.8);
@@ -244,14 +256,20 @@ export function installKeys(): () => void {
       return done(), app.zoomToNodes(sel.length ? sel : getState().nodes.map((n) => n.id));
     }
     if (k === 'Tab' && !mod) return done(), cycleSelection(e.shiftKey ? -1 : 1);
-    if (k === 'Enter' && !mod && enter()) return done();
+    if (k === 'Enter' && !mod && !e.shiftKey && enter()) return done();
     if (canvasVideoKey(e)) return done();
     if (k === ' ' && !e.repeat) spacePressed();
     if (app.keyDown(k, e.shiftKey, e.altKey, mod)) done();
   };
-  const blur = () => getState().modHeld && setState({ modHeld: false });
+  const blur = () => {
+    if (getState().modHeld) setState({ modHeld: false });
+    // Modifiers released outside the window: no stuck ⌥ distances or ⇧ axis lock.
+    const { app } = getState();
+    if (app && pointer.at) app.pointerMove(pointer.at[0], pointer.at[1], false, false, false);
+  };
   const ku = (e: KeyboardEvent) => {
-    if (e.key === (isMac ? 'Meta' : 'Control')) blur();
+    if (e.key === (isMac ? 'Meta' : 'Control') && getState().modHeld) setState({ modHeld: false });
+    modifiers(e);
     if (editable(e.target)) return;
     getState().app?.keyUp(e.key);
     if (e.key === ' ' && !getState().focusVideo && !getState().preview && !getState().overlay && !getState().editing) spaceReleased();

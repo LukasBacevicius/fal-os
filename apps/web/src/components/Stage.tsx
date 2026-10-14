@@ -9,6 +9,7 @@ import { attach, CANVAS_ID, importFiles, restore } from '../controller';
 import { connectHost, hostSync } from '../sync';
 import { NodeOverlays } from './NodeOverlays';
 import { PresenceLayer } from './PresenceLayer';
+import { MeasureLabels } from './MeasureLabels';
 import { StatusBar } from './StatusBar';
 import { ActivityBars } from './ActivityBars';
 import { Guard } from './Guard';
@@ -348,6 +349,7 @@ export function Stage() {
       <Guard name="video"><VideoLayer /></Guard>
       <Guard name="audio"><AudioLayer /></Guard>
       <Guard name="presence"><PresenceLayer /></Guard>
+      <Guard name="measure"><MeasureLabels /></Guard>
       <Guard name="selection-prompt"><SelectionPrompt /></Guard>
       {!loading && !error && empty && conn !== 'connecting' && (
         <div className="empty faint">

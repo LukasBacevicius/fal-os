@@ -13,6 +13,7 @@ import { loadScene, saveCamera } from './projects';
 import { prepare, syncLineage, watchDeliverables } from './out';
 import { addPlaceholder, fileGhost, finishPlaceholder, frameRect, gridLayout, importProgress, trackImport } from './dnd';
 import { deviceLost } from './gpu';
+import { setMeasure } from './components/MeasureLabels';
 
 export const CANVAS_ID = 'main';
 
@@ -90,6 +91,9 @@ export function attach(app: CanvasApp) {
       }
       case 'stats':
         setState({ stats: payload });
+        break;
+      case 'measure':
+        setMeasure(payload);
         break;
       case 'import':
         importProgress(payload.done);

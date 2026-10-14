@@ -160,6 +160,12 @@ button, textarea, select, input { font: inherit; color: inherit; }
   white-space: nowrap;
 }
 .claim-label { color: var(--dim); }
+.measure-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.measure-label {
+  position: absolute; left: 0; top: 0;
+  font-size: 10px; line-height: 12px; padding: 0 2px;
+  color: var(--text); background: var(--bg); white-space: nowrap;
+}
 .cursor-label { position: absolute; left: 12px; top: 14px; }
 
 .sparkle { font-size: 11px; line-height: 14px; color: var(--dim); white-space: nowrap; }
