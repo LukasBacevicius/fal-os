@@ -18,9 +18,6 @@ pub struct ExtCall {
 const HIDDEN: &[&str] = &["session", "report"];
 
 pub fn ext_start(host: &Host, name: &str, args: &Json) -> Option<ExtCall> {
-    if HIDDEN.contains(&name) {
-        return None;
-    }
     let session = args["sessionId"].as_str()?;
     let (chat, agent) = host
         .with_sessions(|ss| {
@@ -28,13 +25,18 @@ pub fn ext_start(host: &Host, name: &str, args: &Json) -> Option<ExtCall> {
             Some((s.chat.clone()?, s.agent_label()))
         })
         .filter(|(c, _)| c.starts_with("ext:"))?;
+    if HIDDEN.contains(&name) {
+        // No transcript line, but the agent is there.
+        host.chat.ext_active(host, &chat, false);
+        return None;
+    }
     let id = format!(
         "x_{}",
         (0..4)
             .map(|_| format!("{:02x}", rand::random::<u8>()))
             .collect::<String>()
     );
-    host.chat.ext_active(host, &chat);
+    host.chat.ext_active(host, &chat, true);
     let _ = host.chat.append(
         host,
         &chat,
@@ -52,6 +54,7 @@ pub fn ext_end(
     args: &Json,
     res: &Result<CallToolResponse, ErrorData>,
 ) {
+    host.chat.ext_done(host, &call.chat);
     let (text, error) = match res {
         Ok(CallToolResponse::Complete(r)) => (
             r.content

@@ -38,6 +38,17 @@ pub const CROSS_CHAT_PER_MIN: usize = 5;
 const CHIP_EVENTS: usize = 20;
 /// An external pseudo-chat goes idle after this long without tool calls.
 const EXT_IDLE_MS: i64 = 30_000;
+/// ... and detached after this long (no call in flight): its process is most likely gone (an
+/// MCP client that dies without closing its session leaves no other trace). A later tool call
+/// of the same session attaches it again. `FALOS_EXT_DETACH_SECS` overrides it (tests).
+const EXT_DETACH_MS: i64 = 10 * 60_000;
+
+fn ext_detach_ms() -> i64 {
+    std::env::var("FALOS_EXT_DETACH_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .map_or(EXT_DETACH_MS, |s| s.max(1) * 1000)
+}
 /// Rows in the canvas outline the director gets on a chat's first turn.
 const OUTLINE_ROWS: usize = 40;
 
@@ -87,11 +98,15 @@ struct ChatMeta {
     /// Shown as a tab (closing a tab keeps the chat in the history; distinct from archive).
     #[serde(default = "yes")]
     open: bool,
-    /// An external agent's read-only pseudo-chat (`ext:<client>-<n>`).
+    /// An external agent's tab (`ext:<client>[-<name>]`, see [`ext_chat_id`]).
     #[serde(default)]
     external: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client: Option<String>,
+    /// External agents: the name the agent gave (`session` agentName); with `client`, the
+    /// tab's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
 }
 
 /// A message sent while a run was active, waiting to be injected (`queued` event).
@@ -118,6 +133,8 @@ struct ChatState {
     queue: Vec<Queued>,
     /// Last tool call of an external pseudo-chat (ms).
     ext_last: i64,
+    /// External pseudo-chats: tool calls in flight (an `inbox` long-poll keeps it attached).
+    ext_calls: u32,
     /// What the run does right now (latest agent status / running tool), for the tray.
     step: String,
     /// An unanswered `question` event (id, prompt): the run needs the user.
@@ -157,6 +174,7 @@ impl ChatState {
             "open": self.meta.open,
             "external": self.meta.external,
             "client": self.meta.client,
+            "seen": (self.meta.external && self.ext_last > 0).then_some(self.ext_last),
             "turn": self.turn,
             "step": self.step,
             "queued": self.queue.iter().map(|q| json!({"id": q.id, "text": q.text})).collect::<Vec<_>>(),
@@ -331,6 +349,9 @@ impl ChatHub {
                         ..Default::default()
                     },
                 );
+            }
+            if merge_ext(host, &mut m) {
+                Self::save_index(host, &m);
             }
             m
         });
@@ -628,41 +649,56 @@ impl ChatHub {
 
     // ---- external agents' pseudo-chats -------------------------------------------------
 
-    /// A pseudo-chat `ext:<client>-<n>` for an external agent session (read-only transcript).
-    pub fn create_ext(&self, host: &Host, client: &str, title: &str, canvas: &str) -> String {
-        let chat = self.with_chats(host, |chats| {
-            let prefix = format!("ext:{client}-");
-            let n = chats
-                .keys()
-                .filter_map(|k| k.strip_prefix(&prefix)?.parse::<u64>().ok())
-                .max()
-                .unwrap_or(0)
-                + 1;
-            format!("{prefix}{n}")
+    /// The tab of an external agent session: one per agent identity (client + the name it
+    /// gives, see [`ext_chat_id`]) per project. A new session of the same agent reattaches to
+    /// its tab (reopened if the user closed it) and the history continues there.
+    pub fn attach_ext(&self, host: &Host, client: &str, agent_name: &str, canvas: &str) -> String {
+        let key = ext_chat_id(client, agent_name);
+        let (chat, fresh) = self.with_chats(host, |chats| {
+            if let Some(s) = chats.values().find(|s| s.meta.external && ext_identity(&s.meta) == key) {
+                return (s.meta.chat.clone(), false);
+            }
+            // The id is the identity; a (legacy) chat of another identity holding it gets a suffix.
+            let chat = (1..)
+                .map(|n| if n == 1 { key.clone() } else { format!("{key}-{n}") })
+                .find(|c| !chats.contains_key(c))
+                .unwrap();
+            (chat, true)
         });
         self.ensure(host, &chat, canvas);
         let _ = self.update_meta(host, &chat, |m| {
-            m.title = title.chars().take(80).collect();
-            m.title_auto = false;
-            m.client = Some(client.to_string());
-            m.external = true;
-            m.state = "running".into();
-        });
-        self.with_chats(host, |chats| {
-            if let Some(s) = chats.get_mut(&chat) {
-                s.ext_last = now_ms();
+            if fresh {
+                m.title = agent_name.trim().chars().take(80).collect();
+                m.title_auto = false;
             }
+            m.client = Some(client.to_string());
+            m.agent = Some(agent_name.trim().to_string());
+            m.external = true;
+            m.canvas = canvas.to_string();
+            m.open = true;
+            m.archived = false;
         });
-        let _ = self.append(host, &chat, None, json!({"kind": "status", "state": "running"}));
+        let state = self.with_chats(host, |chats| {
+            let s = chats.get_mut(&chat)?;
+            s.ext_last = now_ms();
+            Some(s.meta.state.clone())
+        });
+        if state.as_deref() != Some("running") {
+            let _ = self.append(host, &chat, None, json!({"kind": "status", "state": "running"}));
+        }
         chat
     }
 
     /// An external agent made a tool call: its pseudo-chat is running (a `status` event, so
-    /// the transcript shows it too).
-    pub fn ext_active(&self, host: &Host, chat: &str) {
+    /// the transcript shows it too). A detached tab attaches again. `start` counts the call as
+    /// in flight until [`Self::ext_done`].
+    pub fn ext_active(&self, host: &Host, chat: &str, start: bool) {
         let changed = self.with_chats(host, |chats| {
             let s = chats.get_mut(chat)?;
             s.ext_last = now_ms();
+            if start {
+                s.ext_calls += 1;
+            }
             Some(s.meta.state != "running")
         });
         if changed == Some(true) {
@@ -670,8 +706,34 @@ impl ChatHub {
         }
     }
 
+    /// An external agent's tool call ended.
+    pub fn ext_done(&self, host: &Host, chat: &str) {
+        self.with_chats(host, |chats| {
+            if let Some(s) = chats.get_mut(chat) {
+                s.ext_calls = s.ext_calls.saturating_sub(1);
+                s.ext_last = now_ms();
+            }
+        });
+    }
+
+    /// A session of an external tab ended (its MCP connection closed): detached once no other
+    /// session of that agent is attached.
     pub fn ext_session_closed(&self, host: &Host, chat: &str) {
-        let _ = self.append(host, chat, None, json!({"kind": "status", "state": "idle", "detached": true}));
+        let others = host.with_sessions(|ss| ss.values().any(|s| s.chat.as_deref() == Some(chat)));
+        let detached = self.state_of(host, chat).as_deref() == Some("detached");
+        if !others && !detached {
+            self.with_chats(host, |chats| {
+                if let Some(s) = chats.get_mut(chat) {
+                    s.ext_calls = 0;
+                }
+            });
+            let _ = self.append(host, chat, None, json!({"kind": "status", "state": "idle", "detached": true}));
+        }
+    }
+
+    /// `running` | `idle` | `detached` (external tabs) | `error`.
+    pub fn state_of(&self, host: &Host, chat: &str) -> Option<String> {
+        self.with_chats(host, |chats| chats.get(chat).map(|s| s.meta.state.clone()))
     }
 
     /// The MCP client of an external pseudo-chat (`codex`, `claude`, ...).
@@ -702,21 +764,71 @@ impl ChatHub {
         })
     }
 
-    /// External pseudo-chats go idle after [`EXT_IDLE_MS`] without tool calls.
+    /// External tabs: `running` → `idle` after [`EXT_IDLE_MS`] without tool calls, →
+    /// `detached` when no session is attached (host restart, connection closed) or after
+    /// [`EXT_DETACH_MS`] of silence with no call in flight.
     pub(crate) fn sweep(&self, host: &Host) {
         let now = now_ms();
-        let idle: Vec<String> = {
+        let detach_ms = ext_detach_ms();
+        let bound: std::collections::HashSet<String> =
+            host.with_sessions(|ss| ss.values().filter_map(|s| s.chat.clone()).filter(|c| c.starts_with("ext:")).collect());
+        let changes: Vec<(String, bool)> = {
             let guard = self.chats.lock().unwrap();
             let Some(chats) = guard.as_ref() else { return };
             chats
                 .values()
-                .filter(|s| s.meta.external && s.meta.state == "running" && now - s.ext_last > EXT_IDLE_MS)
-                .map(|s| s.meta.chat.clone())
+                .filter(|s| s.meta.external && s.meta.state != "detached")
+                .filter_map(|s| {
+                    let quiet = now - s.ext_last;
+                    if !bound.contains(&s.meta.chat) || (s.ext_calls == 0 && quiet > detach_ms) {
+                        Some((s.meta.chat.clone(), true))
+                    } else if s.meta.state == "running" && s.ext_calls == 0 && quiet > EXT_IDLE_MS {
+                        Some((s.meta.chat.clone(), false))
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         };
-        for chat in idle {
-            let _ = self.append(host, &chat, None, json!({"kind": "status", "state": "idle"}));
+        for (chat, detach) in changes {
+            let ev = if detach {
+                json!({"kind": "status", "state": "idle", "detached": true})
+            } else {
+                json!({"kind": "status", "state": "idle"})
+            };
+            let _ = self.append(host, &chat, None, ev);
         }
+    }
+
+    /// Messages typed into an external tab that its agent hasn't picked up yet: `queued`
+    /// events without a later `dequeued` / delivery, from the log (they outlive host
+    /// restarts). `(id, text, author, context, stop)`.
+    pub fn undelivered(&self, host: &Host, chat: &str) -> Vec<(String, String, String, Vec<Json>, bool)> {
+        let mut out: Vec<(String, String, String, Vec<Json>, bool)> = vec![];
+        for l in read_log(&log_path(host, chat)) {
+            let e = &l["event"];
+            let id = e["id"].as_str().unwrap_or_default().to_string();
+            match e["kind"].as_str() {
+                Some("queued") if !id.is_empty() => {
+                    out.retain(|q| q.0 != id);
+                    out.push((
+                        id,
+                        e["text"].as_str().unwrap_or_default().to_string(),
+                        e["author"].as_str().unwrap_or("user").to_string(),
+                        e["context"].as_array().cloned().unwrap_or_default(),
+                        e["stop"] == true,
+                    ));
+                }
+                Some("dequeued") => out.retain(|q| q.0 != id),
+                Some("user") => {
+                    if let Some(q) = e["queued"].as_str() {
+                        out.retain(|x| x.0 != q);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     // ---- queue ---------------------------------------------------------------------------
@@ -850,7 +962,10 @@ impl ChatHub {
                     }
                 }
                 Some("status") => {
-                    let st = event["state"].as_str().unwrap_or("idle").to_string();
+                    let mut st = event["state"].as_str().unwrap_or("idle").to_string();
+                    if s.meta.external && event["detached"] == true {
+                        st = "detached".into();
+                    }
                     if st != "running" {
                         s.agents.clear();
                         s.step.clear();
@@ -1087,6 +1202,106 @@ fn canvas_outline(host: &Host, canvas: &str) -> Option<String> {
     })
     .ok()
     .flatten()
+}
+
+// ---- external agent identity -----------------------------------------------------------
+
+fn slug(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.trim().to_ascii_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// The tab of an external agent: `ext:<client>` when the name it gives is just its client's
+/// ("Codex", "Claude Code", "codex-cli"), else `ext:<client>-<name>` ("Codex reviewer" →
+/// `ext:codex-codex-reviewer`). One tab per identity per project.
+pub fn ext_chat_id(client: &str, agent_name: &str) -> String {
+    let client = match slug(client) {
+        c if c.is_empty() => "agent".to_string(),
+        c => c,
+    };
+    let name = slug(agent_name);
+    let plain = name.is_empty()
+        || name == client
+        || ["code", "cli", "app", "desktop", "agent"].iter().any(|s| name == format!("{client}-{s}"));
+    let id = if plain { client } else { format!("{client}-{name}") };
+    let id: String = id.chars().take(64).collect();
+    format!("ext:{}", id.trim_end_matches('-'))
+}
+
+/// The identity of an external tab (what [`ext_chat_id`] gives its agent). Tabs from before
+/// identities (`ext:<client>-<n>`) use their title, which was the agent's name.
+fn ext_identity(m: &ChatMeta) -> String {
+    let client = m.client.clone().unwrap_or_else(|| {
+        let id = m.chat.strip_prefix("ext:").unwrap_or(&m.chat);
+        id.rsplit_once('-').map_or(id, |(c, _)| c).to_string()
+    });
+    ext_chat_id(&client, m.agent.as_deref().unwrap_or(&m.title))
+}
+
+/// Older hosts opened a new tab (`ext:<client>-<n>`) for every session of an agent. Merge
+/// each identity's tabs into one (its [`ext_chat_id`]): events in time order, renumbered;
+/// messages that were never delivered stay queued for the agent's next session.
+fn merge_ext(host: &Host, m: &mut HashMap<String, ChatState>) -> bool {
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for s in m.values().filter(|s| s.meta.external) {
+        groups.entry(ext_identity(&s.meta)).or_default().push(s.meta.chat.clone());
+    }
+    let mut changed = false;
+    for (key, mut ids) in groups {
+        if ids.len() < 2 {
+            continue;
+        }
+        ids.sort_by_key(|id| m[id].meta.created);
+        let newest = ids.iter().max_by_key(|id| m[*id].meta.updated).cloned().unwrap();
+        let target = if !m.contains_key(&key) || ids.contains(&key) { key.clone() } else { newest.clone() };
+        let mut events: Vec<(i64, usize, u64, Json)> = vec![];
+        for (i, id) in ids.iter().enumerate() {
+            for l in read_log(&log_path(host, id)) {
+                events.push((l["ts"].as_i64().unwrap_or(0), i, l["seq"].as_u64().unwrap_or(0), l["event"].clone()));
+            }
+        }
+        events.sort_by_key(|e| (e.0, e.1, e.2));
+        let ended = events.iter().rev().find(|e| e.3["kind"] == "status").is_none_or(|e| e.3["detached"] == true);
+        if !ended {
+            events.push((now_ms(), 0, 0, json!({"kind": "status", "state": "idle", "detached": true})));
+        }
+        let mut text = String::new();
+        for (n, (ts, _, _, ev)) in events.iter().enumerate() {
+            text.push_str(&json!({"seq": n + 1, "ts": ts, "event": ev}).to_string());
+            text.push('\n');
+        }
+        let dir = chats_dir(host);
+        let tmp = dir.join(format!("merge.jsonl.tmp{}", std::process::id()));
+        if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, log_path(host, &target)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        }
+        let members: Vec<ChatState> = ids.iter().filter_map(|id| m.remove(id)).collect();
+        for id in ids.iter().filter(|id| **id != target) {
+            let _ = std::fs::remove_file(log_path(host, id));
+        }
+        let base = members.iter().find(|s| s.meta.chat == newest).unwrap_or(&members[0]);
+        let mut meta = base.meta.clone();
+        meta.chat = target.clone();
+        meta.created = members.iter().map(|s| s.meta.created).min().unwrap_or(meta.created);
+        meta.updated = members.iter().map(|s| s.meta.updated).max().unwrap_or(meta.updated);
+        meta.cost = members.iter().map(|s| s.meta.cost).sum();
+        meta.archived = members.iter().all(|s| s.meta.archived);
+        meta.open = members.iter().any(|s| s.meta.open && !s.meta.archived);
+        meta.state = "detached".into();
+        meta.agent.get_or_insert_with(|| base.meta.title.clone());
+        tracing::info!("merged external agent tabs {ids:?} into {target}");
+        m.insert(target, ChatState { meta, seq: events.len() as u64, ..Default::default() });
+        changed = true;
+    }
+    changed
 }
 
 fn title_from(text: &str) -> String {

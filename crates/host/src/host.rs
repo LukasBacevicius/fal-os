@@ -369,8 +369,9 @@ pub struct Host {
     sweeper: std::sync::Once,
     /// Wakes `inbox` long-polls when an external agent's inbox gets something (see `director`).
     pub inbox_wake: Notify,
-    /// Messages for an external agent client whose session is gone (`codex` → items), handed
-    /// to its next session.
+    /// Messages typed into external agents' tabs, not picked up yet (`ext:…` chat → items;
+    /// loaded from the chat log on first use, see `director::pending`). Any session of that
+    /// agent takes them: the attached one at its next tool call, else the next session.
     pub inbox_orphans: Mutex<HashMap<String, Vec<crate::director::InboxItem>>>,
     /// Last time a human client showed activity here (ms): connect, selection, focus. The
     /// most recent connected project is the one "open in fal OS" for agent binding.

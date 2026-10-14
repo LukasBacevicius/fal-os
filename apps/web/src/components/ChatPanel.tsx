@@ -7,7 +7,7 @@ import { addChips, agentLine, chatColor, chatTitle, groupTurns, isExternal, slug
 import { sendChatMessage, setDriver, steerQueued, steerText } from '../chatActions';
 import { toast } from '../store';
 import { Chips } from './Chips';
-import { ChatHistory, ChatTabs, DeleteConfirm } from './ChatTabs';
+import { ago, ChatHistory, ChatTabs, DeleteConfirm } from './ChatTabs';
 import { bar, Row, selectBatch, TurnView } from './Transcript';
 import { fuzzy } from './Palette';
 import { ResizeHandle } from './ResizeHandle';
@@ -155,7 +155,7 @@ function Composer({ running, readOnly, question, agent, queued }: {
     : agent
       ? `message ${agent}…`
       : ext
-        ? `message ${short(chatTitle(chat, chat.active!))} · read between steps…`
+        ? `message ${short(chatTitle(chat, chat.active!))} · ${chat.meta[chat.active!]?.state === 'detached' ? 'waits for its next session' : 'read between steps'}…`
         : chat.active
           ? running ? 'steer: ⏎ queue · ⌘⏎ now…' : `message ${short(chatTitle(chat, chat.active))}`
           : 'start a chat…';
@@ -286,7 +286,10 @@ export function ChatPanel() {
   const readOnly = false;
   const ext = !!chat.active && isExternal(chat.active);
   const sessions = useStore((s) => s.sessions);
-  const attached = ext ? sessions.find((x) => x.chat === chat.active) : undefined;
+  const extMeta = ext ? chat.meta[chat.active!] : undefined;
+  // Liveness comes from the host (session closed, or silent too long → detached).
+  const detached = ext && extMeta?.state === 'detached';
+  const attached = ext && !detached ? sessions.find((x) => x.chat === chat.active) : undefined;
   const empty = !chat.order.length && !chat.pending;
 
   // Switching chats or views: show the end of the log.
@@ -358,8 +361,10 @@ export function ChatPanel() {
           })()}
           {ext && (
             <div className="sub-head faint" title="your own agent, connected over MCP: messages here reach it between its steps">
-              <span style={{ color }}>{attached ? '●' : '○'}</span>{' '}
-              {attached ? `${attached.client ?? 'agent'} · attached${attached.presence.status ? ` · ${attached.presence.status}` : ''}` : 'detached · messages wait for its next session'}
+              <span style={{ color }}>{detached ? '○' : '●'}</span>{' '}
+              {detached
+                ? `${extMeta?.client ?? 'agent'} · detached${extMeta?.seen ? ` ${ago(extMeta.seen)} ago` : ''} · messages wait for its next session`
+                : `${extMeta?.client ?? attached?.client ?? 'agent'} · ${extMeta?.state === 'running' ? 'working' : 'attached · idle'}${attached?.presence.status ? ` · ${attached.presence.status}` : ''}`}
             </div>
           )}
           <div
@@ -395,7 +400,7 @@ export function ChatPanel() {
             )}
             {conn === 'connected' && chat.runtime === 'missing' && <div className="dim">agent runtime not connected</div>}
             {conn === 'local' && <div className="dim">no fal OS host: chat is unavailable</div>}
-            {t.running && !subView && (
+            {t.running && !subView && !detached && (
               <div className="faint">
                 running · <button className="link" title="stop the run (esc in the input)" onClick={() => chat.active && hostSync()?.stopChat(chat.active)}>[stop]</button>
               </div>
@@ -437,7 +442,7 @@ export function ChatPanel() {
                   key={q.id}
                   className="queued-line"
                   tabIndex={0}
-                  title={`queued: delivered after the next step · ${navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'ctrl+'}⏎ send now`}
+                  title={ext ? (detached ? 'waits for the agent\'s next session' : 'picked up at the agent\'s next step') : `queued: delivered after the next step · ${navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'ctrl+'}⏎ send now`}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                       e.preventDefault();
@@ -448,7 +453,7 @@ export function ChatPanel() {
                     }
                   }}
                 >
-                  <span className="faint">queued:</span> <span className="queued-text">{q.text}</span>
+                  <span className="faint">{detached ? 'waits for next session:' : 'queued:'}</span> <span className="queued-text">{q.text}</span>
                   {main.running && !ext && (
                     <button className="link dim" title="deliver to the running turn now (⌘⏎)" onClick={() => steerQueued(q.id)}>
                       [send now]

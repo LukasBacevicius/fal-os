@@ -148,13 +148,13 @@ async fn external_agent_pseudo_chat_activity_and_connect_flow() {
     let c = client_as(env.port, "claude-code", None).await;
     let s = call(&c, "session", json!({"agentName": "Claude Code", "canvas": "main"})).await;
     let sid = s["sessionId"].as_str().unwrap().to_string();
-    assert_eq!(s["chat"], "ext:claude-1");
+    assert_eq!(s["chat"], "ext:claude");
     let conn = next_of(&mut ui, "agent.connected").await;
     assert_eq!((conn["client"].as_str(), conn["clientName"].as_str()), (Some("claude"), Some("claude-code")));
     assert_eq!((conn["agentName"].as_str(), conn["session"].as_str()), (Some("Claude Code"), Some(sid.as_str())));
     assert_eq!(conn["transport"], "http");
-    let chats = list_until(&mut ui, |c| row(c, "ext:claude-1").is_some()).await;
-    let ext = row(&chats, "ext:claude-1").unwrap();
+    let chats = list_until(&mut ui, |c| row(c, "ext:claude").is_some()).await;
+    let ext = row(&chats, "ext:claude").unwrap();
     assert_eq!((ext["title"].as_str(), ext["external"].as_bool(), ext["client"].as_str()), (Some("Claude Code"), Some(true), Some("claude")));
     let color = ext["color"].as_str().unwrap().to_string();
     assert!(falos_host::chat::CHAT_COLORS.contains(&color.as_str()));
@@ -170,14 +170,14 @@ async fn external_agent_pseudo_chat_activity_and_connect_flow() {
     sorted.sort();
     assert_eq!(fwn, sorted);
     let act = next_where(&mut ui, |v| v["type"] == "activity" && v["op"] == "write").await;
-    assert_eq!((act["session"].as_str(), act["chat"].as_str(), act["color"].as_str()), (Some(sid.as_str()), Some("ext:claude-1"), Some(color.as_str())));
+    assert_eq!((act["session"].as_str(), act["chat"].as_str(), act["color"].as_str()), (Some(sid.as_str()), Some("ext:claude"), Some(color.as_str())));
     assert_eq!(act["nodes"], json!(created));
     assert!(act["at"].as_i64().unwrap() > 0);
     assert_eq!(act["agent"], "claude-code");
     let pres = next_where(&mut ui, |v| v["type"] == "presence" && v["session"]["id"] == sid && v["session"]["state"] == "writing").await;
-    assert_eq!((pres["session"]["chat"].as_str(), pres["session"]["color"].as_str()), (Some("ext:claude-1"), Some(color.as_str())));
+    assert_eq!((pres["session"]["chat"].as_str(), pres["session"]["color"].as_str()), (Some("ext:claude"), Some(color.as_str())));
     assert_eq!(pres["session"]["client"], "claude");
-    let tool = next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == "ext:claude-1" && v["event"]["state"] == "done").await;
+    let tool = next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == "ext:claude" && v["event"]["state"] == "done").await;
     assert_eq!(tool["event"]["name"], "edit");
     assert_eq!(tool["event"]["summary"], "created 2 nodes");
     assert_eq!(tool["event"]["agent"], "claude-code");
@@ -199,12 +199,12 @@ async fn external_agent_pseudo_chat_activity_and_connect_flow() {
     assert_eq!((clr["session"].as_str(), clr["nodes"].clone()), (Some(sid.as_str()), Json::Null));
 
     // The user messages the agent from its tab: queued, then delivered with its next tool call.
-    send(&mut ui, json!({"type": "chat.send", "chat": "ext:claude-1", "text": "make it warmer"})).await;
-    let q = next_event(&mut ui, "ext:claude-1", "queued").await;
+    send(&mut ui, json!({"type": "chat.send", "chat": "ext:claude", "text": "make it warmer"})).await;
+    let q = next_event(&mut ui, "ext:claude", "queued").await;
     assert_eq!(q["text"], "make it warmer");
     let r = call(&c, "list_annotations", json!({"sessionId": sid, "canvas": "main"})).await;
     assert!(r.as_str().unwrap().contains("Lukas says: make it warmer"), "{r}");
-    let u = next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == "ext:claude-1" && v["event"]["kind"] == "user").await;
+    let u = next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == "ext:claude" && v["event"]["kind"] == "user").await;
     assert_eq!((u["event"]["queued"].clone(), u["event"]["author"].as_str()), (q["id"].clone(), Some("Lukas")));
     assert_eq!(call(&c, "inbox", json!({"sessionId": sid})).await, Json::String("nothing new from the user".into()));
 
@@ -216,13 +216,13 @@ async fn external_agent_pseudo_chat_activity_and_connect_flow() {
         text(&r)
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
-    send(&mut ui, json!({"type": "chat.stop", "chat": "ext:claude-1"})).await;
+    send(&mut ui, json!({"type": "chat.stop", "chat": "ext:claude"})).await;
     let got = tokio::time::timeout(Duration::from_secs(5), waiting).await.expect("inbox woke").unwrap();
     assert!(got.contains("pressed stop"), "{got}");
 
     // report posts to the tab; arrange lays nodes out as a board.
     call(&c, "report", json!({"sessionId": sid, "text": "made a moodboard", "nodes": [created[0]]})).await;
-    let t = next_event(&mut ui, "ext:claude-1", "text").await;
+    let t = next_event(&mut ui, "ext:claude", "text").await;
     assert_eq!(t["delta"], "made a moodboard");
     let e2 = call(&c, "edit", json!({"sessionId": sid, "canvas": "main", "text": "image \"a\" p(0,900) s(400,300)\nimage \"b\" p(500,900) s(300,400)\nimage \"c\" p(900,900) s(512,512)\nimage \"d\" p(1500,900) s(512,512)"})).await;
     let imgs: Vec<String> = e2["created"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
@@ -233,11 +233,84 @@ async fn external_agent_pseudo_chat_activity_and_connect_flow() {
     let rows = rows.as_str().unwrap();
     assert!(rows.contains("frame \"Best 4\"") && imgs.iter().all(|i| rows.contains(&format!("  {i} image"))), "{rows}");
 
-    // A second session from the same client gets its own pseudo-chat.
+    // One tab per agent identity: another agent gets its own, a new session of the same agent
+    // (or one with its own name) reattaches to the same / gets a named tab.
     let c2 = client_as(env.port, "codex-mcp-client", None).await;
-    assert_eq!(call(&c2, "session", json!({"agentName": "Codex"})).await["chat"], "ext:codex-1");
+    assert_eq!(call(&c2, "session", json!({"agentName": "Codex"})).await["chat"], "ext:codex");
     let c3 = client_as(env.port, "claude-code", None).await;
-    assert_eq!(call(&c3, "session", json!({"agentName": "Claude Code"})).await["chat"], "ext:claude-2");
+    assert_eq!(call(&c3, "session", json!({"agentName": "Claude Code"})).await["chat"], "ext:claude");
+    let c4 = client_as(env.port, "claude-code", None).await;
+    assert_eq!(call(&c4, "session", json!({"agentName": "Reviewer"})).await["chat"], "ext:claude-reviewer");
+}
+
+#[tokio::test]
+async fn external_agent_tab_detaches_and_reattaches_with_messages() {
+    let env = start("http://127.0.0.1:1", None).await;
+    let mut ui = sync_client(env.port).await;
+    next_of(&mut ui, "chat.list").await;
+
+    let c = client_as(env.port, "codex-mcp-client", None).await;
+    let s = call(&c, "session", json!({"agentName": "Codex", "canvas": "main"})).await;
+    assert_eq!(s["chat"], "ext:codex");
+    let sid = s["sessionId"].as_str().unwrap().to_string();
+    call(&c, "report", json!({"sessionId": sid, "text": "first session here"})).await;
+
+    // The client quits (its MCP session ends): the tab detaches at once.
+    c.cancel().await.unwrap();
+    let st = next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == "ext:codex" && v["event"]["detached"] == true).await;
+    assert_eq!(st["event"]["state"], "idle");
+    let chats = list_until(&mut ui, |c| row(c, "ext:codex").is_some_and(|r| r["state"] == "detached")).await;
+    assert_eq!(row(&chats, "ext:codex").unwrap()["external"], true);
+
+    // A message to the detached agent waits; stop has nothing to stop.
+    send(&mut ui, json!({"type": "chat.send", "chat": "ext:codex", "text": "use the blue one"})).await;
+    let q = next_event(&mut ui, "ext:codex", "queued").await;
+    assert_eq!(q["author"], "Lukas");
+
+    // The next session reattaches to the same tab and gets the message right away.
+    let c2 = client_as(env.port, "codex-mcp-client", None).await;
+    let r = c2
+        .call_tool(CallToolRequestParams::new("session").with_arguments(json!({"agentName": "Codex", "canvas": "main"}).as_object().unwrap().clone()))
+        .await
+        .unwrap();
+    let t = text(&r);
+    assert!(t.contains("\"chat\": \"ext:codex\""), "{t}");
+    assert!(t.contains("use the blue one"), "{t}");
+    let u = next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == "ext:codex" && v["event"]["kind"] == "user").await;
+    assert_eq!(u["event"]["queued"], q["id"]);
+    let chats = list_until(&mut ui, |c| row(c, "ext:codex").is_some_and(|r| r["state"] == "running")).await;
+    assert_eq!(chats.iter().filter(|r| r["external"] == true).count(), 1, "one tab: {chats:?}");
+    // The history continues in the same log.
+    let log = std::fs::read_to_string(env.dir.path().join("proj/chats/ext_codex.jsonl")).unwrap();
+    assert!(log.contains("first session here") && log.contains("use the blue one"));
+}
+
+#[tokio::test]
+async fn duplicate_external_tabs_from_older_hosts_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let chats = dir.path().join("proj/chats");
+    std::fs::create_dir_all(&chats).unwrap();
+    let meta = |id: &str, t: i64| json!({"chat": id, "canvas": "main", "title": "Codex", "created": t, "updated": t + 5, "state": "running", "external": true, "client": "codex", "open": true});
+    std::fs::write(chats.join("index.json"), json!({"chats": [meta("ext:codex-1", 100), meta("ext:codex-2", 200)]}).to_string()).unwrap();
+    std::fs::write(chats.join("ext_codex-1.jsonl"), format!("{}\n{}\n",
+        json!({"seq": 1, "ts": 100, "event": {"kind": "text", "delta": "old report"}}),
+        json!({"seq": 2, "ts": 150, "event": {"kind": "queued", "id": "m_lost", "text": "never delivered"}}))).unwrap();
+    std::fs::write(chats.join("ext_codex-2.jsonl"), format!("{}\n", json!({"seq": 1, "ts": 200, "event": {"kind": "text", "delta": "newer report"}}))).unwrap();
+    let host = Host::open(
+        &dir.path().join("proj"),
+        HostOptions { fal_queue_url: "http://127.0.0.1:1".into(), fal_key: None, fal_session: false, renderer: Box::new(NoRenderer), home: None },
+    )
+    .unwrap();
+    let list = host.chat.list(&host, None);
+    let ext: Vec<&Json> = list.as_array().unwrap().iter().filter(|r| r["external"] == true).collect();
+    assert_eq!(ext.len(), 1, "{list}");
+    assert_eq!((ext[0]["chat"].as_str(), ext[0]["state"].as_str()), (Some("ext:codex"), Some("detached")));
+    let log = std::fs::read_to_string(chats.join("ext_codex.jsonl")).unwrap();
+    let a = log.find("old report").unwrap();
+    assert!(log.find("newer report").unwrap() > a);
+    assert!(!chats.join("ext_codex-1.jsonl").exists() && !chats.join("ext_codex-2.jsonl").exists());
+    // The message nobody got is still waiting for the agent's next session.
+    assert_eq!(host.chat.undelivered(&host, "ext:codex").len(), 1);
 }
 
 #[tokio::test]
@@ -582,7 +655,7 @@ async fn stdio_relay_reaches_the_host() {
     stdin.write_all(line(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "session", "arguments": {"agentName": "Gemini"}}})).as_bytes()).await.unwrap();
     let res: Json = serde_json::from_str(&tokio::time::timeout(Duration::from_secs(10), out.next_line()).await.unwrap().unwrap().unwrap()).unwrap();
     assert_eq!(res["id"], 2);
-    assert!(res["result"]["content"][0]["text"].as_str().unwrap().contains("ext:gemini-1"), "{res}");
+    assert!(res["result"]["content"][0]["text"].as_str().unwrap().contains("ext:gemini"), "{res}");
     let conn = loop {
         let e = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
         if let falos_host::Event::AgentConnected { client, transport, .. } = e {

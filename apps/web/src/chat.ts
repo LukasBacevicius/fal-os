@@ -59,6 +59,10 @@ export interface ChatMeta {
   /** Shown as a tab (history keeps closed chats). Missing = open. */
   open?: boolean;
   archived?: boolean;
+  /** External agents' tabs (`ext:…`): the MCP client (`codex`, `claude`, …). */
+  client?: string;
+  /** External agents' tabs: its last tool call (ms). */
+  seen?: number;
 }
 
 /** A message sent but not yet echoed back by the host as a `user` event. */
@@ -145,7 +149,8 @@ export function tabs(s: ChatState): string[] {
   const known = ids.filter((id) => {
     const m = s.meta[id];
     if (id === s.active) return true;
-    if (isRunning(s, id)) return true;
+    // An external agent's tab can be closed while it works (its next session reopens it).
+    if (isRunning(s, id) && !isExternal(id)) return true;
     if (m?.archived || s.closed[id]) return false;
     return m?.open !== false;
   });

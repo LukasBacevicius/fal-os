@@ -92,18 +92,55 @@ pub fn push(host: &Host, session: &str, item: InboxItem) {
     if item.wakes() {
         host.inbox_wake.notify_waiters();
     }
-    // Channels (Claude Code `--channels` / dev channels): the message becomes the session's
-    // next prompt. Best effort; without channels it waits in the inbox like everywhere else.
+    channel(peer, &item);
+}
+
+/// Channels (Claude Code `--channels` / dev channels): the message becomes the session's
+/// next prompt. Best effort; without channels it waits in the inbox like everywhere else.
+fn channel(peer: Option<rmcp::Peer<rmcp::RoleServer>>, item: &InboxItem) {
     if let Some(peer) = peer
         && let Ok(rt) = tokio::runtime::Handle::try_current()
     {
-        let content = format!("{} (from fal OS; also in your fal-os inbox)", line(&item));
+        let content = format!("{} (from fal OS; also in your fal-os inbox)", line(item));
         let meta = json!({"source": "fal-os", "kind": item.kind, "from": item.author});
         rt.spawn(async move {
             let n = CustomNotification::new("notifications/claude/channel", Some(json!({"content": content, "meta": meta})));
             let _ = peer.send_notification(ServerNotification::CustomNotification(n)).await;
         });
     }
+}
+
+/// Run `f` on the messages waiting in an external tab (loaded from its log on first use, so
+/// they survive host restarts).
+fn pending<T>(host: &Host, chat: &str, f: impl FnOnce(&mut Vec<InboxItem>) -> T) -> T {
+    let loaded = host.inbox_orphans.lock().unwrap().contains_key(chat);
+    if !loaded {
+        let canvas = host.chat.canvas_of(host, chat).unwrap_or_else(|| "main".into());
+        let items: Vec<InboxItem> = host
+            .chat
+            .undelivered(host, chat)
+            .into_iter()
+            .map(|(id, text, author, chips, stop)| InboxItem {
+                id,
+                kind: if stop { "stop" } else { "message" },
+                text,
+                author,
+                nodes: chips.iter().filter_map(|c| c["node"].as_str().map(String::from)).collect(),
+                chips,
+                annotation: None,
+                canvas: canvas.clone(),
+                chat: Some(chat.to_string()),
+                at: now_ms(),
+            })
+            .collect();
+        host.inbox_orphans.lock().unwrap().entry(chat.to_string()).or_insert(items);
+    }
+    f(host.inbox_orphans.lock().unwrap().get_mut(chat).expect("loaded"))
+}
+
+/// The external tab a session works for.
+fn ext_chat_of(host: &Host, session: &str) -> Option<String> {
+    host.with_sessions(|ss| ss.get(session).and_then(|s| s.chat.clone())).filter(|c| c.starts_with("ext:"))
 }
 
 /// After a doc change: a human's new comments and imported media go to the external agents
@@ -197,7 +234,9 @@ pub fn on_selection(host: &Host, human_session: &str, nodes: &[String]) {
 }
 
 /// The user typed into an external agent's chat tab (`chat.send` / `chat.steer`), or pressed
-/// stop (`kind` = `stop`). Shown as `queued` until the agent picks it up.
+/// stop (`kind` = `stop`). Shown as `queued` until the agent picks it up: the attached session
+/// at its next tool call (or `inbox`), else the agent's next session ("waits for its next
+/// session" in the tab).
 pub fn user_message(host: &Host, chat: &str, author: &str, text: &str, chips: Vec<Json>, kind: &'static str) -> Result<()> {
     let text = match kind {
         "stop" => "stop: finish the step you are in, don't start new work, `report` what you did and wait for the user".to_string(),
@@ -207,27 +246,38 @@ pub fn user_message(host: &Host, chat: &str, author: &str, text: &str, chips: Ve
         bail!("empty message");
     }
     let canvas = host.chat.canvas_of(host, chat).ok_or_else(|| anyhow!("unknown chat `{chat}`"))?;
+    let detached = host.chat.state_of(host, chat).as_deref() == Some("detached");
+    if kind == "stop" && detached {
+        bail!("the agent isn't attached: nothing to stop");
+    }
     let item = InboxItem {
         id: short_id("m_"),
         kind,
         text: text.clone(),
         author: author.into(),
         nodes: chips.iter().filter_map(|c| c["node"].as_str().map(String::from)).collect(),
-        chips,
+        chips: chips.clone(),
         annotation: None,
         canvas,
         chat: Some(chat.into()),
         at: now_ms(),
     };
-    host.chat.append(host, chat, None, json!({"kind": "queued", "id": item.id, "text": text}))?;
-    let sessions: Vec<String> = host.with_sessions(|ss| ss.values().filter(|s| s.chat.as_deref() == Some(chat)).map(|s| s.id.clone()).collect());
-    if sessions.is_empty() {
-        // Detached: the next session of the same client gets it.
-        let client = host.chat.client_of(host, chat).unwrap_or_default();
-        host.inbox_orphans.lock().unwrap().entry(client).or_default().push(item);
-    } else {
-        for s in sessions {
-            push(host, &s, item.clone());
+    pending(host, chat, |v| v.push(item.clone()));
+    let mut ev = json!({"kind": "queued", "id": item.id, "text": text, "author": author, "context": chips});
+    if kind == "stop" {
+        ev["stop"] = json!(true);
+    }
+    host.chat.append(host, chat, None, ev)?;
+    let peers: Vec<rmcp::Peer<rmcp::RoleServer>> = host.with_sessions(|ss| {
+        ss.values()
+            .filter(|s| s.chat.as_deref() == Some(chat) && s.client.as_deref() == Some("claude"))
+            .filter_map(|s| s.peer.clone())
+            .collect()
+    });
+    host.inbox_wake.notify_waiters();
+    if !detached {
+        for p in peers {
+            channel(Some(p), &item);
         }
     }
     Ok(())
@@ -235,7 +285,12 @@ pub fn user_message(host: &Host, chat: &str, author: &str, text: &str, chips: Ve
 
 /// `chat.unqueue` on an agent chat: take a message back before the agent read it.
 pub fn unqueue(host: &Host, chat: &str, id: &str) -> bool {
-    let mut found = host.with_sessions(|ss| {
+    let mut found = pending(host, chat, |v| {
+        let before = v.len();
+        v.retain(|i| i.id != id);
+        v.len() != before
+    });
+    found |= host.with_sessions(|ss| {
         let mut f = false;
         for s in ss.values_mut() {
             let before = s.inbox.len();
@@ -244,39 +299,37 @@ pub fn unqueue(host: &Host, chat: &str, id: &str) -> bool {
         }
         f
     });
-    for v in host.inbox_orphans.lock().unwrap().values_mut() {
-        let before = v.len();
-        v.retain(|i| i.id != id);
-        found |= v.len() != before;
-    }
     if found {
         let _ = host.chat.append(host, chat, None, json!({"kind": "dequeued", "id": id, "reason": "cancelled"}));
     }
     found
 }
 
-/// A new external session of `client`: messages typed while no session was attached.
-pub fn adopt_orphans(host: &Host, session: &str, client: &str) {
-    let items = host.inbox_orphans.lock().unwrap().remove(client).unwrap_or_default();
-    let chat = host.with_sessions(|ss| ss.get(session).and_then(|s| s.chat.clone()));
-    for mut i in items {
-        // Move the queued line to the new session's tab (the old one is detached).
-        if let (Some(old), Some(new)) = (i.chat.clone(), chat.clone())
-            && old != new
-        {
-            let _ = host.chat.append(host, &old, None, json!({"kind": "dequeued", "id": i.id, "reason": format!("moved to {new}")}));
-            let _ = host.chat.append(host, &new, None, json!({"kind": "queued", "id": i.id, "text": i.text}));
-            i.chat = Some(new);
-        }
-        push(host, session, i);
+/// A new session attached to its agent's tab: a `stop` left for an earlier session has
+/// nothing left to stop (dropped); messages wait for this session's first result.
+pub fn adopt_orphans(host: &Host, session: &str) {
+    let Some(chat) = ext_chat_of(host, session) else { return };
+    let stale: Vec<String> = pending(host, &chat, |v| {
+        let ids = v.iter().filter(|i| i.kind == "stop").map(|i| i.id.clone()).collect();
+        v.retain(|i| i.kind != "stop");
+        ids
+    });
+    for id in stale {
+        let _ = host.chat.append(host, &chat, None, json!({"kind": "dequeued", "id": id, "reason": "expired"}));
     }
 }
 
 /// Take the session's items (`all`: also the selection). Messages are marked delivered in
 /// their chat (the `queued` line becomes a user message).
 pub fn drain(host: &Host, session: &str, all: bool) -> Vec<InboxItem> {
-    let items = host
-        .with_sessions(|ss| {
+    // The tab's messages first (any session of that agent may take them), then this
+    // session's own notices.
+    let mut items = match ext_chat_of(host, session) {
+        Some(chat) => pending(host, &chat, std::mem::take),
+        None => vec![],
+    };
+    items.extend(
+        host.with_sessions(|ss| {
             let s = ss.get_mut(session)?;
             if s.inbox.is_empty() {
                 return None;
@@ -285,7 +338,8 @@ pub fn drain(host: &Host, session: &str, all: bool) -> Vec<InboxItem> {
             s.inbox = keep;
             Some(take)
         })
-        .unwrap_or_default();
+        .unwrap_or_default(),
+    );
     for i in &items {
         if let Some(chat) = &i.chat {
             let _ = host.chat.append(host, chat, None, json!({"kind": "dequeued", "id": i.id, "reason": "injected"}));
@@ -353,7 +407,8 @@ pub async fn wait(host: &Host, session: &str, secs: u64) -> Result<Vec<InboxItem
         let notified = host.inbox_wake.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let ready = host.with_session(session, |s| s.inbox.iter().any(InboxItem::wakes))?;
+        let ready = host.with_session(session, |s| s.inbox.iter().any(InboxItem::wakes))?
+            || ext_chat_of(host, session).is_some_and(|c| pending(host, &c, |v| !v.is_empty()));
         if ready || Instant::now() >= deadline {
             return Ok(drain(host, session, true));
         }

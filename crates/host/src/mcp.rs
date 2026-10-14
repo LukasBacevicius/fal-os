@@ -32,6 +32,31 @@ pub struct CanvasMcp {
     host: Arc<Host>,
     ws: Arc<crate::workspace::Workspace>,
     tool_router: ToolRouter<Self>,
+    conn: Arc<Conn>,
+}
+
+/// One MCP connection's external agent sessions: closed when the connection goes away (the
+/// client ended its MCP session, e.g. Claude Code or Codex quit), so their tabs detach at
+/// once instead of after the silence timeout.
+#[derive(Default)]
+pub struct Conn {
+    sessions: std::sync::Mutex<Vec<(std::sync::Weak<Host>, String)>>,
+}
+
+impl Conn {
+    fn track(&self, host: &Arc<Host>, session: &str) {
+        self.sessions.lock().unwrap().push((Arc::downgrade(host), session.to_string()));
+    }
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        for (host, id) in std::mem::take(&mut *self.sessions.lock().unwrap()) {
+            if let Some(h) = host.upgrade() {
+                h.close_session(&id);
+            }
+        }
+    }
 }
 
 /// Who is calling: the MCP client and the fal-os headers of the HTTP request.
@@ -415,6 +440,7 @@ impl CanvasMcp {
         Ok(Self {
             host,
             ws,
+            conn: Arc::default(),
             tool_router: Self::tool_router() + Self::chat_tools() + Self::workspace_tools() + Self::ops_tools() + Self::library_tools() + Self::app_tools() + Self::director_tools(),
         })
     }
@@ -581,13 +607,15 @@ impl CanvasMcp {
                         .unwrap_or_else(|| "main".into())
                 });
                 canvas = Some(home.clone());
-                let c = self.host.chat.create_ext(&self.host, &client, &a.agent_name, &home);
+                let c = self.host.chat.attach_ext(&self.host, &client, &a.agent_name, &home);
                 self.host.bind_session_chat(&info.id, &c, Some(client.clone()));
                 let _ = self.host.with_session(&info.id, |s| {
                     s.peer = meta.peer.clone();
                     s.presence.canvas.get_or_insert(home.clone());
                 });
-                crate::director::adopt_orphans(&self.host, &info.id, &client);
+                crate::director::adopt_orphans(&self.host, &info.id);
+                // The tab detaches when this MCP connection closes.
+                self.conn.track(&self.host, &info.id);
                 overview = crate::director::overview(&self.host, Some(&info.id), &home, false).ok();
                 // Messages the user left for this agent while none was attached.
                 if let (Some(o), Some(p)) = (overview.as_mut(), crate::director::pending_for_result(&self.host, &info.id)) {
@@ -1422,6 +1450,7 @@ impl ServerHandler for CanvasMcp {
             host: host.clone(),
             ws: self.ws.clone(),
             tool_router: self.tool_router.clone(),
+            conn: self.conn.clone(),
         };
         let ext = crate::transcript::ext_start(&host, &name, &args);
         let tcc = ToolCallContext::new(&target, request, context);

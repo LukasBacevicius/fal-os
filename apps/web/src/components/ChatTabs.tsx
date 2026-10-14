@@ -92,7 +92,7 @@ export function ChatTabs() {
               className={`tab ${on ? 'on' : ''} ${drag?.over === id ? (drag.after ? 'drop-after' : 'drop-before') : ''}`}
               tabIndex={0}
               draggable={renaming !== id}
-              title={`${chatTitle(chat, id)}${isExternal(id) ? ' · your agent (message it here)' : chat.meta[id]?.driver ? ` · ${chat.meta[id]?.driver}` : ''}`}
+              title={`${chatTitle(chat, id)}${isExternal(id) ? ` · your agent (message it here)${chat.meta[id]?.state === 'detached' ? ' · detached' : ''}` : chat.meta[id]?.driver ? ` · ${chat.meta[id]?.driver}` : ''}`}
               onClick={() => openChat(id)}
               onDoubleClick={() => setRenaming(id)}
               onContextMenu={(e) => {
@@ -151,11 +151,12 @@ export function ChatTabs() {
                 <span className="tab-title">{chatTitle(chat, id)}</span>
               )}
               {running && <span className="tab-mark">*</span>}
+              {isExternal(id) && chat.meta[id]?.state === 'detached' && <span className="tab-mark faint" title="detached: messages wait for its next session">○</span>}
               {!running && chat.unread[id] && <span className="tab-mark">•</span>}
               {modHeld && i < 9 ? (
                 <span className="tab-badge">{MOD}{i + 1}</span>
               ) : (
-                !running && (
+                (!running || isExternal(id)) && (
                   <button
                     className="link tab-x"
                     title="close tab (stays in history)"
