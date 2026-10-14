@@ -469,6 +469,9 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .batch-line { cursor: pointer; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .batch-line:hover { color: var(--text); }
 .err-line { color: var(--dim); }
+.err-details { white-space: pre-wrap; word-break: break-word; margin: 2px 0 0 12px; max-height: 160px; overflow: auto; }
+.held-line { padding: 4px 10px 2px; font-size: 12px; }
+.held-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .done-line { cursor: default; }
 .revert { margin-left: 2ch; }
 .question { border-left: 1px solid var(--line); padding-left: 1ch; }

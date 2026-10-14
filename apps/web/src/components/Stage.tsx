@@ -18,6 +18,7 @@ import { addContext } from '../controller';
 import { TextLayer, createNote, editNode } from './TextLayer';
 import { installKeys, pointer } from '../keys';
 import { installWatchdog } from '../watchdog';
+import { installHold } from '../hold';
 import { theme } from '../theme';
 import { FloatingHead } from './AppMenu';
 import { VideoLayer } from './VideoLayer';
@@ -306,6 +307,8 @@ export function Stage() {
   useEffect(() => installKeys(), []);
   // Agent markers (activity, claims, job progress) can't outlive their owners.
   useEffect(() => installWatchdog(), []);
+  // A held chat message goes out when its wall clears.
+  useEffect(() => installHold(), []);
 
   // Files from Finder and library tiles: sized ghosts at the pointer, the frame under it
   // highlighted, and the drop lands there as a grid (into the frame). Esc cancels (native).

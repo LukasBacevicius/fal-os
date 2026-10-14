@@ -21,6 +21,11 @@ import { applyEvent, applyHistory, applyList, emptyChat, removeChat, selectChat,
 import { bootProject, loadScene, rememberProject, saveCamera, touchProject } from './projects';
 import { onActivity, onActivityClear } from './activity';
 import { reconcileJobs } from './watchdog';
+import { slowLine } from './progress';
+import { onRunError } from './hold';
+
+/** The project switch's slow-only progress line. */
+const switching = slowLine('switch');
 import { onAppEvent, setAppsBase } from './apps';
 import { clipNodes, restoreNodes } from './actions';
 
@@ -362,6 +367,7 @@ export class HostSync {
       this.noticeTimer = 0;
       hideCard('host-down');
       resolveNotice('conn');
+      switching.end();
       setState({ conn: 'connected', canvasName: this.app.canvasName(), camera: this.app.camera() });
       this.app.tick();
       this.syncAssets(getState().nodes);
@@ -417,6 +423,8 @@ export class HostSync {
       case 'chat.event':
         if (typeof m.chat === 'string' && m.event) {
           if (m.event.kind === 'dequeued' && m.event.reason === 'stopped') restoreQueued(m.chat, String(m.event.id));
+          // One automatic retry for a transient failure; a wall holds the message.
+          if (m.event.kind === 'status' && m.event.state === 'error') onRunError(m.chat, m.event, typeof m.ts === 'number' ? m.ts : Date.now());
           setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event, typeof m.ts === 'number' ? m.ts : Date.now()) }));
         }
         break;
@@ -893,6 +901,8 @@ export function switchProject(project: string): boolean {
   }));
   rememberProject(project);
   touchProject(project);
+  // Slow-only: `opening <name>…` when the host takes a while to send the project.
+  switching.start(`opening ${s.projects.find((p) => p.id === project)?.name ?? project}`);
   startSync(new HostSync(app, host, project, prev.actor, project));
   return true;
 }

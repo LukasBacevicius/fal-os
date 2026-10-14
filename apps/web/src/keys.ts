@@ -18,6 +18,7 @@ import { openPreview, previewable, previewKey } from './preview';
 import { copyFiles, openExport } from './out';
 import { blurApp, focusApp, installAppMessages } from './apps';
 import { phys } from './hotkeys';
+import { withProgress } from './progress';
 
 const isMac = navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.includes('Mac');
 export const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -278,7 +279,7 @@ export function installKeys(): () => void {
     if (!editable(e.target) && !getState().editing && !getState().overlay) copy(e);
   };
   const onPaste = (e: ClipboardEvent) => {
-    if (!editable(e.target) && !getState().editing && !getState().overlay) void paste(e, pointer.at);
+    if (!editable(e.target) && !getState().editing && !getState().overlay) void withProgress('pasting', () => paste(e, pointer.at), { key: 'paste', done: () => 'pasted' });
   };
   const offApps = installAppMessages();
   window.addEventListener('keydown', kd, true);

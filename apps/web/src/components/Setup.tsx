@@ -161,6 +161,8 @@ export function Setup() {
     const v = await setupStatus();
     setS(v);
     if (v) autoInstall(v);
+    // A message held behind a missing key or sign-in goes out once they're there.
+    if (v) window.dispatchEvent(new CustomEvent('falos:setup-changed', { detail: { falKey: !!v.falKey, claude: claudeReady(v) } }));
     return v;
   }, []);
   const pollTasks = useCallback(async () => {

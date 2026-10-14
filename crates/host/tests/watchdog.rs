@@ -76,3 +76,11 @@ async fn orphaned_generating_tiles_fail_after_the_grace_period() {
     // The reconnect snapshot lists no jobs any more.
     assert_eq!(host.jobs_snapshot(), json!([]));
 }
+
+#[tokio::test]
+async fn only_transient_failures_are_retried() {
+    // Nothing listens on port 9: a connect error, safe to retry even for a submit.
+    let e = anyhow::Error::from(reqwest::get("http://127.0.0.1:9/").await.unwrap_err()).context("fal queue submit");
+    assert!(falos_host::fal::transient(&e, false));
+    assert!(!falos_host::fal::transient(&anyhow::anyhow!("422 unprocessable: bad prompt"), true));
+}

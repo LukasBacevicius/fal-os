@@ -32,6 +32,18 @@ fn relay(http: &reqwest::Client) -> &'static Relay {
 }
 
 const POLL: Duration = Duration::from_millis(1000);
+/// Wait before the one automatic retry of a transient failure.
+const RETRY_AFTER: Duration = Duration::from_secs(2);
+
+/// A failure worth one automatic retry: no connection, or a busy / unavailable upstream.
+/// `idempotent`: the request can be repeated safely (reads), so timeouts count too; a submit
+/// that may have reached fal is never repeated (it would run, and bill, twice).
+pub fn transient(e: &anyhow::Error, idempotent: bool) -> bool {
+    e.chain().filter_map(|c| c.downcast_ref::<reqwest::Error>()).any(|r| {
+        let busy = r.status().is_some_and(|s| matches!(s.as_u16(), 429 | 502 | 503 | 504));
+        r.is_connect() || busy || (idempotent && (r.is_timeout() || r.is_request()))
+    })
+}
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The system actor that writes job progress (kept off the requester's undo stack).
@@ -328,7 +340,16 @@ impl Job {
 
     async fn run(&self) -> Result<()> {
         let http = &self.host.http;
-        let (request_id, submit) = self.submit().await?;
+        // One retry when fal never took the request (no connection, 429 / 502–504).
+        let (request_id, submit) = match self.submit().await {
+            Ok(v) => v,
+            Err(e) if transient(&e, false) => {
+                tracing::info!("generation {}: submit failed ({e:#}); retrying once", self.node);
+                tokio::time::sleep(RETRY_AFTER).await;
+                self.submit().await?
+            }
+            Err(e) => return Err(e),
+        };
         if !self.update(json!({"job": request_id})) {
             return Ok(());
         }
@@ -340,7 +361,15 @@ impl Job {
             if started.elapsed() > TIMEOUT {
                 bail!("timed out after {} min", TIMEOUT.as_secs() / 60);
             }
-            let (status, pos, error) = self.status(&request_id, &submit).await?;
+            // Status polls are idempotent: a blip is retried once before the job fails.
+            let (status, pos, error) = match self.status(&request_id, &submit).await {
+                Ok(v) => v,
+                Err(e) if transient(&e, true) => {
+                    tokio::time::sleep(RETRY_AFTER).await;
+                    self.status(&request_id, &submit).await?
+                }
+                Err(e) => return Err(e),
+            };
             match status.as_str() {
                 "COMPLETED" | "OK" | "SUCCEEDED" => {
                     if let Some(e) = error {
@@ -362,7 +391,14 @@ impl Job {
             tokio::time::sleep(POLL).await;
         }
 
-        let result = self.result(&request_id, &submit).await?;
+        let result = match self.result(&request_id, &submit).await {
+            Ok(v) => v,
+            Err(e) if transient(&e, true) => {
+                tokio::time::sleep(RETRY_AFTER).await;
+                self.result(&request_id, &submit).await?
+            }
+            Err(e) => return Err(e),
+        };
         let media = find_media(&result).ok_or_else(|| anyhow!("no media url in fal result"))?;
         let asset = download(
             &self.host,

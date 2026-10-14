@@ -2,7 +2,9 @@ import { Fragment, useState, type ReactNode } from 'react';
 import { setState, useStore } from '../store';
 import { hostSync } from '../sync';
 import { focusNode } from '../controller';
-import { actCost, actLabel, actNodes, agentLine, chatColor, chatTitle, cleanError, slug, workSummary, type Item, type Turn } from '../chat';
+import { actCost, actLabel, actNodes, agentLine, chatColor, chatTitle, slug, workSummary, type Item, type Turn } from '../chat';
+import { ErrorLine } from './ErrorLine';
+import { autoRetried } from '../hold';
 import { getState } from '../store';
 import { openChat, sendChatMessage } from '../chatActions';
 import { usd } from '../format';
@@ -249,15 +251,11 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
       );
     case 'error':
       return (
-        <div className="row err-line">
-          ! {cleanError(item.text)}
-          {item.actions.includes('continue') && (
-            <>
-              {'  '}
-              <button className="link" onClick={() => hostSync()?.continueChat(chat)}>[continue]</button>
-            </>
-          )}
-        </div>
+        <ErrorLine
+          raw={item.text}
+          cont={item.actions.includes('continue') ? () => hostSync()?.continueChat(chat) : undefined}
+          retried={autoRetried(chat, item.text)}
+        />
       );
     case 'done': {
       const turn = item.turn;

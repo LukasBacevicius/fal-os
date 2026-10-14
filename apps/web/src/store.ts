@@ -91,6 +91,9 @@ export interface State {
   /** Asset library: the left-panel tab (⌘⇧A) or the full-screen view (⌘⇧L). */
   library: 'panel' | 'full' | null;
   saved: 'idle' | 'saving' | 'saved';
+  /** A chat message held behind a wall (no host, runtime down, key missing, …): sent by
+   *  itself when the wall clears (hold.ts). */
+  held: import('./hold').Held | null;
 }
 
 export interface NoticeAction { label: string; run: () => void }
@@ -219,6 +222,7 @@ let state: State = {
   })(),
   library: null,
   saved: 'idle',
+  held: null,
 };
 
 const listeners = new Set<() => void>();
@@ -245,6 +249,11 @@ export function useStore<T>(select: (s: State) => T): T {
 
 const fadeTimers = new Map<string, number>();
 let seq = 0;
+let errorCount = 0;
+
+/** How many error lines have been shown so far (slow-progress lines check it, so they never
+ *  end in "done" over an error). */
+export const errorsSoFar = () => errorCount;
 const MAX_NOTICES = 6;
 
 function scheduleFade(n: Notice) {
@@ -262,6 +271,7 @@ function scheduleFade(n: Notice) {
 /** Adds a notice, or updates the one with the same `key` in place. */
 export function notify(text: string, o: { key?: string; level?: Notice['level']; actions?: NoticeAction[]; onDismiss?: () => void } = {}) {
   const n: Notice = { key: o.key ?? `n${++seq}`, text, level: o.level ?? 'ok', actions: o.actions ?? [], onDismiss: o.onDismiss, at: performance.now() + ++seq / 1000 };
+  if (n.level === 'error') errorCount++;
   setState((s) => {
     const i = s.notices.findIndex((x) => x.key === n.key);
     let list = i >= 0 ? s.notices.map((x, j) => (j === i ? n : x)) : [...s.notices, n];

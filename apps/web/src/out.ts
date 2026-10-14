@@ -7,6 +7,7 @@
 // mouse button is still down. Web: downloads, `DownloadURL` drags and the async clipboard.
 // Host endpoints that aren't there yet fail softly with a toast.
 
+import { withProgress } from './progress';
 import { getState, setState, toast } from './store';
 import { hostSync } from './sync';
 import { desktop, isDesktop, type AppInfo } from './desktop';
@@ -519,7 +520,8 @@ export async function runExport(
     return null;
   }
   const body: Record<string, unknown> = { nodes: target, presets: payloadRows(rows), ...opts };
-  const r = await soft('export', () => api<ExportResult>('/api/export', body));
+  // `exported …` (announce) is the done line; the progress line only bridges a slow export.
+  const r = await withProgress('exporting', () => soft('export', () => api<ExportResult>('/api/export', body)), { key: 'export' });
   if (!r) return null;
   announce(r);
   return r;

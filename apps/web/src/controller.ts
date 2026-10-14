@@ -1,7 +1,8 @@
 // Glue between the wasm CanvasApp and the UI store: event handling, local persistence, file
 // import, chat context from the canvas.
 
-import { getState, setState, toast } from './store';
+import { getState, notify, setState, toast } from './store';
+import { withProgress } from './progress';
 import * as persist from './persist';
 import type { CanvasApp } from './wasm';
 import type { NodeView, Pick } from './types';
@@ -134,10 +135,18 @@ export async function importFiles(files: File[], at?: [number, number], opts: { 
   const [wx, wy] = app.screenToWorld(x, y);
   const ph = addPlaceholder(gridLayout(files.map((f) => fileGhost(f.type, f.name)).map((g) => [g.w, g.h]), [wx, wy], frameRect(opts.parent)));
   trackImport(ph);
+  const n = files.length;
   try {
-    return (await app.importFiles(files, x, y, { parent: opts.parent ?? undefined })) as string[];
+    const ids = await withProgress(`importing ${n === 1 ? files[0].name : `${n} files`}`, async () => (await app.importFiles(files, x, y, { parent: opts.parent ?? undefined })) as string[], {
+      key: 'import',
+      done: (ids) => (ids.length === n ? (n === 1 ? 'imported' : `${n} files imported`) : null),
+    });
+    // Never "imported" when something failed: say how many made it (the failures are named
+    // in their own lines).
+    if (ids.length < n) notify(`${ids.length} of ${n} imported`, { key: 'import', level: 'error' });
+    return ids;
   } catch (e) {
-    toast(`import failed: ${e}`);
+    notify(`import failed: ${e}`, { key: 'import', level: 'error' });
     return [];
   } finally {
     trackImport(null);

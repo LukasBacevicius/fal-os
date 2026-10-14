@@ -1,3 +1,4 @@
+import { plainError } from '../errors';
 import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
 import type { NodeView } from '../types';
@@ -172,7 +173,7 @@ export function NodeOverlays() {
                   {failed ? <div>{model}</div> : (
                     <GenLine id={n.id} model={model} status={`${status || 'queued'}${queue}`} progress={typeof n.props.progress === 'number' ? n.props.progress : null} />
                   )}
-                  {failed && n.props.error ? <div>{String(n.props.error).slice(0, 200)}</div> : <div className="gen-prompt">{prompt}</div>}
+                  {failed && n.props.error ? <div>{plainError(String(n.props.error)).text}</div> : <div className="gen-prompt">{prompt}</div>}
                 </div>
               )}
               {failed && (

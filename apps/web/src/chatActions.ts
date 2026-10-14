@@ -3,12 +3,24 @@
 import { getState, setState, toast, type State } from './store';
 import { hostSync } from './sync';
 import { isExternal, selectChat, tabs, type Chip } from './chat';
+import { hold, sent, wallFor } from './hold';
 
 /** Sends `text` with `context` to `chat` (null = start a new chat). While the chat runs the
  *  host queues it. Returns false (with a toast) when there is no host. */
 export function sendTo(chat: string | null, text: string, context: Chip[]): boolean {
   const s = getState();
   const sync = hostSync();
+  // A wall (host reconnecting, runtime down, key missing, …): held, sent when it clears.
+  const wall = sync ? wallFor(s, chat) : null;
+  if (wall) {
+    if (s.held) {
+      toast('a message is already held · [send now] or [cancel] it first');
+      return false;
+    }
+    hold({ chat, text, context, wall });
+    setState({ chatOpen: true, chatView: 'chat', subView: null });
+    return true;
+  }
   if (!sync || s.conn !== 'connected') {
     toast('chat needs a fal-os host');
     return false;
@@ -17,6 +29,7 @@ export function sendTo(chat: string | null, text: string, context: Chip[]): bool
     toast('not connected to the host');
     return false;
   }
+  sent(chat, text, context);
   setState((st) => ({ chatOpen: true, chatView: 'chat', subView: null, chat: chat === null ? selectChat(st.chat, null) : st.chat }));
   return true;
 }

@@ -5,6 +5,7 @@ import { addSelectionToChat, attachFiles, emptySpot, pickFiles } from '../contro
 import { ASSET_MIME, draggedShas, placeMany } from '../library';
 import { addChips, agentLine, chatColor, chatTitle, draftKey, groupTurns, isExternal, slug, transcript, type Chip, type Transcript } from '../chat';
 import { sendChatMessage, setDriver, steerQueued, steerText } from '../chatActions';
+import { HeldLine } from './ErrorLine';
 import { toast } from '../store';
 import { Chips } from './Chips';
 import { ago, ChatHistory, ChatTabs, DeleteConfirm } from './ChatTabs';
@@ -477,6 +478,7 @@ export function ChatPanel() {
               ))}
             </div>
           )}
+          <HeldLine />
           <Composer
             running={main.running}
             readOnly={readOnly}
