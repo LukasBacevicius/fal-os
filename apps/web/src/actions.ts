@@ -82,6 +82,16 @@ function pasteClip(clip: Clip, d: [number, number]): string[] {
   return roots;
 }
 
+/** Nodes (with their subtrees) as a clip, for carrying them into another scene. */
+export function clipNodes(ids: string[]): Clip | null {
+  return clipOf(ids);
+}
+
+/** Recreates a clip at its own positions (fresh ids); returns the new root ids. */
+export function restoreNodes(clip: Clip): string[] {
+  return pasteClip(clip, [0, 0]);
+}
+
 export function duplicate() {
   const clip = clipOf(getState().selection);
   if (clip) pasteClip(clip, [24, 24]);
