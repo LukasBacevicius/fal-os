@@ -33,7 +33,10 @@ function Composer({ running, readOnly, question, agent, queued }: {
   running: boolean; readOnly: boolean; question: string[] | null; agent: string | null; queued: { id: string; text: string }[];
 }) {
   const chat = useStore((s) => s.chat);
-  const chatDriver = chat.active ? chat.meta[chat.active]?.driver : undefined;
+  // A chat with no messages yet keeps the driver the user picked last (its host default
+  // `opus` would silently undo that choice); the first send sets it on the chat.
+  const started = !!(chat.active && chat.threads[chat.active]?.events.length);
+  const chatDriver = chat.active && started ? chat.meta[chat.active]?.driver : undefined;
   useEffect(() => {
     if (chatDriver === 'opus' || chatDriver === 'fal' || chatDriver === 'codex') setDriver(chatDriver);
   }, [chat.active, chatDriver]);
