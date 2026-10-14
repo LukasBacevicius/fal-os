@@ -59,7 +59,8 @@ button, textarea, select, input { font: inherit; color: inherit; }
 
 /* ---- canvas ---- */
 
-.stage { position: relative; flex: 1; min-width: 0; overflow: hidden; background: var(--bg); }
+/* The canvas keeps 240px when the window shrinks; the side panels give way down to their minimums. */
+.stage { position: relative; flex: 1; min-width: 240px; overflow: hidden; background: var(--bg); }
 .stage-canvas { position: absolute; left: 0; top: 0; display: block; touch-action: none; outline: none; }
 
 .node-overlays, .presence-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
@@ -242,7 +243,7 @@ button, textarea, select, input { font: inherit; color: inherit; }
   border-left: 1px solid var(--line);
   background: var(--bg);
 }
-.chat { width: var(--chat-w, 360px); }
+.chat { width: var(--chat-w, 360px); flex: 0 1 auto; min-width: 280px; }
 
 /* Panel resize handles (ResizeHandle.tsx): an 8px hit area centered on the panel's 1px
    border; the line lights on hover and while dragging. */
@@ -483,7 +484,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .complete > div { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- layers + properties ---- */
-.layers { position: relative; z-index: 3; flex: none; width: var(--layers-w, 232px); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
+.layers { position: relative; z-index: 3; flex: 0 1 auto; min-width: 180px; width: var(--layers-w, 232px); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
 .layers-head { height: 28px; flex: none; display: flex; align-items: center; gap: 1ch; padding: 0 8px; border-bottom: 1px solid var(--line); }
 .layers-filter { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; }
 .layers-filter::placeholder { color: var(--faint); }
@@ -650,7 +651,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 
 /* ---- asset library (⌘⇧A panel, ⌘⇧L full) ---- */
 .library { display: flex; flex-direction: column; min-height: 0; background: var(--bg); outline: none; position: relative; }
-.library.panel { z-index: 3; flex: none; width: var(--libpanel-w, 320px); border-right: 1px solid var(--line); }
+.library.panel { z-index: 3; flex: 0 1 auto; min-width: 200px; width: var(--libpanel-w, 320px); border-right: 1px solid var(--line); }
 .library.full { position: fixed; inset: 0; z-index: 20; }
 .lib-head { height: 28px; flex: none; display: flex; align-items: center; gap: 1ch; padding: 0 8px; border-bottom: 1px solid var(--line); }
 .lib-search { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; }
