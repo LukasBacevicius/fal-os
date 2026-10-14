@@ -285,7 +285,9 @@ impl ChatHub {
                 if !valid_chat_id(&meta.chat) {
                     continue;
                 }
-                if meta.state == "running" {
+                if meta.external {
+                    meta.state = "detached".into(); // no session survives a host restart
+                } else if meta.state == "running" {
                     meta.state = "idle".into(); // the host restarted mid-run
                 }
                 let seq = read_log(&log_path(host, &meta.chat))
@@ -975,7 +977,9 @@ impl ChatHub {
                         }
                     }
                     s.meta.state = st;
-                    save = true;
+                    // An external tab's liveness is runtime state (reset on load): not saved,
+                    // so an agent coming and going doesn't count as using the project.
+                    save = !s.meta.external;
                 }
                 Some("agent") => {
                     let a = event["agent"].as_str().unwrap_or("agent").to_string();
