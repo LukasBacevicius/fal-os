@@ -485,6 +485,12 @@ impl Canvas {
             .is_some_and(|s| s.undo.can_undo())
     }
 
+    /// `(undo, redo)` stack depths of `actor_id` (UIs keep per-step state, e.g. the selection,
+    /// in step with them).
+    pub fn undo_depth(&self, actor_id: &str) -> (usize, usize) {
+        self.sessions.get(actor_id).map_or((0, 0), |s| (s.undo.undo_count(), s.undo.redo_count()))
+    }
+
     fn undo_redo(&mut self, actor_id: &str, undo: bool) -> Result<bool> {
         let Some(s) = self.sessions.get_mut(actor_id) else {
             return Ok(false);

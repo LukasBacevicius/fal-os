@@ -98,11 +98,30 @@ struct App {
     last_camera: Camera,
     stats: falos_engine::FrameStats,
     raf: Option<RafSlot>,
+    /// The selection that goes with each of the local actor's undo / redo steps (parallel to
+    /// the doc's stacks): undo restores `before`, redo `after`.
+    sel_undo: Vec<SelStep>,
+    sel_redo: Vec<SelStep>,
+    /// The selection at the last frame boundary: the "before" of a step committed now.
+    sel_stable: Vec<String>,
+    /// The newest step's `after` still follows the selection (until the next frame).
+    sel_open: bool,
+    /// ⌥ distance labels last sent to the UI (CSS px + text).
+    measure_labels: Json,
     /// This app's GPU device (see [`LOST_DEVICES`]); `lost` once it is gone: nothing renders,
     /// and a `device_lost` event tells the page to recreate the app (the last frame stays).
     gpu_id: u32,
     lost: bool,
 }
+
+#[derive(Clone, Debug, Default)]
+struct SelStep {
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+/// Loro's per-actor undo stack cap (`set_max_undo_steps` in falos-doc).
+const MAX_UNDO: usize = 1000;
 
 /// Devices whose `lost` promise resolved: (gpu id, reason). wgpu's callback must be `Send`, so
 /// it can't hold the app; `tick` picks its entry up.
@@ -400,13 +419,91 @@ impl App {
         if cmds.is_empty() {
             return Err("no commands".into());
         }
+        let (depth, _) = self.doc.undo_depth(&self.actor.id);
         let r = if tracked { self.doc.apply(&self.actor, None, cmds) } else { self.doc.apply_untracked(&self.actor, cmds) };
+        if tracked && r.is_ok() {
+            self.push_sel_step(depth);
+        }
         let r = r.map_err(|e| e.to_string());
         if let Err(e) = &r {
             self.emit("error", json!({"message": e}));
         }
         self.sync_doc();
         r
+    }
+
+    /// A tracked commit happened (`depth`: the undo depth before it): a selection step goes
+    /// with each new undo step. Its `after` follows the selection until the next frame, so
+    /// "duplicate, then select the copies" stores the copies.
+    fn push_sel_step(&mut self, depth: usize) {
+        let (now, _) = self.doc.undo_depth(&self.actor.id);
+        if now <= depth && depth < MAX_UNDO {
+            return; // merged into the previous step, or nothing to undo
+        }
+        if now <= depth {
+            self.sel_undo.drain(..self.sel_undo.len().min(1)); // the cap dropped the oldest
+        }
+        self.sel_undo.push(SelStep { before: self.sel_stable.clone(), after: self.ix.selection.clone() });
+        let n = self.sel_undo.len();
+        if n > now {
+            self.sel_undo.drain(..n - now);
+        }
+        self.sel_redo.clear();
+        self.sel_open = true;
+    }
+
+    /// ⌘Z / ⌘⇧Z: the doc step, then the selection that went with it (nodes that no longer
+    /// exist drop out).
+    fn undo_redo(&mut self, redo: bool) -> bool {
+        let id = self.actor.id.clone();
+        let ok = if redo { self.doc.redo(&id) } else { self.doc.undo(&id) }.unwrap_or(false);
+        if ok {
+            let step = if redo { self.sel_redo.pop() } else { self.sel_undo.pop() };
+            if let Some(st) = step {
+                self.ix.selection = if redo { st.after.clone() } else { st.before.clone() };
+                if redo { self.sel_undo.push(st) } else { self.sel_redo.push(st) }
+            }
+        }
+        self.sync_doc();
+        self.ix.prune(&self.scene);
+        self.sel_stable = self.ix.selection.clone();
+        self.sel_open = false;
+        if ok {
+            let sel = self.ix.selection.clone();
+            self.emit("selection", json!(sel));
+            self.dirty = true;
+        }
+        ok
+    }
+
+    /// ⌥ held over another node with a selection: distance lines (world) and their labels.
+    fn measure(&self) -> Vec<(crate::snap::Line, f32)> {
+        let ix = &self.ix;
+        if !ix.alt || ix.dragging() || ix.tool != Tool::Select || ix.selection.is_empty() {
+            return Vec::new();
+        }
+        let Some(h) = ix.hover.as_deref().filter(|h| !ix.selection.iter().any(|s| s == h)) else { return Vec::new() };
+        let (Some(a), Some(b)) = (self.scene.bounds_of(&ix.selection), self.scene.get(h).map(|n| n.rect)) else { return Vec::new() };
+        crate::snap::measure(a, b)
+    }
+
+    /// Sends the ⌥ distance labels when they change (positions follow the camera).
+    fn refresh_measure(&mut self, m: &[(crate::snap::Line, f32)]) {
+        let labels: Vec<Json> = m
+            .iter()
+            .map(|(l, v)| {
+                let c = self.css_point([(l.a[0] + l.b[0]) * 0.5, (l.a[1] + l.b[1]) * 0.5]);
+                let vertical = (l.a[0] - l.b[0]).abs() < (l.a[1] - l.b[1]).abs();
+                // Whole units, one decimal below 10 when zoomed in.
+                let text = if *v < 10.0 && self.camera.zoom / self.dpr > 2.0 { format!("{:.1}", v) } else { format!("{}", v.round()) };
+                json!({"x": c[0].round(), "y": c[1].round(), "text": text, "vertical": vertical})
+            })
+            .collect();
+        let labels = Json::Array(labels);
+        if labels != self.measure_labels {
+            self.measure_labels = labels.clone();
+            self.emit("measure", labels);
+        }
     }
 
     fn build_overlay(&self) -> Vec<OverlayPrim> {
@@ -461,6 +558,7 @@ impl App {
                 })
             })
             .collect();
+        let measure: Vec<crate::snap::Line> = self.measure().into_iter().map(|(l, _)| l).collect();
         let dim: Vec<[f32; 4]> = match &self.lineage {
             Some(keep) => self
                 .scene
@@ -486,6 +584,8 @@ impl App {
             drop_target: self.ix.drop_target().or(self.drop_target.as_deref()).and_then(|id| self.scene.get(id)).map(|n| n.rect),
             badges: &badges,
             dim: &dim,
+            guides: self.ix.guides(),
+            measure: &measure,
             dpr: self.dpr,
             px_world: 1.0 / self.camera.zoom.max(1e-3),
         })
@@ -547,12 +647,10 @@ impl App {
                     self.dirty = true;
                 }
                 Effect::Undo => {
-                    let _ = self.doc.undo(&self.actor.id);
-                    self.sync_doc();
+                    self.undo_redo(false);
                 }
                 Effect::Redo => {
-                    let _ = self.doc.redo(&self.actor.id);
-                    self.sync_doc();
+                    self.undo_redo(true);
                 }
                 Effect::FitAll => self.fit_all(),
             }
@@ -830,6 +928,14 @@ impl App {
         }
         self.sync_doc();
         self.pump_media();
+        // Frame boundary for undo selection steps.
+        if self.sel_open {
+            if let Some(top) = self.sel_undo.last_mut() {
+                top.after = self.ix.selection.clone();
+            }
+            self.sel_open = false;
+        }
+        self.sel_stable.clone_from(&self.ix.selection);
         let fx = self.ix.tick(now);
         self.handle_fx(fx);
         self.update_video_focus();
@@ -874,6 +980,8 @@ impl App {
             return;
         }
         self.dirty = false;
+        let m = self.measure();
+        self.refresh_measure(&m);
         let prims = self.build_overlay();
         self.gpu.renderer.set_overlay(&prims);
         let frame = match self.gpu.surface.get_current_texture() {
@@ -1282,6 +1390,11 @@ impl CanvasApp {
                 last_camera: Camera::default(),
                 stats: Default::default(),
                 raf: None,
+                sel_undo: Vec::new(),
+                sel_redo: Vec::new(),
+                sel_stable: Vec::new(),
+                sel_open: false,
+                measure_labels: Json::Array(Vec::new()),
                 gpu_id,
                 lost: false,
             })
@@ -1755,22 +1868,15 @@ impl CanvasApp {
         Ok(to_js(&json!({"version": r.version.to_string(), "created": r.created, "warnings": r.warnings})))
     }
 
+    /// Undoes the local actor's last step and restores the selection that went with it.
     pub fn undo(&self) -> bool {
-        let mut a = self.app.borrow_mut();
-        let id = a.actor.id.clone();
-        let ok = a.doc.undo(&id).unwrap_or(false);
-        a.sync_doc();
-        drop(a);
+        let ok = self.app.borrow_mut().undo_redo(false);
         dispatch(&self.app);
         ok
     }
 
     pub fn redo(&self) -> bool {
-        let mut a = self.app.borrow_mut();
-        let id = a.actor.id.clone();
-        let ok = a.doc.redo(&id).unwrap_or(false);
-        a.sync_doc();
-        drop(a);
+        let ok = self.app.borrow_mut().undo_redo(true);
         dispatch(&self.app);
         ok
     }

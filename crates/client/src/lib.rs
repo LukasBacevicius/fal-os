@@ -18,6 +18,7 @@ pub mod api;
 pub mod interact;
 pub mod overlay;
 pub mod scene;
+pub mod snap;
 pub mod sync;
 
 #[cfg(target_arch = "wasm32")]

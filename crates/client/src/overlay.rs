@@ -6,8 +6,9 @@
 
 use falos_engine::OverlayPrim;
 
-use crate::interact::handle_points;
+use crate::interact::{TINY_PX, handle_points};
 use crate::scene::Scene;
+use crate::snap::Line;
 
 /// RGBA8 packed with red in the low byte (the engine's color format).
 pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
@@ -160,6 +161,10 @@ pub struct OverlayInput<'a> {
     pub badges: &'a [BadgeView],
     /// Lineage view: nodes outside the selected node's lineage, dimmed.
     pub dim: &'a [[f32; 4]],
+    /// Snap guides (dragging, resizing, after a nudge).
+    pub guides: &'a [Line],
+    /// ⌥ distance lines to the hovered node.
+    pub measure: &'a [Line],
     pub dpr: f32,
     /// World units per physical pixel (1 / zoom).
     pub px_world: f32,
@@ -235,11 +240,19 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
     if i.show_handles
         && i.selection.len() == 1
         && let Some(n) = i.scene.get(&i.selection[0])
+        // Tiny on screen: no handles (the node stays draggable).
+        && n.rect[2].min(n.rect[3]) / i.px_world.max(1e-9) >= TINY_PX * d
     {
         for hp in handle_points(n.rect) {
             let mut h = OverlayPrim::handle(hp, 6.0 * d, WHITE, BLACK, d);
             h.radius_px = 0.0;
             out.push(h);
+        }
+    }
+    // Guides: 1 px dim lines; measured gaps get short end ticks. Distances in ink.
+    for (lines, color) in [(i.guides, p.dim), (i.measure, p.ink)] {
+        for l in lines {
+            line(&mut out, l, color, d);
         }
     }
     if let Some(r) = i.marquee {
@@ -253,6 +266,20 @@ pub fn build(i: &OverlayInput) -> Vec<OverlayPrim> {
         out.push(OverlayPrim::cursor(c.world, 13.0 * d, c.color.unwrap_or(WHITE), stroke));
     }
     out
+}
+
+/// A 1 px axis-aligned line (a zero-width rect's stroke), with end ticks for gaps.
+fn line(out: &mut Vec<OverlayPrim>, l: &Line, color: u32, d: f32) {
+    let r = [l.a[0].min(l.b[0]), l.a[1].min(l.b[1]), (l.a[0] - l.b[0]).abs(), (l.a[1] - l.b[1]).abs()];
+    out.push(OverlayPrim::rect(r, 0, color, d));
+    if l.ticks {
+        let vertical = r[2] < r[3];
+        for p in [l.a, l.b] {
+            // A constant-size tick across the line.
+            let (off, size) = if vertical { ([-3.0 * d, 0.0], [6.0 * d, 0.0]) } else { ([0.0, -3.0 * d], [0.0, 6.0 * d]) };
+            out.push(OverlayPrim { world: p, px_offset: off, px_size: size, ..OverlayPrim::rect([p[0], p[1], 0.0, 0.0], 0, color, d) });
+        }
+    }
 }
 
 #[cfg(test)]

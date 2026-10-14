@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::scene::{Scene, SceneNode};
+use crate::snap::{self, Edges, Line};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,15 +68,49 @@ enum Drag {
     Pan { last: [f32; 2] },
     /// `target`: the frame under the pointer the moved nodes would land in (`None` = the
     /// canvas), highlighted while dragging and applied on release (reparenting).
-    Move { start: [f32; 2], items: Vec<(String, [f32; 4])>, moved: bool, target: Option<String> },
-    Resize { id: String, handle: usize, orig: [f32; 4], start: [f32; 2], keep_aspect: bool },
+    /// `bounds`: the moved items' union at the start; `cands`: other nodes' rects to snap to;
+    /// `t0`: press time (a long press drops the drag threshold); `d`: the last applied delta.
+    Move {
+        start: [f32; 2],
+        items: Vec<(String, [f32; 4])>,
+        moved: bool,
+        target: Option<String>,
+        bounds: [f32; 4],
+        cands: Vec<[f32; 4]>,
+        t0: f64,
+        d: [f32; 2],
+    },
+    /// `init`: the rect before the gesture (Esc restores it); `orig`/`start` shift while Space
+    /// moves the box; `cur`: the rect shown now (committed on release).
+    Resize {
+        id: String,
+        handle: usize,
+        init: [f32; 4],
+        orig: [f32; 4],
+        start: [f32; 2],
+        last: [f32; 2],
+        keep_aspect: bool,
+        cands: Vec<[f32; 4]>,
+        cur: [f32; 4],
+    },
     Marquee { start: [f32; 2], cur: [f32; 2], base: Vec<String> },
     Pick { node: String, start: [f32; 2], cur: [f32; 2], start_px: [f32; 2] },
 }
 
 /// Handle size, in CSS pixels.
 const HANDLE_PX: f32 = 8.0;
+/// Drag threshold (CSS px), and the precise one after holding the press still for
+/// [`HOLD_MS`] (micro-moves without accidental drags).
 const DRAG_SLOP_PX: f32 = 3.0;
+const HOLD_SLOP_PX: f32 = 1.0;
+const HOLD_MS: f64 = 500.0;
+/// Nodes smaller than this on screen (CSS px) get no handles and no edge resize, so they stay
+/// draggable.
+pub const TINY_PX: f32 = 16.0;
+/// Edges resize along their whole length within this distance (CSS px).
+const EDGE_PX: f32 = 4.0;
+/// At most this many other nodes are snap candidates (the closest to the view).
+const MAX_SNAP_CANDS: usize = 4000;
 /// Hover intent: switching the hover to a container (frame/group) or to nothing waits this
 /// long, so crossing a parent's empty area between two children never flashes the parent.
 pub const HOVER_GRACE_MS: f64 = 140.0;
@@ -91,7 +126,12 @@ pub struct Interaction {
     pub space: bool,
     /// The group the user double-clicked into: clicks select inside it instead of the group.
     pub entered: Option<String>,
+    /// ⌥ held (distances to the hovered node).
+    pub alt: bool,
     drag: Option<Drag>,
+    /// Snap guides (world lines): live while dragging, and for a moment after a nudge.
+    guides: Vec<Line>,
+    guides_until: f64,
     /// A hover change waiting for its grace period: target and since when (ms).
     pending_hover: Option<(Option<String>, f64)>,
     last_move: Option<([f32; 2], f64)>,
@@ -106,7 +146,10 @@ impl Default for Interaction {
             hover: None,
             space: false,
             entered: None,
+            alt: false,
             drag: None,
+            guides: Vec::new(),
+            guides_until: 0.0,
             pending_hover: None,
             last_move: None,
             last_wheel: f64::NEG_INFINITY,
@@ -218,6 +261,85 @@ fn pickable(n: &SceneNode) -> bool {
     matches!(n.kind, NodeKind::Image | NodeKind::Video | NodeKind::Vector) && n.asset.is_some()
 }
 
+/// World rects other nodes snap against: drawn nodes and groups near the view, except the
+/// moved ones and everything inside them.
+fn snap_cands(scene: &Scene, camera: &Camera, exclude: &[String]) -> Vec<[f32; 4]> {
+    let z = camera.zoom.max(1e-6);
+    let (vw, vh) = (camera.viewport[0] / z, camera.viewport[1] / z);
+    // The view plus half a view on each side.
+    let view = [camera.offset[0] - vw * 0.5, camera.offset[1] - vh * 0.5, vw * 2.0, vh * 2.0];
+    let near = |r: [f32; 4]| r[0] <= view[0] + view[2] && r[0] + r[2] >= view[0] && r[1] <= view[1] + view[3] && r[1] + r[3] >= view[1];
+    let mut out: Vec<[f32; 4]> = scene
+        .iter()
+        .filter(|n| (n.handle.is_some() || n.kind == NodeKind::Group) && near(n.rect))
+        .filter(|n| !exclude.iter().any(|e| within(scene, &n.id, e)))
+        .map(|n| n.rect)
+        .collect();
+    if out.len() > MAX_SNAP_CANDS {
+        let c = [view[0] + view[2] * 0.5, view[1] + view[3] * 0.5];
+        let dist = |r: &[f32; 4]| (r[0] + r[2] * 0.5 - c[0]).abs() + (r[1] + r[3] * 0.5 - c[1]).abs();
+        out.sort_by(|a, b| dist(a).total_cmp(&dist(b)));
+        out.truncate(MAX_SNAP_CANDS);
+    }
+    out
+}
+
+/// Snap threshold in world units.
+fn snap_thr(ctx: &Ctx) -> f32 {
+    snap::SNAP_PX * ctx.dpr / ctx.camera.zoom.max(1e-6)
+}
+
+/// A move's delta after the axis lock (⇧) and snapping (off while ⌘/Ctrl is held), and the
+/// guides to show.
+pub fn move_delta(raw: [f32; 2], bounds: [f32; 4], cands: &[[f32; 4]], thr: f32, mods: Mods) -> ([f32; 2], Vec<Line>) {
+    let mut d = raw;
+    // ⇧: only along the dominant axis.
+    let lock = mods.shift.then(|| if d[0].abs() >= d[1].abs() { 1 } else { 0 });
+    if let Some(a) = lock {
+        d[a] = 0.0;
+    }
+    if mods.meta || d == [0.0, 0.0] {
+        return (d, Vec::new());
+    }
+    let r = [bounds[0] + d[0], bounds[1] + d[1], bounds[2], bounds[3]];
+    let mut s = snap::snap(r, Edges::ALL, cands, thr);
+    if let Some(a) = lock {
+        s.offset[a] = 0.0;
+        s.guides = snap::guides(snap::apply(r, Edges::ALL, s.offset), Edges::ALL, cands);
+    }
+    ([d[0] + s.offset[0], d[1] + s.offset[1]], s.guides)
+}
+
+/// A resize step: the new rect (snapping its moving edges unless ⌘/Ctrl is held) and guides.
+/// A corner that keeps the aspect ratio snaps one axis and scales the other with it.
+pub fn resize_step(orig: [f32; 4], handle: usize, d: [f32; 2], keep_aspect: bool, cands: &[[f32; 4]], thr: f32, snap_on: bool) -> ([f32; 4], Vec<Line>) {
+    let r0 = resize_rect(orig, handle, d, keep_aspect);
+    if !snap_on || cands.is_empty() {
+        return (r0, Vec::new());
+    }
+    let e = Edges::of_handle(handle);
+    let s = snap::snap(r0, e, cands, thr);
+    if s.offset == [0.0, 0.0] {
+        return (r0, s.guides);
+    }
+    let r = if keep_aspect && handle.is_multiple_of(2) {
+        // Keep the smaller correction; the other side follows the aspect ratio.
+        let k = if s.offset[1] == 0.0 || (s.offset[0] != 0.0 && s.offset[0].abs() <= s.offset[1].abs()) { 0 } else { 1 };
+        let mut off = [0.0; 2];
+        off[k] = s.offset[k];
+        let target = snap::apply(r0, e, off);
+        let scale = target[k + 2] / orig[k + 2].max(1e-6);
+        let (nw, nh) = (orig[2] * scale, orig[3] * scale);
+        let dx = if e.left { orig[2] - nw } else { nw - orig[2] };
+        let dy = if e.top { orig[3] - nh } else { nh - orig[3] };
+        resize_rect(orig, handle, [dx, dy], true)
+    } else {
+        snap::apply(r0, e, s.offset)
+    };
+    let g = snap::guides(r, e, cands);
+    (r, g)
+}
+
 impl Interaction {
     /// What a click on `hit` selects (Figma rules): the outermost group around it that the
     /// user hasn't entered (double-click enters a group); `deep` (⌘-click) selects `hit`.
@@ -254,6 +376,28 @@ impl Interaction {
         false
     }
 
+    /// The parent every selected node shares, if any.
+    fn common_parent(&self, scene: &Scene) -> Option<String> {
+        let mut parents = self.selection.iter().map(|id| scene.get(id).and_then(|n| n.parent.clone()));
+        let first = parents.next()??;
+        parents.all(|p| p.as_deref() == Some(first.as_str())).then_some(first)
+    }
+
+    /// Selects `ids` (siblings) and enters the innermost group around them, so clicks and
+    /// ⌘A act at that level.
+    fn select_level(&mut self, scene: &Scene, ids: Vec<String>) {
+        let mut cur = ids.first().and_then(|id| scene.get(id)).and_then(|n| n.parent.clone());
+        self.entered = None;
+        while let Some(p) = cur.and_then(|p| scene.get(&p)) {
+            if p.kind == NodeKind::Group {
+                self.entered = Some(p.id.clone());
+                break;
+            }
+            cur = p.parent.clone();
+        }
+        self.selection = ids;
+    }
+
     /// Double-click: enters the group around the node under the pointer (selecting one level
     /// deeper). Returns `(entered group, node under the pointer as now selected)`.
     pub fn double_click(&mut self, ctx: &mut Ctx, p: [f32; 2]) -> (Option<String>, Option<String>, Vec<Effect>) {
@@ -269,8 +413,18 @@ impl Interaction {
         (None, Some(hit.id.clone()), Vec::new())
     }
 
-    /// Resolves a pending hover once its grace period is over (call every frame).
+    /// Snap guides to draw now: while dragging, and for a moment after a nudge.
+    pub fn guides(&self) -> &[Line] {
+        &self.guides
+    }
+
+    /// Resolves a pending hover once its grace period is over, and drops guides that have
+    /// had their moment (call every frame).
     pub fn tick(&mut self, now: f64) -> Vec<Effect> {
+        if !self.guides.is_empty() && self.drag.is_none() && now >= self.guides_until {
+            self.guides.clear();
+            return vec![Effect::Overlay];
+        }
         match &self.pending_hover {
             Some((target, since)) if now - since >= HOVER_GRACE_MS && self.drag.is_none() => {
                 let target = target.clone();
@@ -313,17 +467,46 @@ impl Interaction {
         self.drag.is_some()
     }
 
+    /// The resize handle (or edge, along its whole length) under screen point `p` of the
+    /// single selected node: handle index 0 TL, 1 T, 2 TR, 3 R, 4 BR, 5 B, 6 BL, 7 L. Nodes
+    /// tiny on screen have none, so they can still be dragged.
     fn handle_at(&self, ctx: &Ctx, p: [f32; 2]) -> Option<(String, usize)> {
         if self.tool != Tool::Select || self.selection.len() != 1 {
             return None;
         }
         let n = ctx.scene.get(&self.selection[0])?;
+        let a = ctx.camera.world_to_screen([n.rect[0], n.rect[1]]);
+        let b = ctx.camera.world_to_screen([n.rect[0] + n.rect[2], n.rect[1] + n.rect[3]]);
+        let (sw, sh) = (b[0] - a[0], b[1] - a[1]);
+        if sw.min(sh) < TINY_PX * ctx.dpr {
+            return None;
+        }
         let r = (HANDLE_PX * 0.5 + 3.0) * ctx.dpr;
-        handle_points(n.rect).iter().position(|hp| {
+        let corner = handle_points(n.rect).iter().position(|hp| {
             let s = ctx.camera.world_to_screen(*hp);
             (p[0] - s[0]).abs() <= r && (p[1] - s[1]).abs() <= r
-        })
-        .map(|i| (n.id.clone(), i))
+        });
+        if let Some(i) = corner {
+            return Some((n.id.clone(), i));
+        }
+        // Edges: outside within EDGE_PX, inside within EDGE_PX but at most 15 % of the side.
+        let out = EDGE_PX * ctx.dpr;
+        let inx = out.min(sw * 0.15);
+        let iny = out.min(sh * 0.15);
+        let in_y = p[1] >= a[1] && p[1] <= b[1];
+        let in_x = p[0] >= a[0] && p[0] <= b[0];
+        let edge = if in_y && p[0] >= a[0] - out && p[0] <= a[0] + inx {
+            Some(7)
+        } else if in_y && p[0] <= b[0] + out && p[0] >= b[0] - inx {
+            Some(3)
+        } else if in_x && p[1] >= a[1] - out && p[1] <= a[1] + iny {
+            Some(1)
+        } else if in_x && p[1] <= b[1] + out && p[1] >= b[1] - iny {
+            Some(5)
+        } else {
+            None
+        };
+        edge.map(|i| (n.id.clone(), i))
     }
 
     pub fn pointer_down(&mut self, ctx: &mut Ctx, p: [f32; 2], button: i16, mods: Mods) -> Vec<Effect> {
@@ -348,7 +531,9 @@ impl Interaction {
                 if let Some((id, handle)) = self.handle_at(ctx, p) {
                     let n = ctx.scene.get(&id).expect("selected node");
                     let keep_aspect = is_media(n) != mods.shift;
-                    self.drag = Some(Drag::Resize { id, handle, orig: n.rect, start: w, keep_aspect });
+                    let cands = snap_cands(ctx.scene, ctx.camera, std::slice::from_ref(&id));
+                    let r = n.rect;
+                    self.drag = Some(Drag::Resize { id, handle, init: r, orig: r, start: w, last: w, keep_aspect, cands, cur: r });
                     return fx;
                 }
                 match ctx.scene.hit_test(w) {
@@ -371,13 +556,16 @@ impl Interaction {
                             self.selection = vec![id.clone()];
                             fx.push(Effect::Select(self.selection.clone()));
                         }
-                        let items = roots(ctx.scene, &self.selection)
+                        let items: Vec<(String, [f32; 4])> = roots(ctx.scene, &self.selection)
                             .iter()
                             .filter_map(|s| ctx.scene.get(s))
                             .filter(|n| n.handle.is_some() || n.kind == NodeKind::Group)
                             .map(|n| (n.id.clone(), n.rect))
                             .collect();
-                        self.drag = Some(Drag::Move { start: w, items, moved: false, target: None });
+                        let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
+                        let bounds = ctx.scene.bounds_of(&ids).unwrap_or([w[0], w[1], 0.0, 0.0]);
+                        let cands = snap_cands(ctx.scene, ctx.camera, &ids);
+                        self.drag = Some(Drag::Move { start: w, items, moved: false, target: None, bounds, cands, t0: ctx.now, d: [0.0, 0.0] });
                     }
                     None => {
                         let base = if mods.shift { self.selection.clone() } else { Vec::new() };
@@ -398,34 +586,51 @@ impl Interaction {
     pub fn pointer_move(&mut self, ctx: &mut Ctx, p: [f32; 2], mods: Mods) -> Vec<Effect> {
         let mut fx = Vec::new();
         let w = ctx.camera.screen_to_world(p);
+        if self.alt != mods.alt {
+            self.alt = mods.alt;
+            fx.push(Effect::Overlay);
+        }
         match &mut self.drag {
             Some(Drag::Pan { last }) => {
                 ctx.camera.pan(p[0] - last[0], p[1] - last[1]);
                 *last = p;
                 fx.push(Effect::Camera);
             }
-            Some(Drag::Move { start, items, moved, target }) => {
-                let d = [w[0] - start[0], w[1] - start[1]];
-                let slop = DRAG_SLOP_PX / ctx.camera.zoom * ctx.dpr;
-                if !*moved && d[0].abs() < slop && d[1].abs() < slop {
+            Some(Drag::Move { start, items, moved, target, bounds, cands, t0, d }) => {
+                let raw = [w[0] - start[0], w[1] - start[1]];
+                let px = if ctx.now - *t0 >= HOLD_MS { HOLD_SLOP_PX } else { DRAG_SLOP_PX };
+                let slop = px / ctx.camera.zoom * ctx.dpr;
+                if !*moved && raw[0].abs() < slop && raw[1].abs() < slop {
                     return fx;
                 }
                 *moved = true;
-                fx.push(Effect::Preview(items.iter().map(|(id, r)| (id.clone(), [r[0] + d[0], r[1] + d[1], r[2], r[3]])).collect()));
+                let (nd, guides) = move_delta(raw, *bounds, cands, snap_thr(ctx), mods);
+                *d = nd;
+                self.guides = guides;
+                fx.push(Effect::Preview(items.iter().map(|(id, r)| (id.clone(), [r[0] + nd[0], r[1] + nd[1], r[2], r[3]])).collect()));
                 fx.push(Effect::Cursor("move"));
+                fx.push(Effect::Overlay);
                 // Space blocks reparenting: the target stays where it was.
                 if !self.space {
                     let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
-                    let t = drop_frame(ctx.scene, w, &ids);
-                    if t != *target {
-                        *target = t;
-                        fx.push(Effect::Overlay);
-                    }
+                    *target = drop_frame(ctx.scene, w, &ids);
                 }
             }
-            Some(Drag::Resize { id, handle, orig, start, keep_aspect }) => {
-                let r = resize_rect(*orig, *handle, [w[0] - start[0], w[1] - start[1]], *keep_aspect);
+            Some(Drag::Resize { id, handle, orig, start, last, keep_aspect, cands, cur, .. }) => {
+                // Space moves the box mid-resize (its size stays).
+                if self.space {
+                    let sh = [w[0] - last[0], w[1] - last[1]];
+                    orig[0] += sh[0];
+                    orig[1] += sh[1];
+                    start[0] += sh[0];
+                    start[1] += sh[1];
+                }
+                *last = w;
+                let (r, guides) = resize_step(*orig, *handle, [w[0] - start[0], w[1] - start[1]], *keep_aspect, cands, snap_thr(ctx), !mods.meta);
+                *cur = r;
+                self.guides = guides;
                 fx.push(Effect::Preview(vec![(id.clone(), r)]));
+                fx.push(Effect::Overlay);
             }
             Some(Drag::Marquee { start, cur, base }) => {
                 *cur = w;
@@ -496,13 +701,13 @@ impl Interaction {
     pub fn pointer_up(&mut self, ctx: &mut Ctx, p: [f32; 2], _mods: Mods) -> Vec<Effect> {
         let mut fx = Vec::new();
         let w = ctx.camera.screen_to_world(p);
+        self.guides.clear();
         match self.drag.take() {
             Some(Drag::Pan { .. }) => fx.push(Effect::Cursor(if self.space || self.tool == Tool::Hand { "grab" } else { "default" })),
             // Back where it started (the UI snaps a move back for drag-out / drop on the chat):
             // nothing to commit, and no reparenting.
             Some(Drag::Move { start, moved: true, .. }) if w == start => fx.push(Effect::Overlay),
-            Some(Drag::Move { start, items, moved: true, target }) => {
-                let d = [w[0] - start[0], w[1] - start[1]];
+            Some(Drag::Move { items, moved: true, target, d, .. }) => {
                 let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
                 let mut cmds = Vec::new();
                 for (id, r) in &items {
@@ -521,11 +726,11 @@ impl Interaction {
                 fx.push(Effect::Overlay);
             }
             Some(Drag::Move { .. }) => {}
-            Some(Drag::Resize { id, handle, orig, start, keep_aspect }) => {
-                let r = resize_rect(orig, handle, [w[0] - start[0], w[1] - start[1]], keep_aspect);
-                if r != orig {
-                    fx.push(Effect::Commit(vec![Command::UpdateNode { id, props: rect_props(r) }]));
+            Some(Drag::Resize { id, init, cur, .. }) => {
+                if cur != init {
+                    fx.push(Effect::Commit(vec![Command::UpdateNode { id, props: rect_props(cur) }]));
                 }
+                fx.push(Effect::Overlay);
             }
             Some(Drag::Marquee { .. }) => fx.push(Effect::Overlay),
             Some(Drag::Pick { node, start, start_px, .. }) => {
@@ -610,6 +815,19 @@ impl Interaction {
                 fx.push(Effect::Select(Vec::new()));
                 fx.push(Effect::Commit(cmds));
             }
+            // The Esc ladder: cancel a gesture → up to the entered group → children up to
+            // their frame or group → deselect → back to the select tool. (Leaving a text edit
+            // is the editor's own Esc, before this.)
+            "Escape" if self.drag.is_some() => {
+                // Cancels a drag in progress: moved / resized nodes snap back; the selection stays.
+                match self.drag.take() {
+                    Some(Drag::Move { items, moved: true, .. }) => fx.push(Effect::Preview(items)),
+                    Some(Drag::Resize { id, init, .. }) => fx.push(Effect::Preview(vec![(id, init)])),
+                    _ => {}
+                }
+                self.guides.clear();
+                fx.push(Effect::Overlay);
+            }
             "Escape" if self.entered.is_some() => {
                 // Go up one level: select the entered group, leave it.
                 let g = self.entered.take().unwrap_or_default();
@@ -618,20 +836,46 @@ impl Interaction {
                 fx.push(Effect::Select(self.selection.clone()));
                 fx.push(Effect::Overlay);
             }
+            "Escape" if !self.selection.is_empty() => {
+                // Children select their parent frame / group; top-level nodes deselect.
+                match self.common_parent(ctx.scene) {
+                    Some(p) => self.select_level(ctx.scene, vec![p]),
+                    None => self.selection.clear(),
+                }
+                fx.push(Effect::Select(self.selection.clone()));
+                fx.push(Effect::Overlay);
+            }
             "Escape" => {
-                // Cancels a drag in progress: moved / resized nodes snap back.
-                match self.drag.take() {
-                    Some(Drag::Move { items, moved: true, .. }) => fx.push(Effect::Preview(items)),
-                    Some(Drag::Resize { id, orig, .. }) => fx.push(Effect::Preview(vec![(id, orig)])),
-                    _ => {}
-                }
-                if !self.selection.is_empty() {
-                    self.selection.clear();
-                    fx.push(Effect::Select(Vec::new()));
-                }
                 if self.tool != Tool::Select {
                     fx.extend(self.set_tool(Tool::Select));
                 }
+                fx.push(Effect::Overlay);
+            }
+            // ⏎ selects the children of the selected frames / groups; ⇧⏎ their parents.
+            "Enter" if !mods.meta && !self.selection.is_empty() => {
+                let next: Vec<String> = if mods.shift {
+                    let mut ps: Vec<String> = Vec::new();
+                    for id in &self.selection {
+                        if let Some(p) = ctx.scene.get(id).and_then(|n| n.parent.clone())
+                            && !ps.contains(&p)
+                        {
+                            ps.push(p);
+                        }
+                    }
+                    ps
+                } else {
+                    let containers: Vec<&String> = self.selection.iter().filter(|id| ctx.scene.get(id).is_some_and(is_container)).collect();
+                    ctx.scene
+                        .iter()
+                        .filter(|n| n.parent.as_ref().is_some_and(|p| containers.contains(&p)) && (n.handle.is_some() || n.kind == NodeKind::Group))
+                        .map(|n| n.id.clone())
+                        .collect()
+                };
+                if next.is_empty() {
+                    return None;
+                }
+                self.select_level(ctx.scene, next);
+                fx.push(Effect::Select(self.selection.clone()));
                 fx.push(Effect::Overlay);
             }
             "v" | "V" if !mods.meta => fx.extend(self.set_tool(Tool::Select)),
@@ -658,12 +902,20 @@ impl Interaction {
                     "ArrowUp" => [0.0, -step],
                     _ => [0.0, step],
                 };
-                let cmds = roots(ctx.scene, &self.selection)
+                let moved = roots(ctx.scene, &self.selection);
+                let cmds = moved
                     .iter()
                     .filter_map(|id| ctx.scene.get(id))
                     .map(|n| Command::UpdateNode { id: n.id.clone(), props: rect_props([n.rect[0] + d[0], n.rect[1] + d[1], n.rect[2], n.rect[3]]) })
                     .collect();
                 fx.push(Effect::Commit(cmds));
+                // What the nudged box lines up with shows for a moment.
+                if let Some(b) = ctx.scene.bounds_of(&moved) {
+                    let r = [b[0] + d[0], b[1] + d[1], b[2], b[3]];
+                    self.guides = snap::guides(r, Edges::ALL, &snap_cands(ctx.scene, ctx.camera, &moved));
+                    self.guides_until = ctx.now + snap::NUDGE_GUIDES_MS;
+                    fx.push(Effect::Overlay);
+                }
             }
             _ => return None,
         }
@@ -862,6 +1114,146 @@ mod tests {
         assert_eq!(r, [0.0, 0.0, 300.0, 150.0]);
         let r = resize_rect([0.0, 0.0, 200.0, 100.0], 0, [-100.0, 0.0], true);
         assert_eq!(r, [-100.0, -50.0, 300.0, 150.0]);
+    }
+
+    fn committed(fx: &[Effect]) -> Vec<(String, [f64; 2])> {
+        fx.iter()
+            .flat_map(|e| match e {
+                Effect::Commit(c) => c
+                    .iter()
+                    .filter_map(|c| match c {
+                        Command::UpdateNode { id, props } => Some((id.clone(), [props["x"].as_f64()?, props["y"].as_f64()?])),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    fn previewed(fx: &[Effect]) -> Option<[f32; 4]> {
+        fx.iter().find_map(|e| match e {
+            Effect::Preview(p) => Some(p[0].1),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn drags_snap_lock_axis_and_cmd_turns_snapping_off() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction::default();
+        let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 0.0 };
+        // Group G (500,0 100×100) dragged so its left edge lands 2 px right of F's right edge (400).
+        ix.pointer_down(&mut ctx, [550.0, 50.0], 0, Mods::default());
+        let fx = ix.pointer_move(&mut ctx, [452.0, 350.0], Mods::default());
+        assert_eq!(previewed(&fx).unwrap()[0], 400.0);
+        assert!(!ix.guides().is_empty());
+        // ⌘ held: no snapping, no guides.
+        let fx = ix.pointer_move(&mut ctx, [452.0, 350.0], Mods { meta: true, ..Default::default() });
+        assert_eq!(previewed(&fx).unwrap()[0], 402.0);
+        assert!(ix.guides().is_empty());
+        // ⇧: the dominant axis only (y moved 300, x 98 → x stays).
+        let fx = ix.pointer_move(&mut ctx, [452.0, 350.0], Mods { shift: true, meta: true, ..Default::default() });
+        assert_eq!(previewed(&fx).unwrap()[0..2], [500.0, 300.0]);
+        let fx = ix.pointer_up(&mut ctx, [452.0, 350.0], Mods { shift: true, meta: true, ..Default::default() });
+        assert_eq!(committed(&fx), vec![("ggg".to_string(), [500.0, 300.0])]);
+        assert!(ix.guides().is_empty());
+    }
+
+    #[test]
+    fn a_long_press_drops_the_drag_threshold() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction::default();
+        let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 0.0 };
+        ix.pointer_down(&mut ctx, [550.0, 50.0], 0, Mods::default());
+        // 2 px right away: below the 3 px threshold.
+        assert!(previewed(&ix.pointer_move(&mut ctx, [552.0, 50.0], Mods::default())).is_none());
+        // After holding 500 ms, 1 px is a drag (⌘: no snapping, so the 1 px stays 1 px).
+        ctx.now = 600.0;
+        ix.pointer_move(&mut ctx, [550.0, 50.0], Mods::default());
+        let fx = ix.pointer_move(&mut ctx, [551.0, 50.0], Mods { meta: true, ..Default::default() });
+        assert_eq!(previewed(&fx).unwrap()[0], 501.0);
+    }
+
+    #[test]
+    fn edges_resize_along_their_length_and_tiny_nodes_have_no_handles() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let ix = Interaction { selection: vec!["fff".into()], ..Default::default() };
+        let ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 0.0 };
+        // F is 400×200: its right edge at x 400, a third of the way down (no handle there).
+        assert_eq!(ix.handle_at(&ctx, [402.0, 70.0]).map(|h| h.1), Some(3));
+        assert_eq!(ix.handle_at(&ctx, [150.0, 198.0]).map(|h| h.1), Some(5));
+        assert_eq!(ix.handle_at(&ctx, [200.0, 100.0]), None);
+        // Zoomed out so F is 12×6 px on screen: no handles, no edges; it drags.
+        ctx.camera.zoom = 0.03;
+        assert_eq!(ix.handle_at(&ctx, [12.0, 3.0]), None);
+    }
+
+    #[test]
+    fn space_moves_the_box_mid_resize_and_resize_snaps() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction { selection: vec!["fff".into()], ..Default::default() };
+        let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 0.0 };
+        // Right edge of F dragged to 498: snaps to G's left edge (500).
+        ix.pointer_down(&mut ctx, [400.0, 70.0], 0, Mods::default());
+        let fx = ix.pointer_move(&mut ctx, [498.0, 70.0], Mods::default());
+        assert_eq!(previewed(&fx).unwrap(), [0.0, 0.0, 500.0, 200.0]);
+        // Space held: the box follows the pointer at its current size.
+        ix.key_down(&mut ctx, " ", Mods::default());
+        let fx = ix.pointer_move(&mut ctx, [478.0, 370.0], Mods { meta: true, ..Default::default() });
+        assert_eq!(previewed(&fx).unwrap(), [-20.0, 300.0, 498.0, 200.0]);
+        ix.key_up(" ");
+        // Esc puts it back and keeps the selection.
+        let fx = ix.key_down(&mut ctx, "Escape", Mods::default()).unwrap();
+        assert_eq!(previewed(&fx).unwrap(), [0.0, 0.0, 400.0, 200.0]);
+        assert_eq!(ix.selection, vec!["fff".to_string()]);
+    }
+
+    #[test]
+    fn esc_ladder_and_enter_walk_the_hierarchy() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction { selection: vec!["fff".into()], ..Default::default() };
+        let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 0.0 };
+        // ⏎: the frame's children.
+        ix.key_down(&mut ctx, "Enter", Mods::default()).unwrap();
+        let mut sel = ix.selection.clone();
+        sel.sort();
+        assert_eq!(sel, vec!["aaa".to_string(), "bbb".to_string()]);
+        // Esc: back to the frame, then nothing.
+        ix.key_down(&mut ctx, "Escape", Mods::default());
+        assert_eq!(ix.selection, vec!["fff".to_string()]);
+        ix.key_down(&mut ctx, "Escape", Mods::default());
+        assert!(ix.selection.is_empty());
+        // ⇧⏎ on a group child: the group (and ⏎ on a leaf isn't ours: media previews).
+        ix.selection = vec!["ccc".into()];
+        assert!(ix.key_down(&mut ctx, "Enter", Mods::default()).is_none());
+        ix.key_down(&mut ctx, "Enter", Mods { shift: true, ..Default::default() });
+        assert_eq!(ix.selection, vec!["ggg".to_string()]);
+        ix.key_down(&mut ctx, "Enter", Mods::default());
+        assert_eq!((ix.selection.clone(), ix.entered.as_deref()), (vec!["ccc".to_string()], Some("ggg")));
+    }
+
+    #[test]
+    fn nudge_guides_linger_then_clear() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction { selection: vec!["ggg".into()], ..Default::default() };
+        let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 1000.0 };
+        // G (top 0) nudged down 1: its top no longer lines up with F's, nothing to show.
+        ix.key_down(&mut ctx, "ArrowDown", Mods::default());
+        assert!(ix.guides().is_empty());
+        // Nudged left (the scene is static here, so from y 0): the tops line up with F.
+        ix.key_down(&mut ctx, "ArrowLeft", Mods::default());
+        assert!(!ix.guides().is_empty());
+        assert!(ix.tick(1000.0 + snap::NUDGE_GUIDES_MS - 1.0).is_empty());
+        assert!(!ix.guides().is_empty());
+        ix.tick(1000.0 + snap::NUDGE_GUIDES_MS);
+        assert!(ix.guides().is_empty());
     }
 
     #[test]
