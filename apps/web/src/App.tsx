@@ -16,6 +16,7 @@ import { ExportPanel } from './components/ExportPanel';
 import { Setup, maybeOpenSetup } from './components/Setup';
 import { BrandSync } from './components/Mark';
 import { DragThumb } from './components/DropLayer';
+import { Guard } from './components/Guard';
 
 /** Canvas + chat. Nothing else unless something needs attention. */
 export function App() {
@@ -43,22 +44,25 @@ export function App() {
   return (
     <div className="app">
       <div className="main">
-        {library === 'panel' ? <Library /> : layers && <Layers />}
+        {/* A crash in one panel (e.g. an unexpected chat event) must not blank the app. */}
+        <Guard name="left">{library === 'panel' ? <Library /> : layers && <Layers />}</Guard>
         <Stage />
-        {chatOpen && <ChatPanel />}
+        {chatOpen && <Guard name="chat"><ChatPanel /></Guard>}
       </div>
-      {library === 'full' && <Library />}
-      {overlay === 'palette' && <Palette />}
-      {overlay === 'help' && <Help />}
-      {overlay === 'connect' && <ConnectModal />}
-      {overlay === 'projects' && <ProjectPicker />}
-      {overlay === 'export' && <ExportPanel />}
-      {menu && <ContextMenu />}
-      {overlay === 'setup' && <Setup />}
-      <VideoFocus />
-      <NodePreview />
-      <AppSource />
-      <ActivitySync />
+      <Guard name="overlays">
+        {library === 'full' && <Library />}
+        {overlay === 'palette' && <Palette />}
+        {overlay === 'help' && <Help />}
+        {overlay === 'connect' && <ConnectModal />}
+        {overlay === 'projects' && <ProjectPicker />}
+        {overlay === 'export' && <ExportPanel />}
+        {menu && <ContextMenu />}
+        {overlay === 'setup' && <Setup />}
+        <VideoFocus />
+        <NodePreview />
+        <AppSource />
+      </Guard>
+      <Guard name="activity"><ActivitySync /></Guard>
       <BrandSync />
       <DragThumb />
       {toast && (

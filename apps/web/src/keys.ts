@@ -6,7 +6,7 @@
 import { getState, setState } from './store';
 import { addSelectionToChat } from './controller';
 import { hostSync } from './sync';
-import { selectChat, tabs } from './chat';
+import { isExternal, selectChat, tabs } from './chat';
 import { copy, cycleSelection, duplicate, frameSelection, groupIntoFrame, paste, reorder, ungroup, zoomBy } from './actions';
 import { setDriver, toggleHistory } from './chatActions';
 import { openPrompt } from './components/SelectionPrompt';
@@ -113,6 +113,9 @@ export function focusChat() {
 
 export function newChat() {
   setState({ chatOpen: true, chatView: 'chat', subView: null });
+  // The current chat is still empty: reuse it instead of piling up empty "New chat" tabs.
+  const { chat } = getState();
+  if (chat.active && !isExternal(chat.active) && !chat.threads[chat.active]?.events.length) return focusChat();
   const sync = hostSync();
   if (sync) sync.newChat();
   else setState((s) => ({ chat: selectChat(s.chat, null) }));

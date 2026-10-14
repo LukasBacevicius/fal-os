@@ -33,7 +33,10 @@ function Composer({ running, readOnly, question, agent, queued }: {
   running: boolean; readOnly: boolean; question: string[] | null; agent: string | null; queued: { id: string; text: string }[];
 }) {
   const chat = useStore((s) => s.chat);
-  const chatDriver = chat.active ? chat.meta[chat.active]?.driver : undefined;
+  // A chat with no messages yet keeps the driver the user picked last (its host default
+  // `opus` would silently undo that choice); the first send sets it on the chat.
+  const started = !!(chat.active && chat.threads[chat.active]?.events.length);
+  const chatDriver = chat.active && started ? chat.meta[chat.active]?.driver : undefined;
   useEffect(() => {
     if (chatDriver === 'opus' || chatDriver === 'fal' || chatDriver === 'codex') setDriver(chatDriver);
   }, [chat.active, chatDriver]);
@@ -145,14 +148,16 @@ function Composer({ running, readOnly, question, agent, queued }: {
 
   const removeChip = (i: number) => setState((s) => ({ chat: { ...s.chat, chips: s.chat.chips.filter((_, j) => j !== i) } }));
   const ext = !!chat.active && isExternal(chat.active);
+  // One line: a long chat title would wrap the placeholder over three.
+  const short = (t: string) => (t.length > 14 ? `${t.slice(0, 13).trimEnd()}…` : t);
   const placeholder = readOnly
     ? 'external agent · read-only'
     : agent
       ? `message ${agent}…`
       : ext
-        ? `message ${chatTitle(chat, chat.active!)} · it reads this between steps…`
+        ? `message ${short(chatTitle(chat, chat.active!))} · read between steps…`
         : chat.active
-          ? running ? 'steer: ⏎ queue · ⌘⏎ send now…' : `message ${chatTitle(chat, chat.active)}…`
+          ? running ? 'steer: ⏎ queue · ⌘⏎ now…' : `message ${short(chatTitle(chat, chat.active))}`
           : 'start a chat…';
   const mod = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'ctrl+';
   const unattached = selection.filter((id) => !chat.chips.some((c) => c.kind === 'node' && c.node === id)).length;

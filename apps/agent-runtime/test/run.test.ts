@@ -29,6 +29,7 @@ test("SDK errors are mapped and scrubbed", () => {
   assert.match(friendlyError("error_max_turns", 500), /500 steps/);
   assert.equal(scrubError("error_during_execution: [ede_diagnostic] result_type=user"), "the director stopped mid-step");
   assert.equal(scrubError("Claude Code returned an error result: [ede_diagnostic] x"), "the director stopped mid-step");
+  assert.match(scrubError("Error: Claude Code returned an error result: Failed to authenticate: OAuth session expired and could not be refreshed"), /isn't signed in/);
 });
 
 test("channel yields pushed items until closed", async () => {

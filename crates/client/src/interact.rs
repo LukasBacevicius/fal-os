@@ -139,6 +139,24 @@ fn within(scene: &Scene, id: &str, ancestor: &str) -> bool {
     false
 }
 
+/// `ids` without the ones inside another of `ids`: a moved or deleted container carries its
+/// children, so acting on both would move them twice (or delete a node that is already gone).
+fn roots(scene: &Scene, ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .filter(|id| {
+            let mut cur = scene.get(id).and_then(|n| n.parent.clone());
+            while let Some(p) = cur {
+                if ids.contains(&p) {
+                    return false;
+                }
+                cur = scene.get(&p).and_then(|n| n.parent.clone());
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
 /// The frame a drop at world point `w` lands in: the topmost (deepest) frame under it that
 /// is not one of `exclude` or inside them. Groups are never drop targets
 /// (docs/research/brilliant-canvas-interaction.md, drag reparenting).
@@ -353,8 +371,7 @@ impl Interaction {
                             self.selection = vec![id.clone()];
                             fx.push(Effect::Select(self.selection.clone()));
                         }
-                        let items = self
-                            .selection
+                        let items = roots(ctx.scene, &self.selection)
                             .iter()
                             .filter_map(|s| ctx.scene.get(s))
                             .filter(|n| n.handle.is_some() || n.kind == NodeKind::Group)
@@ -577,11 +594,18 @@ impl Interaction {
             "z" | "Z" if mods.meta => fx.push(if mods.shift { Effect::Redo } else { Effect::Undo }),
             "y" if mods.meta => fx.push(Effect::Redo),
             "a" if mods.meta => {
-                self.selection = ctx.scene.iter().filter(|n| n.handle.is_some()).map(|n| n.id.clone()).collect();
+                // The siblings at the current level (top level, or inside the entered group).
+                let level = self.entered.clone();
+                self.selection = ctx
+                    .scene
+                    .iter()
+                    .filter(|n| n.parent == level && (n.handle.is_some() || n.kind == NodeKind::Group))
+                    .map(|n| n.id.clone())
+                    .collect();
                 fx.push(Effect::Select(self.selection.clone()));
             }
             "Backspace" | "Delete" if !self.selection.is_empty() => {
-                let cmds = self.selection.iter().map(|id| Command::DeleteNode { id: id.clone() }).collect();
+                let cmds = roots(ctx.scene, &self.selection).into_iter().map(|id| Command::DeleteNode { id }).collect();
                 self.selection.clear();
                 fx.push(Effect::Select(Vec::new()));
                 fx.push(Effect::Commit(cmds));
@@ -634,8 +658,7 @@ impl Interaction {
                     "ArrowUp" => [0.0, -step],
                     _ => [0.0, step],
                 };
-                let cmds = self
-                    .selection
+                let cmds = roots(ctx.scene, &self.selection)
                     .iter()
                     .filter_map(|id| ctx.scene.get(id))
                     .map(|n| Command::UpdateNode { id: n.id.clone(), props: rect_props([n.rect[0] + d[0], n.rect[1] + d[1], n.rect[2], n.rect[3]]) })
@@ -747,6 +770,44 @@ mod tests {
         // Resting on the frame's own area hovers it after the grace period.
         at(&mut ix, [150.0, 150.0], 2000.0);
         assert_eq!(hovered(&ix.tick(2000.0 + HOVER_GRACE_MS)), Some(Some("fff".into())));
+    }
+
+    #[test]
+    fn select_all_delete_and_nudge_act_on_top_level_nodes_only() {
+        let scene = scene();
+        let mut cam = Camera { zoom: 1.0, viewport: [1000.0, 1000.0], ..Default::default() };
+        let mut ix = Interaction::default();
+        let mut ctx = Ctx { scene: &scene, camera: &mut cam, dpr: 1.0, now: 0.0 };
+        ix.key_down(&mut ctx, "a", Mods { meta: true, ..Default::default() });
+        let mut sel = ix.selection.clone();
+        sel.sort();
+        assert_eq!(sel, vec!["fff".to_string(), "ggg".to_string()]);
+        // A frame and its child (marquee, layers): the child goes along with the frame.
+        ix.selection = vec!["fff".into(), "aaa".into()];
+        let fx = ix.key_down(&mut ctx, "ArrowRight", Mods::default()).unwrap();
+        let ids: Vec<String> = fx
+            .iter()
+            .flat_map(|e| match e {
+                Effect::Commit(c) => c.iter().map(|c| match c {
+                    Command::UpdateNode { id, .. } | Command::DeleteNode { id } => id.clone(),
+                    _ => String::new(),
+                }).collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(ids, vec!["fff".to_string()]);
+        let fx = ix.key_down(&mut ctx, "Delete", Mods::default()).unwrap();
+        let deleted: Vec<String> = fx
+            .iter()
+            .flat_map(|e| match e {
+                Effect::Commit(c) => c.iter().filter_map(|c| match c {
+                    Command::DeleteNode { id } => Some(id.clone()),
+                    _ => None,
+                }).collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(deleted, vec!["fff".to_string()]);
     }
 
     #[test]

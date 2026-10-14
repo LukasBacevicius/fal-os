@@ -14,7 +14,7 @@ const ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const newId = () => Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => ID_CHARS[b % 36]).join('');
 
 /** Selected nodes without the ones whose ancestor is also selected (subtrees go along). */
-function selectedRoots(nodes: NodeView[], sel: string[]): NodeView[] {
+export function selectedRoots(nodes: NodeView[], sel: string[]): NodeView[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const set = new Set(sel);
   const covered = (n: NodeView): boolean => {
@@ -80,6 +80,16 @@ function pasteClip(clip: Clip, d: [number, number]): string[] {
     return [];
   }
   return roots;
+}
+
+/** Nodes (with their subtrees) as a clip, for carrying them into another scene. */
+export function clipNodes(ids: string[]): Clip | null {
+  return clipOf(ids);
+}
+
+/** Recreates a clip at its own positions (fresh ids); returns the new root ids. */
+export function restoreNodes(clip: Clip): string[] {
+  return pasteClip(clip, [0, 0]);
 }
 
 export function duplicate() {
@@ -359,8 +369,9 @@ export async function pasteFromClipboard(at: [number, number] | null) {
 }
 
 export function deleteSelection() {
-  const { app, selection } = getState();
-  if (app && selection.length) app.apply(selection.map((id) => ({ op: 'delete', id })));
+  const { app, selection, nodes } = getState();
+  // Deleting a container deletes its subtree; naming a child too would fail the whole batch.
+  if (app && selection.length) app.apply(selectedRoots(nodes, selection).map((n) => ({ op: 'delete', id: n.id })));
 }
 
 export function zoomBy(f: number) {

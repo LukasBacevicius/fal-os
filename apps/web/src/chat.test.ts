@@ -12,6 +12,34 @@ const run = (events: ChatEvent[], chat = 'c1'): ChatState => {
 };
 
 describe('chat', () => {
+  it("an external agent's report stays visible when it keeps working after it", () => {
+    const s = run([
+      { kind: 'status', state: 'running' },
+      { kind: 'text', agent: 'claude-1', delta: 'here is the board' },
+      { kind: 'done', summary: '', nodes: [] },
+      { kind: 'tool', agent: 'claude-1', id: 'x1', name: 'inbox', summary: 'waiting for you', state: 'running' },
+    ], 'ext:claude-1');
+    const turns = groupTurns(transcript(s.threads['ext:claude-1']).items);
+    expect(turns[0].final.map((w) => (w as any).text)).toEqual(['here is the board']);
+    expect(turns[1].work.map((w) => w.type)).toEqual(['act']);
+  });
+
+  it('a stopped turn ends with `stopped`, the next one with `done`', () => {
+    const s = run([
+      { kind: 'user', text: 'a', context: [] },
+      { kind: 'turn', turn: 't1', state: 'start' } as any,
+      { kind: 'status', state: 'running' },
+      { kind: 'status', state: 'idle', error: 'stopped' } as any,
+      { kind: 'turn', turn: 't1', state: 'end', nodes: [] } as any,
+      { kind: 'user', text: 'b', context: [] },
+      { kind: 'turn', turn: 't2', state: 'start' } as any,
+      { kind: 'status', state: 'idle' },
+      { kind: 'turn', turn: 't2', state: 'end', nodes: [] } as any,
+    ]);
+    const done = transcript(s.threads.c1).items.filter((i) => i.type === 'done') as any[];
+    expect(done.map((d) => !!d.stopped)).toEqual([true, false]);
+  });
+
   it('joins streamed text; subagent work goes to its own transcript with cards in the main one', () => {
     let s = emptyChat();
     s = { ...s, pending: { text: 'make an ad', context: [], at: 1, chat: null } };

@@ -260,7 +260,7 @@ export type Item =
   /** A question from the agent (e.g. the fal driver's pending input): numbered options,
    *  answered by number key or by typing (a normal message). */
   | { type: 'question'; key: string; agent: string; prompt: string; options: string[]; answered: boolean }
-  | { type: 'done'; key: string; summary: string; nodes: string[]; turn: string | null; reverted: boolean }
+  | { type: 'done'; key: string; summary: string; nodes: string[]; turn: string | null; reverted: boolean; stopped?: boolean }
   /** Exported / produced files (`files` event, docs/ASSETS-V1.md §7): shown as file cards. */
   | { type: 'files'; key: string; files: OutFile[]; dir: string }
   /** An app the agents built or changed (`app` event): one card per app per turn, updated in place. */
@@ -382,6 +382,8 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
   const batches = new Map<string, Extract<Item, { type: 'batch' }>>();
   let plan: Extract<Item, { type: 'plan' }> | null = null;
   let turn: string | null = null;
+  /** The running turn ended by the user's stop (its end line says `stopped`, not `done`). */
+  let stopped = false;
   let running = false;
   let cost: number | null = null;
   let textInTurn = false;
@@ -490,6 +492,7 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
         break;
       case 'status':
         running = e.state === 'running';
+        if (e.state === 'idle' && e.error === 'stopped') stopped = true;
         if (!running) settleThinking();
         if (e.state === 'error' && view === null) items.push({ type: 'error', key, text: String(e.error ?? 'error'), actions: Array.isArray(e.actions) ? e.actions : [] });
         break;
@@ -497,17 +500,21 @@ export function transcript(t: Thread | undefined, view: string | null = null): T
         cost = typeof e.usd === 'number' ? e.usd : cost;
         break;
       case 'turn':
-        if (e.state === 'start') turn = String(e.turn ?? '') || null;
+        if (e.state === 'start') {
+          turn = String(e.turn ?? '') || null;
+          stopped = false;
+        }
         else if (view === null) {
           const id = String(e.turn ?? '');
           const d = turns.get(id) ?? [...items].reverse().find((x): x is DoneItem => x.type === 'done' && x.turn === null);
           if (d) {
             d.turn = id;
             d.reverted = false;
+            d.stopped = stopped;
             if (e.nodes?.length) d.nodes = [...new Set([...d.nodes, ...e.nodes])];
             turns.set(id, d);
           } else {
-            const it: DoneItem = { type: 'done', key, summary: '', nodes: e.nodes ?? [], turn: id, reverted: false };
+            const it: DoneItem = { type: 'done', key, summary: '', nodes: e.nodes ?? [], turn: id, reverted: false, stopped };
             items.push(it);
             turns.set(id, it);
           }
@@ -630,7 +637,10 @@ export function groupTurns(items: Item[]): Turn[] {
       start(it.key, it);
       continue;
     }
-    const t: Turn = cur ?? start(`t${it.key}`, null);
+    // After a done line, more output is a new turn (an external agent's next report must not
+    // fold the previous one into its collapsed work section). A late error stays with its turn.
+    const open = cur as Turn | null;
+    const t: Turn = open && (!open.done || it.type === 'error') ? open : start(`t${it.key}`, null);
     if (it.type === 'text' || it.type === 'question' || it.type === 'files' || it.type === 'app') t.final.push(it);
     else if (it.type === 'error') t.errors.push(it);
     else if (it.type === 'done') t.done = it;

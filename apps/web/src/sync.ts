@@ -14,6 +14,7 @@ import { applyEvent, applyHistory, applyList, emptyChat, removeChat, selectChat,
 import { bootProject, loadScene, rememberProject, saveCamera, touchProject } from './projects';
 import { onActivity, onActivityClear } from './activity';
 import { onAppEvent, setAppsBase } from './apps';
+import { clipNodes, restoreNodes } from './actions';
 
 /** A send that gets no chat event back within this time means no agent runtime is attached. */
 const RUNTIME_TIMEOUT_MS = 8_000;
@@ -52,6 +53,18 @@ export function sessionMeta(s: SessionInfo) {
   };
 }
 
+/** Stop drops the chat's queued messages: their text goes back into the composer so
+ *  nothing the user typed is lost. */
+function restoreQueued(chat: string, id: string) {
+  setState((s) => {
+    const q = s.chat.threads[chat]?.events.find((e: any) => e.kind === 'queued' && String(e.id) === id) as { text?: string } | undefined;
+    const text = String(q?.text ?? '').trim();
+    if (!text) return {};
+    const cur = s.drafts[chat] ?? '';
+    return { drafts: { ...s.drafts, [chat]: cur.trim() ? `${cur}\n${text}` : text } };
+  });
+}
+
 /** `#rrggbb` + alpha byte. */
 function dimmed(color: string, alpha: number): string {
   if (!/^#[0-9a-f]{6}$/i.test(color)) return color;
@@ -82,6 +95,9 @@ export class HostSync {
   private presenceTimer = 0;
   private uploaded = new Set<string>();
   private requested = new Set<string>();
+  /** Nodes in the scene when this sync started (a cached snapshot, or the previous
+   *  project's canvas while switching): anything else before first contact was made here. */
+  private baseIds = new Set<string>();
 
   constructor(
     private app: CanvasApp,
@@ -102,6 +118,7 @@ export class HostSync {
     // The wasm client calls `send(kind, payload)` after local transactions and reads
     // `connected` to decide whether to send at all.
     const self = this;
+    this.baseIds = new Set((this.app.nodes() as NodeView[]).map((n) => n.id));
     this.app.setTransport({
       send: (kind: string, payload: unknown) => self.sendFromApp(kind, payload),
       get connected() { return self.connected; },
@@ -168,9 +185,17 @@ export class HostSync {
     try {
       if (!this.bootstrapped) {
         // First contact: the host's canvas replaces whatever was local. The project's last
-        // camera comes back; a canvas opened for the first time fits its content.
+        // camera comes back; a canvas opened for the first time fits its content. Nodes the
+        // user made before the host answered (it was down or still starting) are carried
+        // over instead of vanishing with the local canvas.
+        const made = (this.app.nodes() as NodeView[]).filter((n) => !this.baseIds.has(n.id)).map((n) => n.id);
+        const keep = made.length ? clipNodes(made) : null;
         loadScene(this.app, bytes, this.key);
         this.bootstrapped = true;
+        if (keep) {
+          const kept = restoreNodes(keep);
+          if (kept.length) toast(`kept ${kept.length} node${kept.length === 1 ? '' : 's'} made while the host was unreachable`);
+        }
       } else {
         // Resync after a reconnect: merge (CRDT), then offline edits flow out.
         this.app.importUpdates(bytes);
@@ -209,7 +234,10 @@ export class HostSync {
           setState((s) => ({ chat: s.chat.creating ? { ...selectChat(s.chat, m.chat), creating: false, order: s.chat.order.includes(m.chat) ? s.chat.order : [...s.chat.order, m.chat] } : s.chat }));
         break;
       case 'chat.event':
-        if (typeof m.chat === 'string' && m.event) setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event, typeof m.ts === 'number' ? m.ts : Date.now()) }));
+        if (typeof m.chat === 'string' && m.event) {
+          if (m.event.kind === 'dequeued' && m.event.reason === 'stopped') restoreQueued(m.chat, String(m.event.id));
+          setState((s) => ({ chat: applyEvent(s.chat, m.chat, m.seq, m.event, typeof m.ts === 'number' ? m.ts : Date.now()) }));
+        }
         break;
       case 'chat.deleted':
         if (typeof m.chat === 'string') setState((s) => ({ chat: removeChat(s.chat, m.chat), subView: s.chat.active === m.chat ? null : s.subView }));

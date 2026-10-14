@@ -266,7 +266,7 @@ export function Row({ item, ids, chat, kindOf }: { item: Item; ids: Set<string>;
           {item.summary && <div className="msg"><Md text={item.summary} ids={ids} /></div>}
           <div className="row">
             <div className="row-line done-line">
-              {item.reverted ? '· reverted' : '· done'}
+              {item.reverted ? '· reverted' : item.stopped ? '· stopped' : '· done'}
               {!item.reverted && item.nodes.length > 0 && <> →<Refs ids={item.nodes} /></>}
               {turn && (item.reverted || item.nodes.length > 0) && (
                 <button

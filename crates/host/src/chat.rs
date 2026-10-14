@@ -1489,8 +1489,9 @@ pub async fn handle_client(
                 crate::director::user_message(host, &chat, author, "", vec![], "stop")?;
                 return Ok(None);
             }
+            // `stopped`: the UI puts these messages back into the composer.
             for q in hub.take_queue(host, &chat) {
-                hub.append(host, &chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "cancelled"}))?;
+                hub.append(host, &chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "stopped"}))?;
             }
             hub.to_runtime(host, json!({"type": "stop", "chat": chat}));
             Ok(None)

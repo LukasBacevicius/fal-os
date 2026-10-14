@@ -14,6 +14,7 @@ import { ResizeHandle } from './ResizeHandle';
 import { openMenuAt } from './ContextMenu';
 import { openPrompt } from './SelectionPrompt';
 import { focusApp } from '../apps';
+import { selectedRoots } from '../actions';
 import {
   applyRecipe, assetOf, assetRecord, copyPrompt, copyRecipe, FILTERS, matchesFilter, parentRefs, promptOf, rerun, roleOf,
   setRole, sourceOf, upstreamChanged, type Filter, type ParentRef,
@@ -185,7 +186,7 @@ export function Layers() {
       setEditing(rows[cur].n.id);
     } else if ((e.key === 'Backspace' || e.key === 'Delete') && sel.length) {
       e.preventDefault();
-      app?.apply(sel.map((id) => ({ op: 'delete', id })));
+      app?.apply(selectedRoots(getState().nodes, sel).map((n) => ({ op: 'delete', id: n.id })));
     } else if (e.key === 'Escape') {
       (e.target as HTMLElement).blur();
     }

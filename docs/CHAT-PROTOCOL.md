@@ -127,7 +127,7 @@ and `thinking_done` events go to its own transcript.
 { "kind": "turn", "turn": "t_…", "state": "start" }                       // host: a run starts (after its user event)
 { "kind": "turn", "turn": "t_…", "state": "end", "nodes": ["…"] }          // host: the run ended (status idle/error); nodes its agents touched
 { "kind": "queued", "id": "q_…", "text": "…", "context": [], "author": "lukas" }   // chat.send while running
-{ "kind": "dequeued", "id": "q_…", "reason": "injected" | "cancelled" | "started" | "requeued" }
+{ "kind": "dequeued", "id": "q_…", "reason": "injected" | "cancelled" | "stopped" | "started" | "requeued" }
 { "kind": "user", "text": "…", "author": "lukas", "queued": "q_…" }          // follows dequeued/injected: the message joined the running turn
 { "kind": "reverted", "turn": "t_…", "count": 7, "nodes": ["…"] }
 { "kind": "redone", "turn": "t_…", "count": 7, "nodes": ["…"] }
@@ -162,6 +162,8 @@ and `thinking_done` events go to its own transcript.
 - The fal driver uses queued messages as answers to its questions; the Codex driver runs them
   as the next turn (it can't take input mid-turn).
 - `chat.unqueue` → host drops it (`dequeued`, reason `cancelled`) and sends `{"type":"unqueue","chat","id"}`.
+- `chat.stop` drops the whole queue (`dequeued`, reason `stopped`); the UI puts that text back
+  into the composer.
 - Messages still queued when a turn ends (the runtime never took them) start the next run
   (`dequeued` reason `started`); the rest queue behind it again (`requeued` + a new `queued`).
 - Cross-chat `chat_send` to a busy chat uses the same queue.
