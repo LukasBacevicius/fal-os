@@ -10,10 +10,10 @@ Record at normal speed. Speed up the generation parts 2–4× in the edit.
 | 1:00 | **Fast** | Fling-zoom across all of it while dozens of videos play; open the library | "Native Rust GPU canvas. Hundreds of live assets, no lag." |
 | 1:20 | **Your agent** | Codex in a terminal: "pick the best 4, lay them out as a board"; the canvas updates | "Bring your own agent over MCP." |
 | 1:40 | **Out** | Drag the final into Finder or Premiere; ⌘⇧E exports | "It doesn't trap you." |
-| 1:52 | **End** | Zoom out over the whole canvas | "fal-os · Agent SDK · Claude · Codex" |
+| 1:52 | **End** | Zoom out over the whole canvas | "fal OS · Agent SDK · Claude · Codex" |
 
 ## The brief (sized for volume)
-> Campaign for <project>: 120 stills across 6 directions (20 each), the best 30 animated into 5 s clips, 3 music beds, then a 15 s cut in 16:9 and 9:16.
+> Campaign for **[your project]**: 120 stills across 6 directions (20 each), the best 30 animated into 5 s clips, 3 music beds, then a 15 s cut in 16:9 and 9:16.
 
 ## Prep
 - [ ] Do a dry run of the brief once, off camera, to check timing and spend. Then record a fresh run.
