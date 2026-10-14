@@ -815,9 +815,15 @@ impl Host {
     pub fn restore_backup(&self, id: &str) -> Result<()> {
         let file = falos_doc::canvas_path(&self.dir, id)?;
         let mut chosen = None;
-        for (ms, path) in crate::persist::backups(&self.dir, id) {
+        for (_, path) in crate::persist::backups(&self.dir, id) {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             if Canvas::from_snapshot(&bytes).is_ok() {
+                // The newest slot is rewritten on every save: its age is its mtime.
+                let ms = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_millis() as i64);
                 chosen = Some((ms, bytes));
                 break;
             }
@@ -828,9 +834,10 @@ impl Host {
         }
         falos_doc::write_durable(&file, &bytes)?;
         self.failed.lock().unwrap().remove(id);
-        let age = ((now_ms() - ms) / 60_000).max(0);
-        tracing::info!("canvas `{id}` of {} restored from the backup of {ms}", self.id);
-        self.clear_notice(&format!("load:{id}"), Some(&format!("restored {} from a backup ({age} min old)", self.canvas_name(id))));
+        let mins = ((now_ms() - ms) / 60_000).max(0);
+        let age = if mins < 1 { "under a minute old".to_string() } else { format!("{mins} min old") };
+        tracing::info!("canvas `{id}` of {} restored from the backup saved at {ms}", self.id);
+        self.clear_notice(&format!("load:{id}"), Some(&format!("restored {} from the last good copy ({age})", self.canvas_name(id))));
         self.emit(Event::CanvasReset { canvas: id.to_string() });
         Ok(())
     }
