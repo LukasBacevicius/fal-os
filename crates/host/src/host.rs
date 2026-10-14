@@ -248,6 +248,13 @@ pub struct Session {
     pub working: HashMap<(String, String), i64>,
     /// Has mutated anything yet (for `agent.first_write`).
     pub wrote: bool,
+    /// External agents: what the humans sent them (messages, comments, selection, new
+    /// references), drained by the `inbox` tool and appended to tool results (see `director`).
+    pub inbox: Vec<crate::director::InboxItem>,
+    /// External agents: the MCP connection, for push (`notifications/claude/channel`).
+    pub peer: Option<rmcp::Peer<rmcp::RoleServer>>,
+    /// How `session` chose the project (`folder …`, `open in fal OS`, …).
+    pub bound_by: Option<String>,
 }
 
 impl Session {
@@ -360,6 +367,14 @@ pub struct Host {
     /// App nodes: versions, logs, checks (see `apps`).
     pub apps: crate::apps::Apps,
     sweeper: std::sync::Once,
+    /// Wakes `inbox` long-polls when an external agent's inbox gets something (see `director`).
+    pub inbox_wake: Notify,
+    /// Messages for an external agent client whose session is gone (`codex` → items), handed
+    /// to its next session.
+    pub inbox_orphans: Mutex<HashMap<String, Vec<crate::director::InboxItem>>>,
+    /// Last time a human client showed activity here (ms): connect, selection, focus. The
+    /// most recent connected project is the one "open in fal OS" for agent binding.
+    pub human_seen: std::sync::atomic::AtomicI64,
 }
 
 fn slug(s: &str) -> String {
@@ -435,6 +450,9 @@ impl Host {
             ops_runs: Default::default(),
             apps: Default::default(),
             sweeper: std::sync::Once::new(),
+            inbox_wake: Notify::new(),
+            inbox_orphans: Mutex::default(),
+            human_seen: Default::default(),
         }))
     }
 
@@ -585,7 +603,7 @@ impl Host {
     ) -> Result<T> {
         let id = self.resolve_canvas(canvas)?;
         let o = self.open_canvas(&id)?;
-        let (out, event, assigned, created_ids, touched_ids) = {
+        let (out, event, assigned, created_ids, touched_ids, comments) = {
             let mut o = o.lock().unwrap();
             let before_vv = o.canvas.vv();
             let before_version = o.canvas.version();
@@ -614,7 +632,9 @@ impl Host {
                 .filter(|t| !existed.contains(*t))
                 .cloned()
                 .collect();
-            let assigned = new_assignments(&before_anns, &o.canvas.annotations());
+            let after_anns = o.canvas.annotations();
+            let assigned = new_assignments(&before_anns, &after_anns);
+            let comments = new_messages(&before_anns, &after_anns, actor);
             let (c2, t2): (Vec<String>, Vec<String>) = (created, touched.clone());
             let event = Event::Doc {
                 canvas: id.clone(),
@@ -625,10 +645,11 @@ impl Host {
                 bytes: Arc::new(bytes),
                 origin,
             };
-            (out, event, assigned, c2, t2)
+            (out, event, assigned, c2, t2, comments)
         };
         self.emit(event);
         self.after_mutation(&id, actor, &created_ids, &touched_ids);
+        crate::director::on_change(self, &id, actor, &created_ids, comments);
         for a in assigned {
             let assignee = a.assignee.clone().unwrap_or_default();
             self.notify_actor(
@@ -738,6 +759,9 @@ impl Host {
             selection: vec![],
             working: HashMap::new(),
             wrote: false,
+            inbox: vec![],
+            peer: None,
+            bound_by: None,
         };
         let info = s.info();
         sessions.insert(s.id.clone(), s);
@@ -978,6 +1002,19 @@ impl Host {
             .unwrap()
             .insert((session.into(), request.into()), (Instant::now(), result));
     }
+}
+
+/// Thread messages `actor` added between two snapshots: `(annotation, node, text, assignee)`.
+fn new_messages(before: &[Annotation], after: &[Annotation], actor: &str) -> Vec<(String, String, String, Option<String>)> {
+    let prev: HashMap<&str, usize> = before.iter().map(|a| (a.id.as_str(), a.thread.len())).collect();
+    let mut out = vec![];
+    for a in after {
+        let seen = prev.get(a.id.as_str()).copied().unwrap_or(0);
+        for m in a.thread.iter().skip(seen).filter(|m| m.author == actor) {
+            out.push((a.id.clone(), a.node_id.clone(), m.text.clone(), a.assignee.clone()));
+        }
+    }
+    out
 }
 
 /// Annotations whose assignee is new or changed between two snapshots.

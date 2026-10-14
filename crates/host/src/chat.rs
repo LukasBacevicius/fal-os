@@ -158,6 +158,7 @@ impl ChatState {
             "external": self.meta.external,
             "client": self.meta.client,
             "turn": self.turn,
+            "step": self.step,
             "queued": self.queue.iter().map(|q| json!({"id": q.id, "text": q.text})).collect::<Vec<_>>(),
         })
     }
@@ -652,26 +653,53 @@ impl ChatHub {
                 s.ext_last = now_ms();
             }
         });
+        let _ = self.append(host, &chat, None, json!({"kind": "status", "state": "running"}));
         chat
     }
 
-    /// An external agent made a tool call: its pseudo-chat is running.
+    /// An external agent made a tool call: its pseudo-chat is running (a `status` event, so
+    /// the transcript shows it too).
     pub fn ext_active(&self, host: &Host, chat: &str) {
         let changed = self.with_chats(host, |chats| {
             let s = chats.get_mut(chat)?;
             s.ext_last = now_ms();
-            (s.meta.state != "running").then(|| {
-                s.meta.state = "running".into();
-                s.meta.canvas.clone()
-            })
+            Some(s.meta.state != "running")
         });
-        if let Some(c) = changed {
-            self.mark_dirty(&c);
+        if changed == Some(true) {
+            let _ = self.append(host, chat, None, json!({"kind": "status", "state": "running"}));
         }
     }
 
     pub fn ext_session_closed(&self, host: &Host, chat: &str) {
-        let _ = self.update_meta(host, chat, |m| m.state = "idle".into());
+        let _ = self.append(host, chat, None, json!({"kind": "status", "state": "idle", "detached": true}));
+    }
+
+    /// The MCP client of an external pseudo-chat (`codex`, `claude`, ...).
+    pub fn client_of(&self, host: &Host, chat: &str) -> Option<String> {
+        self.with_chats(host, |chats| chats.get(chat).and_then(|s| s.meta.client.clone()))
+    }
+
+    /// The project's brief when nobody wrote one down: the first message of the oldest
+    /// in-app chat (`(chat, text)`).
+    pub fn first_user_message(&self, host: &Host) -> Option<(String, String)> {
+        let mut chats: Vec<(i64, String)> = self.with_chats(host, |chats| {
+            chats
+                .values()
+                .filter(|s| !s.meta.archived)
+                .map(|s| (if s.meta.external { i64::MAX } else { s.meta.created }, s.meta.chat.clone()))
+                .collect()
+        });
+        chats.sort();
+        let human = |l: &Json| {
+            let a = l["event"]["author"].as_str().unwrap_or_default();
+            l["event"]["kind"] == "user" && !a.starts_with("ext:") && !a.starts_with("chat:") && !a.starts_with("agent:")
+        };
+        chats.into_iter().take(5).find_map(|(_, chat)| {
+            read_log(&log_path(host, &chat))
+                .iter()
+                .find(|l| human(l))
+                .and_then(|l| l["event"]["text"].as_str().map(|t| (chat.clone(), t.to_string())))
+        })
     }
 
     /// External pseudo-chats go idle after [`EXT_IDLE_MS`] without tool calls.
@@ -687,7 +715,7 @@ impl ChatHub {
                 .collect()
         };
         for chat in idle {
-            let _ = self.update_meta(host, &chat, |m| m.state = "idle".into());
+            let _ = self.append(host, &chat, None, json!({"kind": "status", "state": "idle"}));
         }
     }
 
@@ -732,7 +760,7 @@ impl ChatHub {
         })
     }
 
-    fn canvas_of(&self, host: &Host, chat: &str) -> Option<String> {
+    pub fn canvas_of(&self, host: &Host, chat: &str) -> Option<String> {
         self.with_chats(host, |chats| chats.get(chat).map(|s| s.meta.canvas.clone()))
     }
 
@@ -1422,10 +1450,12 @@ pub async fn handle_client(
                 Some(_) => chat_arg()?,
                 None => new_chat_id(),
             };
-            if chat.starts_with("ext:") {
-                bail!("`{chat}` is an external agent's read-only transcript");
-            }
             let chips: Vec<Json> = msg["context"].as_array().cloned().unwrap_or_default();
+            if chat.starts_with("ext:") {
+                // To the user's own agent (Claude Code, Codex, …): its inbox.
+                crate::director::user_message(host, &chat, author, &text, chips, "message")?;
+                return Ok(None);
+            }
             let options = msg.get("options").cloned().unwrap_or(Json::Null);
             if let Some(d) = msg["driver"].as_str() {
                 hub.ensure(host, &chat, canvas);
@@ -1442,12 +1472,23 @@ pub async fn handle_client(
         Some("chat.steer") => {
             let chat = chat_arg()?;
             let chips: Vec<Json> = msg["context"].as_array().cloned().unwrap_or_default();
+            if chat.starts_with("ext:") {
+                // External agents read their inbox between steps: same as a send.
+                if let Some(t) = msg["text"].as_str() {
+                    crate::director::user_message(host, &chat, author, t, chips, "message")?;
+                }
+                return Ok(None);
+            }
             let agent = msg["agent"].as_str().filter(|a| !a.trim().is_empty()).map(str::to_string);
             steer(host, &chat, canvas, author, msg["id"].as_str(), msg["text"].as_str(), chips, agent).await?;
             Ok(None)
         }
         Some("chat.stop") => {
             let chat = chat_arg()?;
+            if chat.starts_with("ext:") {
+                crate::director::user_message(host, &chat, author, "", vec![], "stop")?;
+                return Ok(None);
+            }
             for q in hub.take_queue(host, &chat) {
                 hub.append(host, &chat, None, json!({"kind": "dequeued", "id": q.id, "reason": "cancelled"}))?;
             }
@@ -1457,6 +1498,12 @@ pub async fn handle_client(
         Some("chat.unqueue") => {
             let chat = chat_arg()?;
             let id = msg["id"].as_str().context("chat.unqueue needs id")?;
+            if chat.starts_with("ext:") {
+                if !crate::director::unqueue(host, &chat, id) {
+                    bail!("`{id}` was already read by the agent");
+                }
+                return Ok(None);
+            }
             if !hub.unqueue(host, &chat, id) {
                 bail!("`{id}` is not queued (already sent?)");
             }
@@ -2020,7 +2067,13 @@ pub struct GetContextArgs {
     pub canvas: String,
     /// Context chips, e.g. [{"kind":"node","node":"a1b2c3"}], [{"kind":"region","node":"a1b2c3","box":[0.1,0.2,0.5,0.4]}],
     /// [{"kind":"frame","node":"v9","t":3.2}], [{"kind":"range","node":"au1","t0":2,"t1":5.5}].
-    pub chips: Vec<Json>,
+    /// Omit for the project overview (brief, references, selection, comments, chats, jobs).
+    pub chips: Option<Vec<Json>>,
+    /// Overview detail: "brief" (default) or "full" (+ canvas outline, every reference).
+    pub detail: Option<String>,
+    /// Attach small JPEG previews of the image nodes (the selection + references for the
+    /// overview; the chips' nodes otherwise). Default: true for the overview, false for chips.
+    pub images: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -2270,7 +2323,7 @@ impl CanvasMcp {
     }
 
     #[tool(
-        description = "Resolve context chips (node, spot, region, frame, range) to the node's row, lineage, asset uri, local media file path and pixel crop / ffmpeg frame hints.",
+        description = "Without chips: the project overview (brief, references with files, the user's selection, comments, chats, what's generating) plus small previews of the references and selection as images, so you can SEE them. detail:\"full\" adds the canvas outline. With chips (node, spot, region, frame, range): each node's row, lineage, asset uri, local media file path and pixel crop / ffmpeg frame hints.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2280,12 +2333,28 @@ impl CanvasMcp {
     )]
     async fn get_context(&self, Parameters(a): Parameters<GetContextArgs>) -> CallToolResult {
         let host = self.host().clone();
+        let mut shown: Vec<String> = vec![];
+        let chips = a.chips.clone().unwrap_or_default();
         let r = async {
             host.actor(&a.session_id)?;
-            let seen: Vec<String> = a.chips.iter().filter_map(|c| c["node"].as_str().map(String::from)).collect();
+            if chips.is_empty() {
+                let canvas = host.resolve_canvas(&a.canvas)?;
+                let text = crate::director::overview(&host, Some(&a.session_id), &canvas, a.detail.as_deref() == Some("full"))?;
+                if a.images != Some(false) {
+                    shown = host.selected_nodes(&canvas);
+                    shown.extend(crate::director::references(&host, &canvas).0);
+                    shown.dedup();
+                }
+                host.activity(&a.session_id, &canvas, "read", &shown);
+                return Ok(text);
+            }
+            let seen: Vec<String> = chips.iter().filter_map(|c| c["node"].as_str().map(String::from)).collect();
             host.activity(&a.session_id, &a.canvas, "read", &seen);
+            if a.images == Some(true) {
+                shown = seen.clone();
+            }
             let mut out = Vec::new();
-            for c in &a.chips {
+            for c in &chips {
                 out.push(match resolve_chip(&host, &a.canvas, c).await {
                     Ok(v) => v,
                     Err(e) => json!({"chip": c, "error": format!("{e:#}")}),
@@ -2294,7 +2363,13 @@ impl CanvasMcp {
             Ok(serde_json::to_string_pretty(&out)?)
         }
         .await;
-        self.finish(Some(&a.session_id), r)
+        let ok = r.is_ok();
+        let mut res = self.finish(Some(&a.session_id), r);
+        if ok && !shown.is_empty() {
+            let previews = crate::director::previews(&host, &a.canvas, &shown, 8).await;
+            res.content.extend(crate::director::image_blocks(previews));
+        }
+        res
     }
 }
 

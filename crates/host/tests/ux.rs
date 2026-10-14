@@ -198,9 +198,40 @@ async fn external_agent_pseudo_chat_activity_and_connect_flow() {
     let clr = next_of(&mut ui, "activity.clear").await;
     assert_eq!((clr["session"].as_str(), clr["nodes"].clone()), (Some(sid.as_str()), Json::Null));
 
-    // External agents can't be chatted to.
-    send(&mut ui, json!({"type": "chat.send", "chat": "ext:claude-1", "text": "hi"})).await;
-    assert!(next_of(&mut ui, "error").await["message"].as_str().unwrap().contains("read-only"));
+    // The user messages the agent from its tab: queued, then delivered with its next tool call.
+    send(&mut ui, json!({"type": "chat.send", "chat": "ext:claude-1", "text": "make it warmer"})).await;
+    let q = next_event(&mut ui, "ext:claude-1", "queued").await;
+    assert_eq!(q["text"], "make it warmer");
+    let r = call(&c, "list_annotations", json!({"sessionId": sid, "canvas": "main"})).await;
+    assert!(r.as_str().unwrap().contains("Lukas says: make it warmer"), "{r}");
+    let u = next_where(&mut ui, |v| v["type"] == "chat.event" && v["chat"] == "ext:claude-1" && v["event"]["kind"] == "user").await;
+    assert_eq!((u["event"]["queued"].clone(), u["event"]["author"].as_str()), (q["id"].clone(), Some("Lukas")));
+    assert_eq!(call(&c, "inbox", json!({"sessionId": sid})).await, Json::String("nothing new from the user".into()));
+
+    // inbox long-polls until the user writes; stop is a message too.
+    let peer = c.peer().clone();
+    let args = json!({"sessionId": sid, "waitSecs": 20});
+    let waiting = tokio::spawn(async move {
+        let r = peer.call_tool(CallToolRequestParams::new("inbox").with_arguments(args.as_object().unwrap().clone())).await.unwrap();
+        text(&r)
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    send(&mut ui, json!({"type": "chat.stop", "chat": "ext:claude-1"})).await;
+    let got = tokio::time::timeout(Duration::from_secs(5), waiting).await.expect("inbox woke").unwrap();
+    assert!(got.contains("pressed stop"), "{got}");
+
+    // report posts to the tab; arrange lays nodes out as a board.
+    call(&c, "report", json!({"sessionId": sid, "text": "made a moodboard", "nodes": [created[0]]})).await;
+    let t = next_event(&mut ui, "ext:claude-1", "text").await;
+    assert_eq!(t["delta"], "made a moodboard");
+    let e2 = call(&c, "edit", json!({"sessionId": sid, "canvas": "main", "text": "image \"a\" p(0,900) s(400,300)\nimage \"b\" p(500,900) s(300,400)\nimage \"c\" p(900,900) s(512,512)\nimage \"d\" p(1500,900) s(512,512)"})).await;
+    let imgs: Vec<String> = e2["created"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let b = call(&c, "arrange", json!({"sessionId": sid, "canvas": "main", "nodes": imgs, "title": "Best 4"})).await;
+    let frame = b["frame"].as_str().unwrap().to_string();
+    assert_eq!(b["grid"], json!([2, 2]));
+    let rows = call(&c, "read", json!({"sessionId": sid, "canvas": "main", "root": frame})).await;
+    let rows = rows.as_str().unwrap();
+    assert!(rows.contains("frame \"Best 4\"") && imgs.iter().all(|i| rows.contains(&format!("  {i} image"))), "{rows}");
 
     // A second session from the same client gets its own pseudo-chat.
     let c2 = client_as(env.port, "codex-mcp-client", None).await;

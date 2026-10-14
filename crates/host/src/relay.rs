@@ -12,6 +12,11 @@
 //! re-reads host.json, replays `initialize` (+ `notifications/initialized`) and retries once,
 //! so the client keeps working without a restart. Requests that still fail get a JSON-RPC
 //! error that says what to do.
+//!
+//! Project binding: every request carries `X-Falos-Cwd` (the relay's working directory, i.e.
+//! the folder the agent was started in) and, when set, `FALOS_PROJECT` as `X-Falos-Project`.
+//! Push: after `initialize` the relay also holds the server's GET event stream open and
+//! forwards server-initiated messages (e.g. `notifications/claude/channel`) to stdout.
 
 use std::sync::Arc;
 
@@ -79,6 +84,12 @@ impl Relay {
             .bearer_auth(&token)
             .header("accept", "application/json, text/event-stream")
             .header("x-falos-from", "stdio");
+        if let Ok(cwd) = std::env::current_dir() {
+            r = r.header("x-falos-cwd", cwd.to_string_lossy().as_ref());
+        }
+        if let Some(p) = std::env::var("FALOS_PROJECT").ok().filter(|p| !p.trim().is_empty()) {
+            r = r.header("x-falos-project", p.trim());
+        }
         let st = self.state.lock().unwrap();
         if with_session && let Some(s) = &st.session {
             r = r.header("mcp-session-id", s);
@@ -215,6 +226,37 @@ impl Relay {
         Ok(())
     }
 
+    /// The server's standalone event stream (GET): server-initiated notifications go to
+    /// stdout. Reconnects with backoff; stops when the server has no such stream (405).
+    async fn listen(self: Arc<Self>) {
+        let mut backoff = 1u64;
+        loop {
+            let has_session = self.state.lock().unwrap().session.is_some();
+            if has_session && let Ok(req) = self.request(reqwest::Method::GET, true) {
+                match req.header("accept", "text/event-stream").send().await {
+                    Ok(r) if r.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED => return,
+                    Ok(mut r) if r.status().is_success() => {
+                        backoff = 1;
+                        let mut buf = String::new();
+                        while let Ok(Some(chunk)) = r.chunk().await {
+                            buf.push_str(&String::from_utf8_lossy(&chunk));
+                            while let Some(end) = buf.find("\n\n") {
+                                let event: String = buf.drain(..end + 2).collect();
+                                let data: String = event.lines().filter_map(|l| l.strip_prefix("data:")).map(str::trim_start).collect::<Vec<_>>().join("\n");
+                                if let Ok(v) = serde_json::from_str::<Json>(&data) {
+                                    self.write(&v).await;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+            backoff = (backoff * 2).min(30);
+        }
+    }
+
     /// Remember the negotiated protocol version (sent on later requests).
     fn on_message(&self, v: &Json) {
         if let Some(p) = v["result"]["protocolVersion"].as_str() {
@@ -235,6 +277,7 @@ pub async fn run() -> Result<()> {
     }
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut tasks = tokio::task::JoinSet::new();
+    let mut listening = false;
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
@@ -252,6 +295,10 @@ pub async fn run() -> Result<()> {
         // The session id comes from `initialize`: everything else waits for it.
         if msg["method"] == "initialize" {
             relay.relay(msg).await;
+            if !listening {
+                listening = true;
+                tokio::spawn(relay.clone().listen());
+            }
         } else {
             let r = relay.clone();
             tasks.spawn(async move { r.relay(msg).await });

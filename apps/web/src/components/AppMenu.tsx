@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { getState, setState, useStore } from '../store';
 import { MOD, newChat, toggleChat, toggleOutline } from '../keys';
-import { toggleHistory } from '../chatActions';
+import { continueInAgent, toggleHistory } from '../chatActions';
 import { openLibrary } from '../library';
 import { openExport } from '../out';
 import { setReduceMotion } from '../activity';
@@ -43,6 +43,8 @@ function rows(): Row[] {
     { label: 'all chats', hint: `${MOD}Y`, run: toggleHistory },
     { label: 'import files…', hint: 'drop', run: () => importPicked(), sep: true },
     { label: 'export…', hint: `${MOD}⇧E`, run: openExport },
+    { label: 'continue in Claude Code', hint: 'copy cmd', run: () => continueInAgent('claude'), sep: true },
+    { label: 'continue in Codex', hint: 'copy cmd', run: () => continueInAgent('codex') },
     { label: 'connect agent…', hint: 'mcp', run: () => setState({ overlay: 'connect' }) },
     ...(isDesk() ? [{ label: 'setup…', hint: 'app', run: () => setState({ overlay: 'setup' as const }) }] : []),
     { label: 'undo', hint: `${MOD}Z`, run: () => s.app?.undo(), sep: true },

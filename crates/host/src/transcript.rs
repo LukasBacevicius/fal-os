@@ -15,7 +15,7 @@ pub struct ExtCall {
 }
 
 /// Housekeeping calls that don't get a transcript line.
-const HIDDEN: &[&str] = &["session"];
+const HIDDEN: &[&str] = &["session", "report"];
 
 pub fn ext_start(host: &Host, name: &str, args: &Json) -> Option<ExtCall> {
     if HIDDEN.contains(&name) {
@@ -127,6 +127,9 @@ fn running_summary(name: &str, args: &Json) -> String {
         "import_file" => format!("importing {}", s("path").rsplit('/').next().unwrap_or_default()),
         "set_status" => s("text"),
         "create_app" => format!("building {}", s("name")),
+        "inbox" if args["waitSecs"].as_u64().unwrap_or(0) > 0 => "waiting for you · message me here".into(),
+        "inbox" => "checking messages".into(),
+        "arrange" => format!("laying out {}", args["nodes"].as_array().map_or(0, Vec::len)),
         "write_app_files" => format!("writing {}", s("app")),
         "app_logs" => format!("checking {}", s("app")),
         _ => name.replace('_', " "),
@@ -162,6 +165,7 @@ pub fn done_summary(name: &str, args: &Json, j: &Json, nodes: &[String]) -> Stri
         }
         "generate" => format!("started generating ({})", s("model").trim_start_matches("fal-ai/")),
         "import_file" => format!("imported {}", s("path").rsplit('/').next().unwrap_or_default()),
+        "get_context" if args["chips"].as_array().is_none_or(Vec::is_empty) => "looked at the project and its references".into(),
         "get_context" => format!("looked at {}", plural(nodes.len(), "node")),
         "get_annotation" => format!("read comment {}", s("id")),
         "list_annotations" => "checked comments".into(),
@@ -174,6 +178,11 @@ pub fn done_summary(name: &str, args: &Json, j: &Json, nodes: &[String]) -> Stri
         "set_status" => s("text"),
         "finish_working" => "finished".into(),
         "get_selection" => "looked at your selection".into(),
+        "inbox" => "checked messages".into(),
+        "arrange" => match j["frame"].as_str() {
+            Some(f) => format!("laid out {} as board {f}", plural(len("nodes"), "node")),
+            None => format!("laid out {}", plural(len("nodes"), "node")),
+        },
         "get_knowledge" => "read docs".into(),
         "create_app" => app_summary("built", j),
         "write_app_files" => app_summary("updated", j),

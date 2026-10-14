@@ -13,10 +13,6 @@ export function sendTo(chat: string | null, text: string, context: Chip[]): bool
     toast('chat needs a fal-os host');
     return false;
   }
-  if (chat && isExternal(chat)) {
-    toast('external agents are read-only here');
-    return false;
-  }
   if (!sync.sendChat(text, context, chat)) {
     toast('not connected to the host');
     return false;
@@ -28,7 +24,8 @@ export function sendTo(chat: string | null, text: string, context: Chip[]): bool
 /** Sends a message on the active chat with the pending chips (plus `extra`). */
 export function sendChatMessage(text: string, extra: Chip[] = []): boolean {
   const s = getState();
-  const active = s.chat.active && !isExternal(s.chat.active) ? s.chat.active : null;
+  // An external agent's tab (Claude Code, Codex, …): the message goes to its inbox.
+  const active = s.chat.active;
   if (!sendTo(active, text, [...s.chat.chips, ...extra])) return false;
   setState((st) => ({ chat: { ...st.chat, chips: [] } }));
   return true;
@@ -77,6 +74,16 @@ export function toggleHistory() {
   setState((s) => ({ chatOpen: true, chatView: s.chatOpen && s.chatView === 'history' ? 'chat' : 'history' }));
 }
 
+/** "Continue in my agent": copies `cd <project> && claude "continue this fal OS project"`
+ *  (or codex) with the native clipboard; `open` also runs it in Terminal. */
+export function continueInAgent(agent: 'claude' | 'codex', open = false): boolean {
+  if (!hostSync()?.continueInAgent(agent, open)) {
+    toast('needs a fal OS host');
+    return false;
+  }
+  return true;
+}
+
 export const DRIVERS = ['opus', 'fal', 'codex'] as const;
 
 /** ⌘. / the composer toggle: which agent drives the next message. */
@@ -100,10 +107,8 @@ export function steerText(text: string, agent: string | null = null): boolean {
     toast('chat needs a fal-os host');
     return false;
   }
-  if (isExternal(chat)) {
-    toast('external agents are read-only here');
-    return false;
-  }
+  // External agents read their inbox between steps: steering is a plain send.
+  if (isExternal(chat)) return sendTo(chat, text, []);
   if (!sync.steerChat(chat, { text, agent })) {
     toast('not connected to the host');
     return false;

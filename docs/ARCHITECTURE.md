@@ -173,6 +173,33 @@ capable.
     fal-os's marker line.
   - The skill body is `crates/host/knowledge/director.md` (also `get_knowledge("director")`), so it
     doesn't drift from the host.
+- **Zero-setup binding.** `session` finds the project by itself: the agent's folder (`cwd`
+  argument, or the stdio relay's working directory as `X-Falos-Cwd`; `FALOS_PROJECT` wins), else
+  the project open and focused in fal OS (UI `focus` / selection / cursor frames), else the most
+  recent one; the result says how (`boundBy`). Every project folder carries a generated
+  `AGENTS.md` + `CLAUDE.md` block (between `fal-os:begin/end` markers; the rest of the file is
+  the user's; `fal-os:off` opts out) saying "this is fal OS project X, start with `session`".
+  "Continue in my agent" (app menu, ⌘K) copies `cd <project> && claude|codex "continue this fal
+  OS project"` with `pbcopy`, or opens Terminal with it (a `.command` file: no Automation prompt).
+- **Context.** `session` returns the overview (`context`: brief from `project.json` `brief` / a
+  "brief" note / the first chat message, the user's selection, references = protected inputs with
+  local files, notes, deliverables, open comments, in-app chats, other agents, jobs);
+  `get_context` without chips returns it again (`detail:"full"` adds the canvas outline) plus
+  512 px JPEG previews of the references and selection as MCP image content.
+- **Two-way steering** (`director.rs`). User → agent: the agent's `ext:` tab in fal OS takes
+  messages (and stop); they, the human's new comments, new nodes and selection changes queue in
+  the session's inbox. `inbox(waitSecs?)` drains it (long-poll up to 300 s; Codex gets
+  `tool_timeout_sec = 600` from connect) and messages / comments are also appended to every tool
+  result, so the agent hears the user mid-run without polling. Push: the server declares
+  `experimental["claude/channel"]` and sends `notifications/claude/channel` to Claude Code
+  sessions (the stdio relay forwards the server's GET event stream). Claude Code 2.1.289 only
+  registers channels with the hidden `--channels` flag (plugins on an allowlist) or
+  `--dangerously-load-development-channels server:fal-os` (a startup confirmation, interactive),
+  so long-poll + piggybacked notices are the universal path. Agent → user: `set_status`, tool
+  calls and `report(text, nodes, done?)` show in the tab.
+- **Boards.** `arrange(nodes, layout: board|grid|row|column, title, columns?, cell?, into?)`: one
+  call lays picks out in a titled frame in free space next to them (protected inputs are placed
+  as copies of the same asset); one undo step.
 - **Round-trip tools:** `export` → absolute `files[].path`; `get_asset(node)` → `file` (original's
   absolute path; works before the library has indexed it); `import_file(path, sourceApp, note,
   lineage.parents, role)` → origin `{app, note}` on the asset, placed next to its parents.

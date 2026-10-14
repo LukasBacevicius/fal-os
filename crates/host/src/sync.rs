@@ -41,6 +41,9 @@ enum ClientMsg {
     Selection {
         nodes: Vec<String>,
     },
+    /// The window showing this project got focus: it's the project "open in fal OS" that
+    /// external agents bind to.
+    Focus {},
 }
 
 /// `{"type":"agent.register","client":"claude"|"codex"|"cursor"|"gemini"|"opencode"}`:
@@ -123,6 +126,8 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
     );
     let actor = info.actor.clone();
     let _ = host.set_presence(&info.id, |p| p.canvas = Some(canvas.clone()));
+    let seen = |h: &Host| h.human_seen.store(crate::host::now_ms(), std::sync::atomic::Ordering::Relaxed);
+    seen(&host);
     // Subscribe before the snapshot so nothing falls between them (imports are idempotent).
     let mut rx = host.subscribe();
     let version = host
@@ -189,6 +194,11 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                     let reply = agent_register(&host, &m);
                     let _ = send_json(&mut socket, reply).await;
                 }
+                Some(Ok(Message::Text(t))) if t.contains("agent.continue") && serde_json::from_str::<serde_json::Value>(&t).is_ok_and(|m| m["type"] == "agent.continue") => {
+                    let m: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+                    let reply = tokio::task::block_in_place(|| crate::director::continue_frame(&host, &m));
+                    let _ = send_json(&mut socket, reply).await;
+                }
                 Some(Ok(Message::Text(t))) if t.contains("director.") && let Some(m) = director_frame(&t) => {
                     let reply = tokio::task::block_in_place(|| director(&host, &m));
                     let _ = send_json(&mut socket, reply).await;
@@ -202,7 +212,11 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
                     }
                 }
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<ClientMsg>(&t) {
+                    Ok(ClientMsg::Focus {}) => seen(&host),
                     Ok(ClientMsg::Presence { cursor, viewport, status }) => {
+                        if cursor.is_some() {
+                            seen(&host);
+                        }
                         let _ = host.set_presence(&info.id, |p| {
                             p.cursor = cursor.or(p.cursor);
                             p.viewport = viewport.or(p.viewport);

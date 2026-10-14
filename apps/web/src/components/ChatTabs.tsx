@@ -92,7 +92,7 @@ export function ChatTabs() {
               className={`tab ${on ? 'on' : ''} ${drag?.over === id ? (drag.after ? 'drop-after' : 'drop-before') : ''}`}
               tabIndex={0}
               draggable={renaming !== id}
-              title={`${chatTitle(chat, id)}${isExternal(id) ? ' · external agent (read-only)' : chat.meta[id]?.driver ? ` · ${chat.meta[id]?.driver}` : ''}`}
+              title={`${chatTitle(chat, id)}${isExternal(id) ? ' · your agent (message it here)' : chat.meta[id]?.driver ? ` · ${chat.meta[id]?.driver}` : ''}`}
               onClick={() => openChat(id)}
               onDoubleClick={() => setRenaming(id)}
               onContextMenu={(e) => {

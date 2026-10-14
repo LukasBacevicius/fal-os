@@ -160,7 +160,7 @@ const TOML_TRANSPORT: &[&str] = &["command", "args", "env", "url", "http_headers
 /// says the file is ours (only marked files are updated or removed).
 pub fn skill_text() -> String {
     format!(
-        "---\nname: fal-os\ndescription: Direct creative work with fal-os (MCP server `fal-os`): generate images/video/audio with fal models in parallel batches, use the asset library and canvas, export verified files to hand to other apps (editors via computer use), and import results back with lineage. Use when the user mentions fal-os, the canvas, generating media, moodboards, storyboards, ads, or moving media between fal-os and other apps.\n---\n\n{}\n{MARKER}\n",
+        "---\nname: fal-os\ndescription: Direct creative work in fal OS (MCP server `fal-os`): the user's canvas with references, selection and live steering. Generate images/video/audio with fal models in parallel batches, lay results out as boards, take messages from the user mid-run (inbox), report back, drive the in-app agent swarm, export files to other apps and import results with lineage. Use when the user mentions fal OS / fal-os, asks to continue a fal OS project, the canvas, references, boards, moodboards, storyboards, ads, generating media, or when the folder's AGENTS.md / CLAUDE.md says it is a fal OS project.\n---\n\n{}\n{MARKER}\n",
         crate::knowledge::DIRECTOR.trim_end()
     )
 }
@@ -318,6 +318,8 @@ fn toml_want(ctx: &Ctx) -> Vec<(&'static str, toml_edit::Value)> {
     // Without it Codex asks before every writing tool call and, non-interactively, can't call
     // them at all (same as the in-app Codex driver).
     v.push(("default_tools_approval_mode", "approve".into()));
+    // `inbox` long-polls and `await_batch` outlast Codex's 60 s default.
+    v.push(("tool_timeout_sec", 600i64.into()));
     v
 }
 

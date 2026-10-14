@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getState, setState, useStore } from '../store';
 import { chatTitle } from '../chat';
-import { openChat, setDriver, toggleHistory } from '../chatActions';
+import { continueInAgent, openChat, setDriver, toggleHistory } from '../chatActions';
 import { setReduceMotion } from '../activity';
 import { openPrompt } from './SelectionPrompt';
 import { focusNode, addSelectionToChat } from '../controller';
@@ -42,6 +42,10 @@ function actions(): Entry[] {
     { label: 'switch project…', hint: '⌘O', run: () => setState({ overlay: 'projects' }) },
     { label: 'new project…', hint: 'project', run: () => setState({ overlay: 'projects' }) },
     { label: 'connect agent (Claude Code, Codex, Cursor, …)', hint: 'mcp', run: () => setState({ overlay: 'connect' }) },
+    { label: 'continue in Claude Code (copy command)', hint: 'agent', run: () => continueInAgent('claude') },
+    { label: 'continue in Codex (copy command)', hint: 'agent', run: () => continueInAgent('codex') },
+    { label: 'continue in Claude Code (open Terminal)', hint: 'agent', run: () => continueInAgent('claude', true) },
+    { label: 'continue in Codex (open Terminal)', hint: 'agent', run: () => continueInAgent('codex', true) },
     ...((window as any).__TAURI_INTERNALS__
       ? [{ label: 'setup (fal key, Claude Code, motion tools)…', hint: 'app', run: () => setState({ overlay: 'setup' as const }) }]
       : []),

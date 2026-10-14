@@ -10,6 +10,7 @@ pub mod batch;
 pub mod chat;
 pub mod connect;
 pub mod context;
+pub mod director;
 pub mod fal;
 pub mod fal_relay;
 pub mod host;

@@ -136,6 +136,7 @@ impl Workspace {
     /// Single-project mode around an open host.
     pub fn single(host: Arc<Host>) -> Arc<Self> {
         let ws = Self::new(None, Box::new(HostOptions::default), host.chat.link.clone());
+        crate::director::write_pointers(&host);
         ws.hosts.lock().unwrap().insert(host.id.clone(), host);
         Arc::new(ws)
     }
@@ -226,7 +227,32 @@ impl Workspace {
             host.start_tasks();
         }
         hosts.insert(id.to_string(), host.clone());
+        drop(hosts);
+        crate::director::write_pointers(&host);
         Ok(host)
+    }
+
+    /// The project whose folder contains `path` (a fal OS project folder or anything inside).
+    pub fn project_for_path(&self, path: &Path) -> Option<String> {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        match &self.root {
+            Some(root) => {
+                let rel = path.strip_prefix(root).ok()?;
+                let id = rel.components().next()?.as_os_str().to_str()?.to_string();
+                (valid_project_id(&id) && root.join(&id).join("project.json").is_file()).then_some(id)
+            }
+            None => self.single_host().filter(|h| path.starts_with(h.dir())).map(|h| h.id.clone()),
+        }
+    }
+
+    /// The project the user has open in fal OS right now: of the loaded projects with a
+    /// connected human client, the one with the most recent human activity.
+    pub fn active_id(&self) -> Option<String> {
+        self.loaded()
+            .into_iter()
+            .filter(|h| h.with_sessions(|ss| ss.values().any(|s| s.actor.kind == falos_doc::ActorKind::Human)))
+            .max_by_key(|h| h.human_seen.load(std::sync::atomic::Ordering::Relaxed))
+            .map(|h| h.id.clone())
     }
 
     /// The `project.json` name of a project (loaded or not).
@@ -472,7 +498,10 @@ impl Workspace {
         let name = clean_name(name)?;
         let loaded = self.hosts.lock().unwrap().get(id).cloned();
         match loaded {
-            Some(h) => h.update_project(|p| p.name = name)?,
+            Some(h) => {
+                h.update_project(|p| p.name = name)?;
+                crate::director::write_pointers(&h);
+            }
             None => {
                 let dir = self.dir_of(id)?;
                 if !dir.join("project.json").is_file() {

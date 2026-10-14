@@ -144,13 +144,16 @@ function Composer({ running, readOnly, question, agent, queued }: {
   };
 
   const removeChip = (i: number) => setState((s) => ({ chat: { ...s.chat, chips: s.chat.chips.filter((_, j) => j !== i) } }));
+  const ext = !!chat.active && isExternal(chat.active);
   const placeholder = readOnly
     ? 'external agent · read-only'
     : agent
       ? `message ${agent}…`
-      : chat.active
-        ? running ? 'steer: ⏎ queue · ⌘⏎ send now…' : `message ${chatTitle(chat, chat.active)}…`
-        : 'start a chat…';
+      : ext
+        ? `message ${chatTitle(chat, chat.active!)} · it reads this between steps…`
+        : chat.active
+          ? running ? 'steer: ⏎ queue · ⌘⏎ send now…' : `message ${chatTitle(chat, chat.active)}…`
+          : 'start a chat…';
   const mod = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'ctrl+';
   const unattached = selection.filter((id) => !chat.chips.some((c) => c.kind === 'node' && c.node === id)).length;
 
@@ -174,7 +177,7 @@ function Composer({ running, readOnly, question, agent, queued }: {
         </div>
       )}
       <div className="prompt">
-        {!readOnly && <DriverPicker />}
+        {!readOnly && !ext && <DriverPicker />}
         <span className="dim">&gt;</span>
         <textarea
           ref={input}
@@ -209,7 +212,7 @@ function Composer({ running, readOnly, question, agent, queued }: {
           </span>
         )}
       </div>
-      {running && !agent && text.trim() && !readOnly && (
+      {running && !agent && text.trim() && !readOnly && !ext && (
         <div className="steer-hint faint">
           <button className="link" onMouseDown={(e) => { e.preventDefault(); send(); }}>⏎ queue</button>
           <span> after the next step · </span>
@@ -274,7 +277,11 @@ export function ChatPanel() {
   const kinds = useMemo(() => new Map(nodes.map((n) => [n.id, n.kind])), [nodes]);
   const kindOf = (id: string) => kinds.get(id);
   const color = chatColor(chat, chat.active);
-  const readOnly = !!chat.active && isExternal(chat.active);
+  // External agents (Claude Code, Codex, …) take messages too: they land in its inbox.
+  const readOnly = false;
+  const ext = !!chat.active && isExternal(chat.active);
+  const sessions = useStore((s) => s.sessions);
+  const attached = ext ? sessions.find((x) => x.chat === chat.active) : undefined;
   const empty = !chat.order.length && !chat.pending;
 
   // Switching chats or views: show the end of the log.
@@ -344,6 +351,12 @@ export function ChatPanel() {
               </div>
             );
           })()}
+          {ext && (
+            <div className="sub-head faint" title="your own agent, connected over MCP: messages here reach it between its steps">
+              <span style={{ color }}>{attached ? '●' : '○'}</span>{' '}
+              {attached ? `${attached.client ?? 'agent'} · attached${attached.presence.status ? ` · ${attached.presence.status}` : ''}` : 'detached · messages wait for its next session'}
+            </div>
+          )}
           <div
             className="chat-log"
             ref={log}
@@ -431,7 +444,7 @@ export function ChatPanel() {
                   }}
                 >
                   <span className="faint">queued:</span> <span className="queued-text">{q.text}</span>
-                  {main.running && (
+                  {main.running && !ext && (
                     <button className="link dim" title="deliver to the running turn now (⌘⏎)" onClick={() => steerQueued(q.id)}>
                       [send now]
                     </button>

@@ -90,4 +90,4 @@ Builds on [UI-SPEC.md](UI-SPEC.md) (mono terminal look, minimal chrome) and [CHA
 - **Host:**
   - Identify agents by MCP client name.
   - A stdio relay (`falos-host mcp`) for clients that prefer stdio.
-  - Show external agents in the chat tab strip as `ext:` pseudo-chats, so their activity is visible too: read-only transcripts of their tool calls.
+  - Show external agents in the chat tab strip as `ext:` tabs: their tool calls and reports, a `codex · attached · <status>` line, and a composer whose messages reach the agent between its steps (inbox).

@@ -106,10 +106,14 @@ export class HostSync {
       send: (kind: string, payload: unknown) => self.sendFromApp(kind, payload),
       get connected() { return self.connected; },
     });
+    window.addEventListener('focus', this.onFocus);
     this.connect();
   }
 
+  private onFocus = () => this.focus();
+
   stop() {
+    window.removeEventListener('focus', this.onFocus);
     this.closed = true;
     window.clearTimeout(this.timer);
     cancelAnimationFrame(this.anim);
@@ -221,6 +225,10 @@ export class HostSync {
         break;
       case 'director.status':
         setState({ director: { targets: Array.isArray(m.targets) ? m.targets : [], home: m.home, changed: m.changed, error: m.error } });
+        break;
+      case 'agent.continue':
+        if (m.error) toast(`continue: ${m.error}`);
+        else toast(m.opened ? `opened Terminal: ${m.command}` : m.copied ? `copied: ${m.command}` : String(m.command));
         break;
       case 'agent.connected':
         setState((s) => ({ connect: { ...s.connect, connected: { ...s.connect.connected, [m.client]: { agentName: String(m.agentName ?? m.client), session: String(m.session ?? '') } } } }));
@@ -348,6 +356,17 @@ export class HostSync {
   /** "Connect your agent": the host writes the client's MCP config (`agent.registered`). */
   registerAgent(client: string): boolean {
     return this.sendJson({ type: 'agent.register', client });
+  }
+
+  /** Continue this project in the user's own agent: the host copies the command (and with
+   *  `open` runs it in Terminal); the reply is `agent.continue`. */
+  continueInAgent(agent: 'claude' | 'codex', open: boolean): boolean {
+    return this.sendJson({ type: 'agent.continue', agent, open });
+  }
+
+  /** This window has focus: external agents bind to the project open here. */
+  focus() {
+    this.sendJson({ type: 'focus' });
   }
 
   /** Use fal-os from the user's own Claude Code / desktop app / Codex (`director.status`). */

@@ -117,7 +117,7 @@ receive a cross-chat message are opened automatically.
 { "type": "chat.delete", "chat": "c_…" }                    // stop it, delete chats/<id>.jsonl + its index entry; the last chat can be deleted too
 ```
 Host → client: `{"type":"chat.deleted","canvas":"main","chat":"c_…"}` (then `chat.list` without it).
-Errors (unknown turn, reverting a running turn, sending to an `ext:` chat, unknown driver) come back as `{"type":"error"}`.
+Errors (unknown turn, reverting a running turn, unknown driver) come back as `{"type":"error"}`.
 
 ### New chat events
 Runtime events always carry `agent` (`director` unless another agent; subagents also carry
@@ -176,11 +176,27 @@ MCP configured (its own session/cursor via `X-Falos-Chat`). Switching drivers st
 run fresh with the transcript as context; the `run` frame says `previous_driver`.
 
 ### External agents
-- **Pseudo-chats.** An MCP session without `X-Falos-Chat` (Claude Code, Codex, Cursor, … connected
-  directly) gets a read-only chat `ext:<client>-<n>` (title = agentName, a color, `external: true`,
+- **Agent tabs.** An MCP session without `X-Falos-Chat` (Claude Code, Codex, Cursor, … connected
+  directly) gets a chat `ext:<client>-<n>` (title = agentName, a color, `external: true`,
   `client`). Its tool calls appear there as `tool` events (`running`, then `done`/`error` with a
-  summary and `nodes`). `state` is `running` while it works and `idle` after 30 s quiet or when
-  the session ends. Chat ids may be `ext:` + `[A-Za-z0-9_-]`; logs are `chats/ext_<…>.jsonl`.
+  summary and `nodes`); `report` adds `text` (+ `done` with `nodes`). `status` events: `running`
+  while it works, `idle` after 30 s quiet, `idle` + `detached: true` when the session ends.
+  Chat ids may be `ext:` + `[A-Za-z0-9_-]`; logs are `chats/ext_<…>.jsonl`.
+- **Messaging the agent (inbox).** `chat.send` / `chat.steer` to an `ext:` chat queue the text in
+  that session's inbox (`queued` event); when the agent picks it up (`inbox`, or appended to
+  any of its tool results as "notices from the user in fal OS") it becomes `dequeued` +
+  `{"kind":"user","queued":id,"author":<name>}`. `chat.stop` queues a stop message,
+  `chat.unqueue` takes a message back. With no session attached the message waits for the
+  client's next session (its queued line moves to the new tab). The inbox also gets the
+  human's new comments, new nodes (references, notes) and selection changes on that canvas.
+- **Binding.** `session` without `project` picks: `cwd` argument / the stdio relay's
+  `X-Falos-Cwd` inside a workspace project folder → `FALOS_PROJECT` (`X-Falos-Project`) → the
+  project open in fal OS (connected human, latest `focus` / selection / cursor) → the most
+  recent project. The result says how (`boundBy`) and carries the overview (`context`).
+- **Client frames.** `{"type":"focus"}` (window focus: this project is the one "open in fal OS");
+  `{"type":"agent.continue","agent":"claude"|"codex","open"?:bool}` → `{"type":"agent.continue",
+  command, copied, opened}` (`cd <project> && claude "continue this fal OS project"`, copied with
+  `pbcopy`; `open` runs it in Terminal through a `.command` file).
 - **External control.** The fal-os MCP server also has `chat_list(sessionId)`,
   `chat_new(sessionId, text, context?, driver?, canvas?)` → `{chat}`, `chat_send(sessionId, chat, text, context?)`
   → `{delivered, queued}`, `chat_read(sessionId, chat, last_n?)` → compact transcript, and

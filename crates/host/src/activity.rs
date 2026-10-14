@@ -208,9 +208,18 @@ impl Host {
 
     /// A human client's selection changed.
     pub fn set_selection(&self, session: &str, nodes: Vec<String>) {
-        let _ = self.with_session(session, |s| {
-            s.selection = nodes.into_iter().take(200).collect();
-        });
+        let nodes: Vec<String> = nodes.into_iter().take(200).collect();
+        let changed = self
+            .with_session(session, |s| {
+                let changed = s.selection != nodes;
+                s.selection = nodes.clone();
+                changed
+            })
+            .unwrap_or(false);
+        self.human_seen.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+        if changed {
+            crate::director::on_selection(self, session, &nodes);
+        }
     }
 
     /// Node ids the humans on `canvas` have selected (all humans; deduplicated).
