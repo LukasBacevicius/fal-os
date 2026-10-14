@@ -19,6 +19,12 @@ pub const IDLE_AFTER: Duration = Duration::from_secs(10);
 const MAX_NODES: usize = 50;
 /// Gap between placed nodes and their neighbours (canvas units).
 pub const GAP: f64 = 40.0;
+/// A generating tile with no live job for this long turns `failed` (interrupted).
+pub const ORPHAN_GRACE: Duration = Duration::from_secs(60);
+/// How often generating tiles are checked for a live job.
+const GEN_SWEEP_EVERY: Duration = Duration::from_secs(10);
+/// The error an interrupted generating tile shows.
+pub const INTERRUPTED: &str = "interrupted: its job stopped (host restart or crash) · rerun it";
 
 /// Normalize an MCP `clientInfo.name` to the connect-flow client id.
 pub fn normalize_client(name: &str) -> String {
@@ -144,6 +150,72 @@ impl Host {
             self.emit(e);
         }
         self.chat.sweep(self);
+        let last = self.gen_swept.load(std::sync::atomic::Ordering::Relaxed);
+        if now - last >= GEN_SWEEP_EVERY.as_millis() as i64 {
+            self.gen_swept.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.sweep_generations(now, ORPHAN_GRACE.as_millis() as i64);
+        }
+    }
+
+    /// The LED tile watchdog: a generation node that isn't `failed` must have an owner, a
+    /// job in flight or a batch that will start one. One without for `grace` ms (the host
+    /// restarted mid-job, a task died) turns `failed` with [`INTERRUPTED`], so no tile spins
+    /// forever. Only canvases already loaded are checked. Returns the nodes it failed.
+    pub fn sweep_generations(&self, now: i64, grace: i64) -> Vec<String> {
+        let mut live: std::collections::HashSet<String> = self.jobs.lock().unwrap().keys().cloned().collect();
+        live.extend(self.batches.live_nodes());
+        let mut seen = std::collections::HashSet::new();
+        let mut expired = Vec::new();
+        for canvas in self.loaded_canvases() {
+            let gens: Vec<String> = self
+                .read(&canvas, |c| {
+                    c.nodes()
+                        .into_iter()
+                        .filter(|n| n.kind == falos_doc::NodeKind::Generation)
+                        .filter(|n| n.props.get("status").and_then(|s| s.as_str()) != Some("failed"))
+                        .map(|n| n.id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut orphans = self.gen_orphans.lock().unwrap();
+            for id in gens.into_iter().filter(|id| !live.contains(id)) {
+                let key = (canvas.clone(), id);
+                let first = *orphans.entry(key.clone()).or_insert(now);
+                seen.insert(key.clone());
+                if now - first >= grace {
+                    expired.push(key);
+                }
+            }
+        }
+        self.gen_orphans.lock().unwrap().retain(|k, _| seen.contains(k) && !expired.contains(k));
+        let actor = crate::fal::jobs_actor();
+        let mut failed = Vec::new();
+        for (canvas, node) in expired {
+            let props: falos_doc::Props = serde_json::from_value(json!({"status": "failed", "error": INTERRUPTED})).unwrap_or_default();
+            let ok = self
+                .mutate(&canvas, &actor.id, None, |c| {
+                    if c.node(&node).is_none_or(|n| n.kind != falos_doc::NodeKind::Generation) {
+                        return Ok(false);
+                    }
+                    c.apply(&actor, None, &[falos_doc::Command::UpdateNode { id: node.clone(), props }])?;
+                    Ok(true)
+                })
+                .unwrap_or(false);
+            if ok {
+                tracing::warn!("generation {node} had no live job; marked interrupted");
+                self.emit(Event::Job {
+                    canvas: canvas.clone(),
+                    node: node.clone(),
+                    model: String::new(),
+                    status: "failed".into(),
+                    queue_position: None,
+                    error: Some(INTERRUPTED.into()),
+                    cost: None,
+                });
+                failed.push(node);
+            }
+        }
+        failed
     }
 
     /// After every doc mutation: connect-flow `agent.first_write` and chat turn tracking.

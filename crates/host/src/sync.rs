@@ -179,6 +179,8 @@ async fn run(host: Arc<Host>, canvas: String, q: SyncQuery, mut socket: WebSocke
         "session": info,
         "sessions": host.sessions(),
         "claims": host.claims(&canvas),
+        // Jobs in flight: the client drops progress it remembers for anything else.
+        "jobs": host.jobs_snapshot(),
         // App nodes load from here: `<apps>/<project>/<app>/` (see apps.rs).
         "apps": crate::apps::base_url(),
         "project": host.id,

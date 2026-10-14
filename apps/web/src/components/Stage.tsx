@@ -17,6 +17,7 @@ import { SelectionPrompt } from './SelectionPrompt';
 import { addContext } from '../controller';
 import { TextLayer, createNote, editNode } from './TextLayer';
 import { installKeys, pointer } from '../keys';
+import { installWatchdog } from '../watchdog';
 import { theme } from '../theme';
 import { FloatingHead } from './AppMenu';
 import { VideoLayer } from './VideoLayer';
@@ -303,6 +304,8 @@ export function Stage() {
 
   // Keyboard: see keys.ts (one handler for the whole app).
   useEffect(() => installKeys(), []);
+  // Agent markers (activity, claims, job progress) can't outlive their owners.
+  useEffect(() => installWatchdog(), []);
 
   // Files from Finder and library tiles: sized ghosts at the pointer, the frame under it
   // highlighted, and the drop lands there as a grid (into the frame). Esc cancels (native).

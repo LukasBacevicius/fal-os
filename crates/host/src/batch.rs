@@ -120,6 +120,11 @@ impl Batches {
         self.0.lock().unwrap().get(id).cloned()
     }
 
+    /// Placeholder nodes of unfinished batches (queued ones have no job yet).
+    pub fn live_nodes(&self) -> std::collections::HashSet<String> {
+        self.0.lock().unwrap().values().filter(|b| !b.progress().finished).flat_map(|b| b.nodes.iter().cloned()).collect()
+    }
+
     /// Unfinished batches' `(generating, queued)` requests (chains count as generating).
     pub fn in_flight(&self) -> (usize, usize) {
         self.0.lock().unwrap().values().map(|b| b.progress()).filter(|p| !p.finished).fold((0, 0), |(g, q), p| {

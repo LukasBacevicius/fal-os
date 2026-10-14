@@ -54,6 +54,7 @@ export function ChatTabs() {
   const chat = useStore((s) => s.chat);
   const modHeld = useStore((s) => s.modHeld);
   const view = useStore((s) => s.chatView);
+  const conn = useStore((s) => s.conn);
   const list = useMemo(() => tabs(chat), [chat]);
   const [menu, setMenu] = useState<{ id: string; at: [number, number] } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -100,7 +101,9 @@ export function ChatTabs() {
     <div className="tabs-bar">
       <div className={`tabs${more}`} ref={strip} onScroll={measure} onWheel={(e) => { if (strip.current && Math.abs(e.deltaY) > Math.abs(e.deltaX)) strip.current.scrollLeft += e.deltaY; }}>
         {list.map((id, i) => {
-          const running = isRunning(chat, id);
+          // While the host is unreachable nobody can say a run is still going: no `*` (the
+          // host's chat.list on reconnect brings the truth).
+          const running = isRunning(chat, id) && (conn === 'connected' || conn === 'local');
           const on = id === chat.active && view === 'chat';
           return (
             <div

@@ -20,6 +20,7 @@ import type { NodeView, Presence } from './types';
 import { applyEvent, applyHistory, applyList, emptyChat, removeChat, selectChat, type ChatState, type Chip } from './chat';
 import { bootProject, loadScene, rememberProject, saveCamera, touchProject } from './projects';
 import { onActivity, onActivityClear } from './activity';
+import { reconcileJobs } from './watchdog';
 import { onAppEvent, setAppsBase } from './apps';
 import { clipNodes, restoreNodes } from './actions';
 
@@ -101,7 +102,7 @@ function dimmed(color: string, alpha: number): string {
   return color + Math.round(alpha * 255).toString(16).padStart(2, '0');
 }
 
-export interface JobInfo { node: string; model: string; status: string; queue_position?: number; error?: string }
+export interface JobInfo { node: string; model: string; status: string; queue_position?: number; error?: string; /** Local arrival (performance clock), for expiry. */ seen?: number }
 
 /** Cursors fade out this long after an actor's last presence change. */
 export const IDLE_MS = 10_000;
@@ -289,6 +290,10 @@ export class HostSync {
     this.ws = null;
     this.sessions.clear();
     this.publishPresence();
+    // Nobody can vouch for agent markers while the host is gone: claims and activity go now
+    // (the reconnect's hello brings back what's still true).
+    this.onClaims([]);
+    if (getState().activity.length) setState({ activity: [] });
     if (this.closed) return;
     setState({ conn: 'reconnecting' });
     this.failures++;
@@ -381,6 +386,8 @@ export class HostSync {
         this.me = m.session;
         this.sessions = new Map((m.sessions as SessionInfo[]).map((s) => [s.id, s]));
         this.onClaims(m.claims ?? []);
+        // Jobs the host no longer runs (it restarted, they ended while we were away) are over.
+        if (Array.isArray(m.jobs)) setState((s) => ({ jobs: reconcileJobs(s.jobs, m.jobs) }));
         this.publishPresence();
         setAppsBase(m.apps, m.project ?? this.project);
         break;
@@ -447,6 +454,7 @@ export class HostSync {
         this.sessions.delete(m.session);
         this.cursors.delete(m.session);
         this.publishPresence();
+        onActivityClear({ session: m.session });
         break;
       case 'claims':
         this.onClaims(m.claims);
@@ -455,7 +463,7 @@ export class HostSync {
         toast(`@${m.by} took over ${m.node} from @${m.actor}`);
         break;
       case 'job':
-        setState((s) => ({ jobs: { ...s.jobs, [m.node]: m as JobInfo } }));
+        setState((s) => ({ jobs: { ...s.jobs, [m.node]: { ...(m as JobInfo), seen: performance.now() } } }));
         break;
       case 'error': {
         const msg = String(m.message ?? '');

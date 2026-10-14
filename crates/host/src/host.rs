@@ -365,6 +365,11 @@ pub struct Host {
     autosaver: std::sync::Once,
     project: Mutex<Project>,
     canvases: Mutex<HashMap<String, Arc<Mutex<Open>>>>,
+    /// Generating tiles without a live job: (canvas, node) → first seen so (ms). See
+    /// `sweep_generations`.
+    pub(crate) gen_orphans: Mutex<HashMap<(String, String), i64>>,
+    /// Last generation sweep (ms).
+    pub(crate) gen_swept: std::sync::atomic::AtomicI64,
     sessions: Mutex<HashMap<String, Session>>,
     claims: Mutex<BTreeMap<(String, String), ClaimInfo>>,
     idempotency: Mutex<HashMap<(String, String), (Instant, String)>>,
@@ -502,6 +507,8 @@ impl Host {
             autosaver: std::sync::Once::new(),
             project: Mutex::new(project),
             canvases: Mutex::default(),
+            gen_orphans: Mutex::default(),
+            gen_swept: Default::default(),
             sessions: Mutex::default(),
             claims: Mutex::default(),
             idempotency: Mutex::default(),
@@ -1146,6 +1153,18 @@ impl Host {
                 self.chat.ext_session_closed(self, chat);
             }
         }
+    }
+
+    /// Ids of the canvases loaded in memory.
+    pub(crate) fn loaded_canvases(&self) -> Vec<String> {
+        self.canvases.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Jobs in flight (`queued` / `running`), for a client that (re)connects: anything it
+    /// remembers that isn't here is over.
+    pub fn jobs_snapshot(&self) -> serde_json::Value {
+        let jobs = self.jobs.lock().unwrap();
+        serde_json::Value::Array(jobs.iter().map(|(node, status)| serde_json::json!({"node": node, "status": status})).collect())
     }
 
     /// Run `f` on the session table.
