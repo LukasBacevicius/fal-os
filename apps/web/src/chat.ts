@@ -637,7 +637,10 @@ export function groupTurns(items: Item[]): Turn[] {
       start(it.key, it);
       continue;
     }
-    const t: Turn = cur ?? start(`t${it.key}`, null);
+    // After a done line, more output is a new turn (an external agent's next report must not
+    // fold the previous one into its collapsed work section). A late error stays with its turn.
+    const open = cur as Turn | null;
+    const t: Turn = open && (!open.done || it.type === 'error') ? open : start(`t${it.key}`, null);
     if (it.type === 'text' || it.type === 'question' || it.type === 'files' || it.type === 'app') t.final.push(it);
     else if (it.type === 'error') t.errors.push(it);
     else if (it.type === 'done') t.done = it;
