@@ -193,7 +193,7 @@ impl Seen {
         let notice = |v: &Json, body: String| Notice {
             project: v["project"].as_str().unwrap_or_default().into(),
             chat: v["chat"].as_str().unwrap_or_default().into(),
-            title: clip(v["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("fal-os"), 60),
+            title: clip(v["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("fal OS"), 60),
             body,
         };
         let mut live = HashSet::new();
@@ -279,7 +279,7 @@ pub fn start(app: &AppHandle) -> tauri::Result<()> {
     let tray = TrayIconBuilder::with_id("falos")
         .icon(icon(false))
         .icon_as_template(true)
-        .tooltip("fal-os")
+        .tooltip("fal OS")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .build(app)?;

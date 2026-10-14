@@ -376,7 +376,7 @@ export function ChatPanel() {
               </div>
             )}
             {conn === 'connected' && chat.runtime === 'missing' && <div className="dim">agent runtime not connected</div>}
-            {conn === 'local' && <div className="dim">no fal-os host: chat is unavailable</div>}
+            {conn === 'local' && <div className="dim">no fal OS host: chat is unavailable</div>}
             {t.running && !subView && (
               <div className="faint">
                 running · <button className="link" title="stop the run (esc in the input)" onClick={() => chat.active && hostSync()?.stopChat(chat.active)}>[stop]</button>

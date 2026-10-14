@@ -20,7 +20,7 @@ const CLIENTS: ClientDef[] = [
   {
     id: 'claude', label: 'Claude Code', register: 'claude', config: '~/.claude.json',
     snippet: (u, t) => `claude mcp add --transport http fal-os ${u} --header "Authorization: Bearer ${t}"`,
-    restart: 'Restart Claude Code (or run /mcp) so it picks up fal-os.',
+    restart: 'Restart Claude Code (or run /mcp) so it picks up fal OS.',
   },
   {
     id: 'codex', label: 'Codex', register: 'codex', config: '~/.codex/config.toml',
@@ -30,7 +30,7 @@ const CLIENTS: ClientDef[] = [
   {
     id: 'cursor', label: 'Cursor', register: 'cursor', config: '~/.cursor/mcp.json',
     snippet: (u, t) => json(u, t, false),
-    restart: 'Reload Cursor (Settings → MCP shows fal-os).',
+    restart: 'Reload Cursor (Settings → MCP shows fal OS).',
   },
   {
     id: 'gemini', label: 'Gemini', register: 'gemini', config: '~/.gemini/settings.json',
@@ -50,9 +50,9 @@ const CLIENTS: ClientDef[] = [
 ];
 
 const PROMPTS = [
-  'In fal-os, make a moodboard for a neon Tokyo night shoot',
-  'In fal-os, look at my selection and generate 4 variations of it',
-  'In fal-os, lay out a storyboard for a 15s headphones ad in a frame',
+  'In fal OS, make a moodboard for a neon Tokyo night shoot',
+  'In fal OS, look at my selection and generate 4 variations of it',
+  'In fal OS, lay out a storyboard for a 15s headphones ad in a frame',
 ];
 
 /** Whether a host `client` key (normalized) belongs to a tab. */
@@ -152,10 +152,10 @@ export function ConnectModal() {
           {tab === 'director' ? (
             <>
               <div className="step">
-                <div className="step-head">use fal-os from your own Claude and Codex</div>
+                <div className="step-head">use fal OS from your own Claude and Codex</div>
                 <div className="step-body faint">
                   they direct: generate and lay out here, hand exported files to other apps (editors via computer use) and bring results back with lineage.
-                  one click adds the fal-os MCP server and the fal-os skill to each.
+                  one click adds the fal OS MCP server and the fal OS skill to each.
                 </div>
               </div>
               <div className="step-body">
@@ -182,7 +182,7 @@ export function ConnectModal() {
                 {reg && !reg.ok && <div className="err">couldn’t update the config: {reg.error ?? 'unknown error'}</div>}
               </div>
             ) : (
-              <div className="step-body faint">add fal-os to your client’s MCP servers:</div>
+              <div className="step-body faint">add fal OS to your client’s MCP servers:</div>
             )}
             <div className="step-body">
               {def.register && (

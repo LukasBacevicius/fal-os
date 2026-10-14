@@ -343,7 +343,7 @@ fn main() {
                 Err(_) => WebviewUrl::default(),
             };
             let mut win = WebviewWindowBuilder::new(app, "main", url)
-                .title("fal-os")
+                .title("fal OS")
                 .inner_size(1440.0, 900.0)
                 // Let drops reach the page as HTML5 drag events with File objects (Tauri's own
                 // handler would swallow them; the canvas does its own drop import).

@@ -32,7 +32,7 @@ export function Mark({ lit, className = '' }: { lit: boolean; className?: string
     <span
       className={`falos-mark ${lit ? 'lit' : ''} ${reduce ? 'still' : ''} ${className}`}
       role="img"
-      aria-label={lit ? 'fal-os: agents working' : 'fal-os'}
+      aria-label={lit ? 'fal OS: agents working' : 'fal OS'}
       title={lit ? 'agents working' : undefined}
     >
       {''}

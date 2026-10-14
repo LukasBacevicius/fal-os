@@ -70,7 +70,7 @@ export function DirectorConnect() {
           {writes.map(({ t, f }) => (
             <div key={f.path} className="faint">
               {'  '}
-              {f.connect} {tilde(f.path)} <span className="dim">({f.what === 'mcp' ? `fal-os MCP server, ${t.transport}` : 'fal-os skill'})</span>
+              {f.connect} {tilde(f.path)} <span className="dim">({f.what === 'mcp' ? `fal OS MCP server, ${t.transport}` : 'fal OS skill'})</span>
             </div>
           ))}
         </div>

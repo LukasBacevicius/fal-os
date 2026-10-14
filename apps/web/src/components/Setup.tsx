@@ -360,7 +360,7 @@ export function Setup() {
     <div className="modal" onPointerDown={close}>
       <div className="connect setup" onPointerDown={(e) => e.stopPropagation()}>
         <div className="connect-body">
-          <div className="dim">set up fal-os</div>
+          <div className="dim">set up fal OS</div>
           {s.error && <div className="err">setup helper failed: {s.error}</div>}
 
           <div className="step">
@@ -375,7 +375,7 @@ export function Setup() {
             )}
             {!s.falKey && s.keychainKey && (
               <div className="step-body">
-                <div className="faint">an earlier fal-os kept your key in the Keychain. macOS asks once to let fal-os read it: click Allow.</div>
+                <div className="faint">an earlier fal OS kept your key in the Keychain. macOS asks once to let fal OS read it: click Allow.</div>
                 <div className="setup-row">
                   <button className="btn" onClick={() => void migrate()} disabled={!!busy}>{busy === 'moving' ? 'moving…' : 'use that key'}</button>
                   <span className="faint">or paste a key below</span>
@@ -537,7 +537,7 @@ export function Setup() {
                 </div>
 
                 <div className="step">
-                  <div className="step-head">your own Claude / Codex (they direct fal-os and your other apps)</div>
+                  <div className="step-head">your own Claude / Codex (they direct fal OS and your other apps)</div>
                   <div className="step-body">
                     <DirectorConnect />
                   </div>

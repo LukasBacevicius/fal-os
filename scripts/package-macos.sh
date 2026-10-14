@@ -28,7 +28,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 OUT_DIR="${OUT_DIR:-$CARGO_TARGET_DIR/package}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 MIN_FREE_GB="${MIN_FREE_GB:-4}"
-APP_NAME=fal-os
+APP_NAME="fal OS"
+FILE_NAME=fal-os  # DMG file name: no spaces, easy to share
 VERSION=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' apps/desktop/src-tauri/tauri.conf.json)
 BUILD=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
 ARCH=$(uname -m)
@@ -165,7 +166,7 @@ codesign -dv "$APP" 2>&1 | grep -E '^(Identifier|Signature|TeamIdentifier|Format
 
 # ---- DMG ---------------------------------------------------------------------------------------
 say "DMG"
-DMG="$OUT_DIR/$APP_NAME-$VERSION-$ARCH.dmg"
+DMG="$OUT_DIR/$FILE_NAME-$VERSION-$ARCH.dmg"
 STAGE=$(mktemp -d)
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"

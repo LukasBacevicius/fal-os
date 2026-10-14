@@ -201,7 +201,7 @@ export function ProjectPicker() {
           />
         </div>
         <div className="palette-list" ref={listRef}>
-          {unavailable && <div className="faint proj-note">this host has a single canvas · projects need a newer fal-os host</div>}
+          {unavailable && <div className="faint proj-note">this host has a single canvas · projects need a newer fal OS host</div>}
           {rows.map((p, i) => {
             const n = running(p);
             const on = i === Math.min(sel, rows.length - 1) && mode.kind === 'list';
