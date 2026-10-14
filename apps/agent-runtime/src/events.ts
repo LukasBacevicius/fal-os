@@ -361,6 +361,9 @@ export function pastTense(label: string): string {
 
 /** Never show SDK diagnostics (`[ede_diagnostic] …`) to users. */
 export function scrubError(msg: string): string {
+  // Sign-in problems are the user's to fix: say so instead of "stopped mid-step".
+  if (/failed to authenticate|oauth (session|token)|not logged in|please run \/login|invalid api key|authentication_error/i.test(msg))
+    return "Claude isn't signed in (the login expired): run `claude` in a terminal and /login, then continue";
   if (/ede_diagnostic|error_during_execution|returned an error result/i.test(msg)) return "the director stopped mid-step";
   return msg.slice(0, 300);
 }
