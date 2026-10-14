@@ -574,7 +574,11 @@ pub async fn package(host: &Arc<Host>, actor: &Actor, session: Option<&str>, can
     match kind {
         "project" => {
             entries.push(("project.json".into(), host.dir().join("project.json")));
+            // The canvas files only: not the backup ring (`.bak/`), temp or set-aside files.
             for e in std::fs::read_dir(host.dir().join("canvases")).into_iter().flatten().flatten() {
+                if !e.file_name().to_string_lossy().ends_with(".loro") || !e.path().is_file() {
+                    continue;
+                }
                 entries.push((format!("canvases/{}", e.file_name().to_string_lossy()), e.path()));
             }
             for a in &referenced {

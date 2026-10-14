@@ -12,7 +12,7 @@ pub use canvas::{
     ActorChanges, Canvas, Command, EditResult, Props, StaleReport, TxResult, Version,
 };
 pub use model::*;
-pub use project::{CanvasEntry, Project};
+pub use project::{CanvasEntry, FORMAT, Project, canvas_path, sync_dir, sync_file, write_durable};
 pub use provenance::*;
 pub use text::{ReadOpts, anchor_to_text, parse_anchor_text};
 
